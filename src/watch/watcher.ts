@@ -6,7 +6,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { config } from '../config.js';
 import { getSignaturesForAddress, getTransaction, type RawTransaction, type SignatureInfo } from '../chain/rpc.js';
 import { log, safeErrorMessage } from '../log.js';
-import { parseLeaderTrades, type LeaderTrade } from './parse.js';
+import { parseLeaderTrades, PUMP_AMM_PROGRAM, PUMP_PROGRAM, type LeaderTrade } from './parse.js';
 
 export interface WatcherDeps {
   leaders: () => string[];
@@ -14,9 +14,11 @@ export interface WatcherDeps {
   pollMs: number;
   getSignatures?: (leader: string, until?: string) => Promise<SignatureInfo[]>;
   getTransaction?: (signature: string) => Promise<RawTransaction | null>;
-  /** Subscribe to a wallet's transactions; returns an unsubscribe function. */
-  subscribe?: (leader: string, onSignature: (signature: string) => void) => () => void;
+  /** Subscribe to a wallet's transactions (with their logs when known); returns an unsubscribe function. */
+  subscribe?: (leader: string, onSignature: (signature: string, logs?: string[]) => void) => () => void;
   fetchRetryMs?: number;
+  /** Transaction fetches in flight at once (a very busy wallet must not flood the RPC). */
+  maxConcurrentFetches?: number;
 }
 
 const SEEN_CAP = 20_000;
@@ -33,7 +35,7 @@ export function websocketSubscriber(): WatcherDeps['subscribe'] {
   return (leader, onSignature) => {
     let id: number | null = null;
     try {
-      id = conn.onLogs(new PublicKey(leader), (l) => { if (!l.err) onSignature(l.signature); }, 'confirmed');
+      id = conn.onLogs(new PublicKey(leader), (l) => { if (!l.err) onSignature(l.signature, l.logs); }, 'confirmed');
     } catch (err) {
       log.warn('log subscription failed; polling only', { leader, error: safeErrorMessage(err) });
     }
@@ -91,7 +93,7 @@ export class Watcher {
       for (const leader of wanted) {
         if (!this.cursors.has(leader)) {
           this.cursors.set(leader, null);
-          if (this.deps.subscribe) this.unsubs.set(leader, this.deps.subscribe(leader, (sig) => this.handle(sig, leader)));
+          if (this.deps.subscribe) this.unsubs.set(leader, this.deps.subscribe(leader, (sig, logs) => this.handle(sig, leader, logs)));
         }
       }
       await Promise.all([...wanted].map((leader) => this.poll(leader)));
@@ -126,11 +128,12 @@ export class Watcher {
     }
   }
 
-  /** Fetch, parse and pass on one signature, once. */
-  handle(signature: string, leader: string): void {
+  /** Fetch, parse and pass on one signature, once. Logs that never mention pump.fun / PumpSwap skip the fetch. */
+  handle(signature: string, leader: string, logs?: string[]): void {
     const key = `${signature}:${leader}`;
     if (this.seen.has(key)) return;
     this.seen.add(key);
+    if (logs && logs.length && !logs.some((l) => l.includes(PUMP_PROGRAM) || l.includes(PUMP_AMM_PROGRAM))) return;
     if (this.seen.size > SEEN_CAP) {
       const first = this.seen.values().next().value;
       if (first) this.seen.delete(first);
@@ -140,7 +143,35 @@ export class Watcher {
     void job.finally(() => this.pending.delete(job));
   }
 
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+
+  private async slot(): Promise<() => void> {
+    const max = this.deps.maxConcurrentFetches ?? 6;
+    if (this.active >= max) await new Promise<void>((r) => this.waiting.push(r));
+    this.active++;
+    return () => {
+      this.active--;
+      this.waiting.shift()?.();
+    };
+  }
+
   private async process(signature: string, leader: string): Promise<void> {
+    const release = await this.slot();
+    let tx: RawTransaction | null = null;
+    try {
+      tx = await this.fetchTx(signature);
+    } finally {
+      release();
+    }
+    if (!tx) return;
+    for (const t of parseLeaderTrades(tx, leader)) {
+      log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, signature });
+      await this.deps.onTrade(t);
+    }
+  }
+
+  private async fetchTx(signature: string): Promise<RawTransaction | null> {
     let tx: RawTransaction | null = null;
     for (let i = 0; i < FETCH_TRIES && !tx; i++) {
       try {
@@ -150,11 +181,7 @@ export class Watcher {
       }
       if (!tx) await new Promise((r) => setTimeout(r, (this.deps.fetchRetryMs ?? 400) * (i + 1)));
     }
-    if (!tx) return;
-    for (const t of parseLeaderTrades(tx, leader)) {
-      log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, signature });
-      await this.deps.onTrade(t);
-    }
+    return tx;
   }
 
   async drain(): Promise<void> {

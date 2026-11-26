@@ -257,24 +257,50 @@ describe('timed sells, stop loss, dead coin', () => {
     expect(open()[0]!.tokensHeld).toBe(25_000n);
   });
 
-  it('a failed timed sell is retried, and gives up after three tries', async () => {
-    const first = addCopy({ sell: { mirror: { enabled: false }, timed: [{ afterSec: 1, percent: 100 }] } });
+  it('a failed timed sell is retried after a pause, not on every tick', async () => {
+    addCopy({ sell: { mirror: { enabled: false }, timed: [{ afterSec: 1, percent: 100 }] } });
     await engine.onLeaderTrade(trade());
     await engine.idle();
     ex.failNextSell = 1;
     clock += 1000; await engine.tick(); await engine.idle();
+    clock += 1000; await engine.tick(); await engine.idle(); // retry not due yet (2 s pause)
     expect(open()).toHaveLength(1);
+    expect(feed().filter((f) => /retrying/.test(f))).toHaveLength(1);
     clock += 1000; await engine.tick(); await engine.idle();
     expect(open()).toHaveLength(0);
-    // three failures in a row: stage marked done, error in the feed
-    store.updateCopy(userId, first.id, { ...first.s, enabled: false });
-    addCopy({ name: 'second', oncePerCoin: false, sell: { mirror: { enabled: false }, timed: [{ afterSec: 1, percent: 100 }] } });
-    await engine.onLeaderTrade(trade({ mint: 'Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA' }));
+  });
+
+  it('keeps retrying with longer pauses, then gives up and says to use Sell now', async () => {
+    addCopy({ sell: { mirror: { enabled: false }, timed: [{ afterSec: 1, percent: 100 }] } });
+    await engine.onLeaderTrade(trade());
     await engine.idle();
-    ex.failNextSell = 3;
-    for (let i = 0; i < 4; i++) { clock += 1000; await engine.tick(); await engine.idle(); }
+    ex.failNextSell = 100;
+    for (let i = 0; i < 12; i++) { clock += 61_000; await engine.tick(); await engine.idle(); }
     expect(open()).toHaveLength(1);
-    expect(feed().some((f) => /gave up/i.test(f))).toBe(true);
+    expect(feed().some((f) => /gave up.*8 failed tries.*Sell now/i.test(f))).toBe(true);
+    ex.failNextSell = 0;
+    clock += 61_000; await engine.tick(); await engine.idle();
+    expect(open()).toHaveLength(1); // given up: no more automatic tries
+  });
+
+  it('a failed "sell when they sell" is retried too', async () => {
+    addCopy({ sell: { mirror: { enabled: true, mode: 'all' } } });
+    await engine.onLeaderTrade(trade());
+    await engine.idle();
+    ex.failNextSell = 1;
+    await engine.onLeaderTrade(trade({ side: 'sell', tokensBefore: 2_000_000n, tokensAfter: 0n, tokenAmount: 2_000_000n }));
+    await engine.idle();
+    expect(open()).toHaveLength(1);
+    clock += 2000; await engine.tick(); await engine.idle();
+    expect(open()).toHaveLength(0);
+  });
+
+  it('rate-limit errors read in plain words', async () => {
+    addCopy({ sell: { mirror: { enabled: false } } });
+    ex.buy = async () => ({ ok: false, error: 'failed to get info about account X: Error: 429 Too Many Requests: {"jsonrpc":"2.0"}' });
+    await engine.onLeaderTrade(trade());
+    await engine.idle();
+    expect(feed()[0]).toMatch(/RPC is busy/);
   });
 
   it('after a restart, overdue timed sells fire straight away', async () => {

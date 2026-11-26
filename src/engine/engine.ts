@@ -5,7 +5,7 @@
 // one sells its percent of what is left at that moment.
 import type { Keypair } from '@solana/web3.js';
 import { lamportsToSol } from '../config.js';
-import { log, safeErrorMessage } from '../log.js';
+import { friendlyError, log, safeErrorMessage } from '../log.js';
 import type { CopyRow, Position, Store } from '../store.js';
 import { soldShare, type LeaderTrade } from '../watch/parse.js';
 import type { Executor } from './executor.js';
@@ -25,7 +25,9 @@ export interface EngineDeps {
   staleSec?: number;
 }
 
-const MAX_SELL_TRIES = 3;
+/** An automatic sell that fails is retried after these pauses, then given up (Sell now stays available). */
+const RETRY_MS = [2_000, 4_000, 8_000, 15_000, 30_000, 60_000, 60_000];
+const MAX_SELL_TRIES = RETRY_MS.length + 1;
 /** Dead coin needs a recent successful quote: an RPC outage is not "no trades". */
 const QUOTE_FRESH_MS = 15_000;
 
@@ -61,7 +63,7 @@ export class Engine {
   private readonly now: () => number;
   private readonly queues = new Map<number, Promise<unknown>>();
   private readonly inFlight = new Set<string>();
-  private readonly failures = new Map<string, number>();
+  private readonly retries = new Map<string, { positionId: number; order: SellOrder; tries: number; nextAt: number }>();
   private readonly lastQuoteAt = new Map<number, number>();
   private readonly quoteOkAt = new Map<number, number>();
 
@@ -85,7 +87,10 @@ export class Engine {
         if (p.leader !== t.leader || p.mint !== t.mint || !p.sell.mirror.enabled) continue;
         const share = soldShare(t);
         const percent = p.sell.mirror.mode === 'all' || share >= 0.995 ? 100 : share * 100;
-        jobs.push(this.enqueue(p.id, () => this.sell(p.id, { reason: 'mirror', percent })));
+        const order: SellOrder = { reason: 'mirror', percent, tag: t.signature };
+        const key = this.orderKey(p.id, order);
+        this.inFlight.add(key);
+        jobs.push(this.enqueue(p.id, () => this.sell(p.id, order)).finally(() => this.inFlight.delete(key)));
       }
     }
     await Promise.all(jobs);
@@ -130,7 +135,7 @@ export class Engine {
       if (!fill.ok) {
         store.updatePosition(id, { status: 'failed', closedAt: this.now() });
         store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: 0n, lamports, signature: null, simulated: false, error: fill.error });
-        store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label} failed: ${fill.error}`, mint: t.mint, signature: t.signature });
+        store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label} failed: ${friendlyError(fill.error)}`, mint: t.mint, signature: t.signature });
         return;
       }
       const now = this.now();
@@ -143,12 +148,16 @@ export class Engine {
       });
     } catch (err) {
       store.updatePosition(id, { status: 'failed', closedAt: this.now() });
-      store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label} failed: ${safeErrorMessage(err)}`, mint: t.mint });
+      store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label} failed: ${friendlyError(safeErrorMessage(err))}`, mint: t.mint });
     }
   }
 
   // ── the clock ─────────────────────────────────────────────────────────
   async tick(): Promise<void> {
+    const now = this.now();
+    for (const [key, r] of this.retries) {
+      if (r.nextAt <= now && !this.inFlight.has(key)) this.run(r.positionId, r.order);
+    }
     const positions = this.deps.store.activePositions().filter((p) => p.status === 'open');
     await Promise.all(positions.map((p) => this.tickOne(p)));
   }
@@ -171,14 +180,23 @@ export class Engine {
     }
     for (const order of dueSells(view, now)) {
       if (order.reason === 'dead_coin' && now - (this.quoteOkAt.get(p.id) ?? 0) > QUOTE_FRESH_MS) continue;
-      const key = `${p.id}:${order.reason}:${order.stage ?? ''}`;
-      if (this.inFlight.has(key)) continue;
-      this.inFlight.add(key);
-      void this.enqueue(p.id, () => this.sell(p.id, order)).finally(() => this.inFlight.delete(key));
+      if (this.retries.has(this.orderKey(p.id, order))) continue; // waiting for its retry time
+      this.run(p.id, order);
     }
   }
 
   // ── selling ───────────────────────────────────────────────────────────
+  private orderKey(positionId: number, order: SellOrder): string {
+    return `${positionId}:${order.reason}:${order.stage ?? ''}:${order.tag ?? ''}`;
+  }
+
+  private run(positionId: number, order: SellOrder): void {
+    const key = this.orderKey(positionId, order);
+    if (this.inFlight.has(key)) return;
+    this.inFlight.add(key);
+    void this.enqueue(positionId, () => this.sell(positionId, order)).finally(() => this.inFlight.delete(key));
+  }
+
   async sellNow(userId: number, positionId: number): Promise<{ ok: boolean; error?: string }> {
     const p = this.deps.store.position(positionId);
     if (!p || p.userId !== userId || p.status !== 'open') return { ok: false, error: 'no open position with that id' };
@@ -222,7 +240,7 @@ export class Engine {
       const fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, live: p.mode === 'live' });
       if (!fill.ok) return this.sellFailed(p, order, label, fill.error);
 
-      this.failures.delete(`${p.id}:${order.reason}:${order.stage ?? ''}`);
+      this.retries.delete(this.orderKey(p.id, order));
       let left = live ? await executor.tokenBalance(owner, p.mint) : held - fill.tokens;
       if (left < 0n) left = 0n;
       const closed = left === 0n;
@@ -245,22 +263,25 @@ export class Engine {
     }
   }
 
-  private sellFailed(p: Position, order: SellOrder, label: string, error: string): { ok: boolean; error: string } {
+  private sellFailed(p: Position, order: SellOrder, label: string, rawError: string): { ok: boolean; error: string } {
     const { store } = this.deps;
+    const error = friendlyError(rawError);
     const why = REASON_TEXT[order.reason](order, p);
-    if (order.reason === 'mirror' || order.reason === 'manual') {
+    if (order.reason === 'manual') {
       store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error}`, mint: p.mint });
       return { ok: false, error };
     }
-    const key = `${p.id}:${order.reason}:${order.stage ?? ''}`;
-    const tries = (this.failures.get(key) ?? 0) + 1;
-    this.failures.set(key, tries);
+    const key = this.orderKey(p.id, order);
+    const tries = (this.retries.get(key)?.tries ?? 0) + 1;
     if (tries >= MAX_SELL_TRIES) {
-      this.failures.delete(key);
+      this.retries.delete(key);
       store.updatePosition(p.id, this.markDone(p, order));
-      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Gave up on the ${why} of ${label} after ${tries} failed tries: ${error}`, mint: p.mint });
+      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Gave up on the ${why} of ${label} after ${tries} failed tries: ${error}. Use Sell now.`, mint: p.mint });
     } else {
-      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed, retrying: ${error}`, mint: p.mint });
+      const wait = RETRY_MS[tries - 1]!;
+      this.retries.set(key, { positionId: p.id, order, tries, nextAt: this.now() + wait });
+      // One feed line per failing sell, not one per retry.
+      if (tries === 1) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error} — retrying`, mint: p.mint });
     }
     return { ok: false, error };
   }

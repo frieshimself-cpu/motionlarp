@@ -12,7 +12,7 @@ function setup() {
   let sigs: SignatureInfo[] = [{ signature: 'old1', slot: 1, err: null, blockTime: 1 }];
   const fetched: string[] = [];
   const trades: LeaderTrade[] = [];
-  let logCb: ((sig: string) => void) | null = null;
+  let logCb: ((sig: string, logs?: string[]) => void) | null = null;
   const w = new Watcher({
     leaders: () => [LEADER],
     onTrade: async (t) => { trades.push(t); },
@@ -22,7 +22,7 @@ function setup() {
     subscribe: (_leader, cb) => { logCb = cb; return () => { logCb = null; }; },
     fetchRetryMs: 1,
   });
-  return { w, trades, fetched, push: (s: SignatureInfo[]) => { sigs = [...s, ...sigs]; }, ws: (s: string) => logCb?.(s) };
+  return { w, trades, fetched, push: (s: SignatureInfo[]) => { sigs = [...s, ...sigs]; }, ws: (s: string, logs?: string[]) => logCb?.(s, logs) };
 }
 
 describe('Watcher', () => {
@@ -60,6 +60,27 @@ describe('Watcher', () => {
     expect(fetched.includes('bad')).toBe(false);
     expect(fetched.filter((s) => s === 'missing').length).toBeGreaterThan(1);
     expect(trades).toEqual([]);
+  });
+
+  it('a socket notification whose logs never touch pump.fun is not fetched', async () => {
+    const { w, ws, fetched } = setup();
+    await w.sync();
+    ws('transfer1', ['Program 11111111111111111111111111111111 invoke [1]', 'Program 11111111111111111111111111111111 success']);
+    ws(SIG, ['Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]']);
+    await w.drain();
+    expect(fetched).toEqual([SIG]);
+  });
+
+  it('never runs more than the allowed fetches at once', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const w = new Watcher({
+      leaders: () => [LEADER], onTrade: async () => {}, pollMs: 0, getSignatures: async () => [], maxConcurrentFetches: 2, fetchRetryMs: 1,
+      getTransaction: async () => { inFlight++; peak = Math.max(peak, inFlight); await new Promise((r) => setTimeout(r, 5)); inFlight--; return buyTx; },
+    });
+    for (let i = 0; i < 10; i++) w.handle(`s${i}`, LEADER);
+    await w.drain();
+    expect(peak).toBe(2);
   });
 
   it('unsubscribes a leader nobody follows any more', async () => {

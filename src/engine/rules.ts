@@ -10,6 +10,8 @@ export interface SellOrder {
   percent: number;
   /** Index of the timed sell / stop loss level that fired. */
   stage?: number;
+  /** Distinguishes two orders of the same kind (e.g. the leader selling twice). */
+  tag?: string;
 }
 
 export interface PositionView {

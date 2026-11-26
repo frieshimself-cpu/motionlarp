@@ -62,3 +62,13 @@ export function safeErrorMessage(err: unknown, max = 200): string {
   const raw = err instanceof Error ? err.message : String(err);
   return scrubText(raw).slice(0, max);
 }
+
+/** Short, plain-words version of an error for the user's feed. */
+export function friendlyError(text: string): string {
+  if (/429|too many requests|rate limit/i.test(text)) return 'the Solana RPC is busy / rate limiting (a paid RPC fixes this)';
+  if (/insufficient lamports|insufficient funds/i.test(text)) return 'not enough SOL in the wallet';
+  if (/blockhash not found|block height exceeded/i.test(text)) return 'the transaction expired before landing';
+  if (/slippage|TooMuchSolRequired|TooLittleSolReceived|ExceededSlippage/i.test(text)) return 'price moved more than your slippage allows';
+  if (/fetch failed|ECONNRESET|ETIMEDOUT|aborted|timeout/i.test(text)) return 'could not reach the Solana RPC';
+  return text.length > 160 ? `${text.slice(0, 157)}…` : text;
+}
