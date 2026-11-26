@@ -1,0 +1,25 @@
+# One command on a server: `docker compose up -d --build`. Caddy gets the HTTPS certificate by itself.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      SECURE_COOKIES: "true"
+      DB_PATH: /data/motionlarp.db
+    volumes:
+      - data:/data
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env, e.g. copy.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [app]
+volumes:
+  data:
+  caddy_data:

@@ -107,7 +107,7 @@ export class Watcher {
     let sigs: SignatureInfo[];
     const cursor = this.cursors.get(leader);
     try {
-      sigs = await this.getSigs(leader, cursor ?? undefined);
+      sigs = await this.getSigs(leader, cursor || undefined); // "" = started, wallet had no history
     } catch (err) {
       log.warn('signature poll failed', { leader, error: safeErrorMessage(err) });
       return;

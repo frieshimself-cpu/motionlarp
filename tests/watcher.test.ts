@@ -83,6 +83,22 @@ describe('Watcher', () => {
     expect(peak).toBe(2);
   });
 
+  it('a wallet with no history yet: later polls send no empty cursor and pick up its first trade', async () => {
+    const untils: (string | undefined)[] = [];
+    let sigs: SignatureInfo[] = [];
+    const trades: LeaderTrade[] = [];
+    const w = new Watcher({
+      leaders: () => [LEADER], onTrade: async (t) => { trades.push(t); }, pollMs: 0, fetchRetryMs: 1,
+      getSignatures: async (_l, until) => { untils.push(until); return sigs; },
+      getTransaction: async (s) => (s === SIG ? buyTx : null),
+    });
+    await w.sync();
+    sigs = [{ signature: SIG, slot: 2, err: null, blockTime: 2 }];
+    await w.sync();
+    expect(untils).toEqual([undefined, undefined]);
+    expect(trades).toHaveLength(1);
+  });
+
   it('unsubscribes a leader nobody follows any more', async () => {
     let leaders = [LEADER];
     let unsubscribed = 0;
