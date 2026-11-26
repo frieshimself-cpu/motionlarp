@@ -41,8 +41,8 @@ export interface AppDeps {
 
 const COOKIE = 'ml_session';
 const ADMIN_COOKIE = 'ml_admin';
-const ADMIN_HOURS = 12;
-const SESSION_DAYS = 30;
+const ADMIN_DAYS = 30;
+const SESSION_DAYS = 90; // from the last visit: a session renews itself while it is used
 const MAX_BODY = 64 * 1024;
 const PUBLIC_DIR = fileURLToPath(new URL('../../public/', import.meta.url));
 
@@ -165,14 +165,12 @@ export function createApp(deps: AppDeps): Server {
   }
 
   // ── admin: a password only the owner has; its own short-lived cookie ──
-  const adminSessions = new Map<string, number>();
   const adminLimiter = new Limiter(5, 15 * 60_000);
 
   function isAdmin(req: IncomingMessage): boolean {
     const token = cookies(req)[ADMIN_COOKIE];
     if (!token) return false;
-    const until = adminSessions.get(sha256(token));
-    return !!until && until > Date.now();
+    return store.adminSessionValid(sha256(token));
   }
 
   function passwordMatches(given: string): boolean {
@@ -225,13 +223,13 @@ export function createApp(deps: AppDeps): Server {
       const b = await readJson(req);
       if (!passwordMatches(String(b.password ?? ''))) throw new HttpError(401, 'wrong password');
       const token = newToken();
-      adminSessions.set(sha256(token), Date.now() + ADMIN_HOURS * 3_600_000);
-      res.setHeader('set-cookie', `${ADMIN_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${ADMIN_HOURS * 3600}${deps.secureCookies ? '; Secure' : ''}`);
+      store.createAdminSession(sha256(token), Date.now() + ADMIN_DAYS * 86_400_000);
+      res.setHeader('set-cookie', `${ADMIN_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${ADMIN_DAYS * 86_400}${deps.secureCookies ? '; Secure' : ''}`);
       return json(res, 200, { ok: true });
     }
     if (!isAdmin(req)) throw new HttpError(401, 'admin login needed');
     if (path === '/api/admin/logout' && method === 'POST') {
-      adminSessions.delete(sha256(cookies(req)[ADMIN_COOKIE] ?? ''));
+      store.deleteAdminSession(sha256(cookies(req)[ADMIN_COOKIE] ?? ''));
       res.setHeader('set-cookie', `${ADMIN_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
       return json(res, 200, { ok: true });
     }
@@ -282,10 +280,22 @@ export function createApp(deps: AppDeps): Server {
     throw new HttpError(404, 'not found');
   }
 
+  const sessionCookie = (token: string) => `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_DAYS * 86_400}${deps.secureCookies ? '; Secure' : ''}`;
+
   function setSession(res: ServerResponse, uid: number): void {
     const token = newToken();
     store.createSession(sha256(token), uid, Date.now() + SESSION_DAYS * 86_400_000);
-    res.setHeader('set-cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_DAYS * 86_400}${deps.secureCookies ? '; Secure' : ''}`);
+    res.setHeader('set-cookie', sessionCookie(token));
+  }
+
+  /** Called on the page's regular refresh: once a day at most, push the session's end 90 days out again. */
+  function renewSession(req: IncomingMessage, res: ServerResponse): void {
+    const token = cookies(req)[COOKIE];
+    if (!token) return;
+    const expiry = store.sessionExpiry(sha256(token));
+    if (expiry === null || expiry - Date.now() > (SESSION_DAYS - 1) * 86_400_000) return;
+    store.extendSession(sha256(token), Date.now() + SESSION_DAYS * 86_400_000);
+    res.setHeader('set-cookie', sessionCookie(token));
   }
 
   async function walletSol(uid: number, pubkey: string): Promise<number | null> {
@@ -425,6 +435,7 @@ export function createApp(deps: AppDeps): Server {
 
     // ── reads ──
     if (path === '/api/state' && method === 'GET') {
+      renewSession(req, res);
       const user = store.user(uid);
       const w = store.wallet(uid);
       const stats = copyStats(uid);

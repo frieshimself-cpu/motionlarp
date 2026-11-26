@@ -415,18 +415,30 @@ function stopPolling() {
 }
 
 async function boot() {
-  try { config = await api('GET', '/api/config'); } catch { config = { brand: 'WalletMotion', server: { maxSolPerBuy: 0 }, defaults: {} }; }
+  for (let attempt = 0; !config; attempt++) {
+    try { config = await api('GET', '/api/config'); } catch {
+      app.innerHTML = '<section class="auth"><div class="auth-in"><p class="tagline">Reconnecting…</p></div></section>';
+      await new Promise((r) => setTimeout(r, Math.min(1500 * (attempt + 1), 8000)));
+    }
+  }
   document.title = `${config.brand} — copy trading`;
   if (location.pathname.startsWith('/admin')) {
     const { bootAdmin } = await import('/admin.js');
     return bootAdmin(config);
   }
-  try {
-    state = await api('GET', '/api/state');
-    render();
-    startPolling();
-  } catch {
-    renderAuth();
+  // Only "not logged in" shows the login form. Anything else (the site restarting for an update, a network blip)
+  // waits and tries again, so nobody is thrown out of a session that is still good.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      state = await api('GET', '/api/state');
+      render();
+      startPolling();
+      return;
+    } catch (err) {
+      if (err.status === 401) return renderAuth();
+      app.innerHTML = `<section class="auth"><div class="auth-in">${brandHtml(config.brand)}<p class="tagline">Reconnecting…</p></div></section>`;
+      await new Promise((r) => setTimeout(r, Math.min(1500 * (attempt + 1), 8000)));
+    }
   }
 }
 boot();

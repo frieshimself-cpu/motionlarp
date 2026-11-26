@@ -139,6 +139,10 @@ CREATE TABLE IF NOT EXISTS events (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_user ON events(user_id, id);
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  token_hash TEXT PRIMARY KEY,
+  expires_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS licenses (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   key_hash TEXT NOT NULL UNIQUE,
@@ -325,6 +329,25 @@ export class Store {
     const r = this.get('SELECT user_id, expires_at FROM sessions WHERE token_hash = ?', tokenHash);
     if (!r || num(r.expires_at) < Date.now()) return null;
     return num(r.user_id);
+  }
+  sessionExpiry(tokenHash: string): number | null {
+    const r = this.get('SELECT expires_at FROM sessions WHERE token_hash = ?', tokenHash);
+    return r ? num(r.expires_at) : null;
+  }
+  extendSession(tokenHash: string, expiresAt: number): void {
+    this.run('UPDATE sessions SET expires_at = ? WHERE token_hash = ?', expiresAt, tokenHash);
+  }
+  // The owner's admin logins, kept in the database so a restart (an update) does not log the owner out.
+  createAdminSession(tokenHash: string, expiresAt: number): void {
+    this.run('DELETE FROM admin_sessions WHERE expires_at < ?', Date.now());
+    this.run('INSERT INTO admin_sessions (token_hash, expires_at) VALUES (?, ?)', tokenHash, expiresAt);
+  }
+  adminSessionValid(tokenHash: string): boolean {
+    const r = this.get('SELECT expires_at FROM admin_sessions WHERE token_hash = ?', tokenHash);
+    return !!r && num(r.expires_at) > Date.now();
+  }
+  deleteAdminSession(tokenHash: string): void {
+    this.run('DELETE FROM admin_sessions WHERE token_hash = ?', tokenHash);
   }
   deleteSession(tokenHash: string): void {
     this.run('DELETE FROM sessions WHERE token_hash = ?', tokenHash);

@@ -172,7 +172,7 @@ function bind() {
   });
 }
 
-/** After a restart the admin cookie is gone (sessions live in memory): wait for the site, then show the login. */
+/** Wait for the site to come back after it restarts itself (the admin login survives the restart). */
 async function waitForRestart() {
   await new Promise((r) => setTimeout(r, 2500));
   for (let i = 0; i < 40; i++) {
@@ -197,11 +197,15 @@ async function load(quiet = false) {
 export async function bootAdmin(cfg) {
   config = cfg;
   document.title = `${config.brand} — admin`;
-  try {
-    state = await api('GET', '/api/admin/state');
-    render();
-    timer = setInterval(() => { if (!document.hidden) load(true); }, 5000);
-  } catch {
-    renderLogin();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      state = await api('GET', '/api/admin/state');
+      render();
+      timer = setInterval(() => { if (!document.hidden) load(true); }, 5000);
+      return;
+    } catch (err) {
+      if (err.status === 401 || err.status === 503) return renderLogin();
+      await new Promise((r) => setTimeout(r, Math.min(1500 * (attempt + 1), 8000)));
+    }
   }
 }

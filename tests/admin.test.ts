@@ -147,3 +147,41 @@ describe('admin without a password configured', () => {
     app.close();
   });
 });
+
+describe('staying logged in', () => {
+  const mk = (s: Store) => {
+    const engine = new Engine({ store: s, executor, walletFor: () => null, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01 });
+    return createApp({ store: s, engine, executor, masterKey: '11'.repeat(32), secureCookies: false, forgetWallet: () => {}, serverInfo: () => ({ live: false, maxSolPerBuy: 1, watching: 0, mode: 'test' }), adminPassword: 'correct horse battery' });
+  };
+  const listen = async (app: Server) => { await new Promise<void>((r) => app.listen(0, '127.0.0.1', r)); return `http://127.0.0.1:${(app.address() as AddressInfo).port}`; };
+  const H = { 'content-type': 'application/json', 'x-requested-with': 'motionlarp' };
+
+  it('a user session renews itself while it is used (90 days from the last visit)', async () => {
+    const s = new Store(':memory:');
+    const uid = s.createUser('zed', 'x');
+    const { sha256 } = await import('../src/crypto.js');
+    s.createSession(sha256('tok'), uid, Date.now() + 86_400_000); // one day left
+    const app = mk(s);
+    const url = await listen(app);
+    const res = await fetch(`${url}/api/state`, { headers: { ...H, cookie: 'ml_session=tok' } });
+    expect(res.status).toBe(200);
+    expect(res.headers.getSetCookie().join(';')).toMatch(/ml_session=tok;.*Max-Age=7776000/);
+    expect(s.sessionExpiry(sha256('tok'))!).toBeGreaterThan(Date.now() + 89 * 86_400_000);
+    app.close();
+  });
+
+  it('the admin login survives a restart of the site', async () => {
+    const s = new Store(':memory:');
+    const app1 = mk(s);
+    const url1 = await listen(app1);
+    const login = await fetch(`${url1}/api/admin/login`, { method: 'POST', headers: H, body: JSON.stringify({ password: 'correct horse battery' }) });
+    const cookie = login.headers.getSetCookie()[0]!.split(';')[0]!;
+    app1.close();
+    const app2 = mk(s); // "after the restart": a new process over the same database
+    const url2 = await listen(app2);
+    expect((await fetch(`${url2}/api/admin/state`, { headers: { ...H, cookie } })).status).toBe(200);
+    await fetch(`${url2}/api/admin/logout`, { method: 'POST', headers: { ...H, cookie } });
+    expect((await fetch(`${url2}/api/admin/state`, { headers: { ...H, cookie } })).status).toBe(401);
+    app2.close();
+  });
+});
