@@ -10,6 +10,11 @@ const { getConnection } = await import('../src/chain/connection.js');
 const { getSignaturesForAddress, getTransaction } = await import('../src/chain/rpc.js');
 const { accountKeys, parseLeaderTrades, PUMP_AMM_PROGRAM, PUMP_PROGRAM } = await import('../src/watch/parse.js');
 const { PfDispatcher } = await import('../src/venues/pf.js');
+const { withFee } = await import('../src/fee.js');
+// A 1 % platform fee rides in every simulated trade, as it would live. It goes to a wallet that already holds SOL
+// (pump.fun's fee recipient): a small transfer into an EMPTY account fails (below the rent minimum), which is why
+// the server checks at startup that FEE_WALLET holds at least 0.001 SOL.
+const FEE_TO = '463MEnMeGyJekNZFQSTUABBEbLnvMTALbT6ZmsxAbAdq';
 
 const pf = new PfDispatcher();
 const conn = getConnection();
@@ -58,8 +63,9 @@ for (const [program, venue] of [[PUMP_PROGRAM, 'pumpfun'], [PUMP_AMM_PROGRAM, 'p
     const lamports = balance / 4n < 10_000_000n ? balance / 4n : 10_000_000n;
     const quote = await v.quoteBuy(pool, lamports);
     const buy = await v.buildBuy({ pool, user, lamportsIn: lamports, slippagePct: 25 });
-    const simBuy = await simulateAs(user, buy.instructions);
-    console.log(`our ${Number(lamports) / 1e9} SOL buy: quote ${quote} tokens; simulation ${simBuy.err ? 'FAILED ' + JSON.stringify(simBuy.err) : `ok (${simBuy.unitsConsumed} CU)`}`);
+    const buyFee = withFee(buy.instructions, user, lamports, 100, FEE_TO);
+    const simBuy = await simulateAs(user, buyFee.instructions);
+    console.log(`our ${Number(lamports) / 1e9} SOL buy + ${Number(buyFee.fee) / 1e9} SOL fee: quote ${quote} tokens; simulation ${simBuy.err ? 'FAILED ' + JSON.stringify(simBuy.err) : `ok (${simBuy.unitsConsumed} CU)`}`);
     if (simBuy.err) { failures++; console.log((simBuy.logs ?? []).slice(-8).join('\n')); }
 
     // The sell draws from the wallet's standard (associated) token account, where our own copies always hold.
@@ -69,8 +75,9 @@ for (const [program, venue] of [[PUMP_PROGRAM, 'pumpfun'], [PUMP_AMM_PROGRAM, 'p
     if (held > 0n) {
       const tokens = held / 2n;
       const sell = await v.buildSell({ pool, user, tokensIn: tokens, slippagePct: 25 });
-      const simSell = await simulateAs(user, sell.instructions);
-      console.log(`our sell of 50% of their ${held} tokens: quote ${sell.expectedOut} lamports; simulation ${simSell.err ? 'FAILED ' + JSON.stringify(simSell.err) : `ok (${simSell.unitsConsumed} CU)`}`);
+      const sellFee = withFee(sell.instructions, user, sell.expectedOut, 100, FEE_TO);
+      const simSell = await simulateAs(user, sellFee.instructions);
+      console.log(`our sell of 50% of their ${held} tokens + ${Number(sellFee.fee) / 1e9} SOL fee: quote ${sell.expectedOut} lamports; simulation ${simSell.err ? 'FAILED ' + JSON.stringify(simSell.err) : `ok (${simSell.unitsConsumed} CU)`}`);
       if (simSell.err) { failures++; console.log((simSell.logs ?? []).slice(-8).join('\n')); }
     } else {
       console.log('wallet holds none in its standard token account (sold out, or keeps coins elsewhere): sell not simulated');

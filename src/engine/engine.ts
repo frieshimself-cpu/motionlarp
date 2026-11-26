@@ -21,6 +21,8 @@ export interface EngineDeps {
   priceMs: number;
   maxSolPerBuy: number;
   feeReserveSol: number;
+  /** Platform fee (basis points) a user pays; omitted = none. */
+  feeBpsFor?: (userId: number) => number;
   /** Leader trades older than this are not copied (e.g. caught up after downtime). */
   staleSec?: number;
 }
@@ -143,16 +145,18 @@ export class Engine {
     const lamports = BigInt(Math.round(s.buySol * 1e9));
     const label = `${shortMint(t.mint)} (${s.name})`;
     try {
+      const feeBps = this.deps.feeBpsFor?.(copy.userId) ?? 0;
       if (executor.isLive({ live: s.mode === 'live' })) {
-        const need = lamports + BigInt(Math.round(this.deps.feeReserveSol * 1e9));
+        const platformFee = (lamports * BigInt(Math.floor(feeBps))) / 10_000n;
+        const need = lamports + platformFee + BigInt(Math.round(this.deps.feeReserveSol * 1e9));
         const have = await this.solBalance(wallet.publicKey.toBase58());
         if (have < need) {
           store.updatePosition(id, { status: 'failed', closedAt: this.now() });
-          store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: wallet has ${fmtSol(have)}, needs ${fmtSol(need)} (buy + fee reserve)`, mint: t.mint, signature: t.signature });
+          store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: wallet has ${fmtSol(have)}, needs ${fmtSol(need)} (buy${platformFee > 0n ? ' + platform fee' : ''} + fee reserve)`, mint: t.mint, signature: t.signature });
           return;
         }
       }
-      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, live: s.mode === 'live' });
+      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, live: s.mode === 'live', feeBps });
       if (!fill.ok) {
         store.updatePosition(id, { status: 'failed', closedAt: this.now() });
         store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: 0n, lamports, signature: null, simulated: false, error: fill.error });
@@ -163,7 +167,7 @@ export class Engine {
       this.solCache.delete(wallet.publicKey.toBase58());
       // The position is live only if the buy really went on-chain (a copy flipped to Live on a test server is paper).
       store.updatePosition(id, { mode: fill.simulated ? 'paper' : 'live', status: 'open', tokensBought: fill.tokens, tokensHeld: fill.tokens, costLamports: fill.lamports, openedAt: now, lastChangeAt: now, refValueLamports: fill.lamports, buySig: fill.signature });
-      store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null });
+      store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
       store.addEvent({
         userId: copy.userId, copyId: copy.id, kind: 'buy',
         message: `Bought ${fmtSol(fill.lamports)} of ${label} — they bought ${fmtSol(t.solLamports)}${fill.simulated ? ' (test)' : ''}`,
@@ -271,7 +275,7 @@ export class Engine {
       const copy = store.copy(p.copyId);
       const slippagePct = copy?.settings.slippagePct ?? 25;
       const priorityFeeSol = copy?.settings.priorityFeeSol ?? 0.0005;
-      const fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, live: p.mode === 'live' });
+      const fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0 });
       if (!fill.ok) return this.sellFailed(p, order, label, fill.error);
 
       this.retries.delete(this.orderKey(p.id, order));
@@ -290,7 +294,7 @@ export class Engine {
         ...(closed ? { status: 'closed' as const, closedAt: this.now() } : {}),
         ...this.markDone(p, order),
       });
-      store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null });
+      store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
       const what = order.percent >= 100 ? 'all' : fmtPct(order.percent);
       store.addEvent({
         userId: p.userId, copyId: p.copyId, kind: 'sell',

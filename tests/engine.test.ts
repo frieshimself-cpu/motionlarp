@@ -335,3 +335,53 @@ describe('timed sells, stop loss, dead coin', () => {
     expect(open()[0]!.tokensHeld).toBe(10_000n);
   });
 });
+
+describe('platform fee', () => {
+  /** A market that charges the fee the way the chain executor does: added to buys, taken from sells. */
+  class FeeExecutor extends FakeExecutor {
+    async buy(req: TradeRequest & { lamports: bigint }): Promise<FillResult> {
+      const f = await super.buy(req);
+      if (!f.ok) return f;
+      const fee = (req.lamports * BigInt(req.feeBps)) / 10_000n;
+      return { ...f, lamports: f.lamports + fee, feeLamports: fee };
+    }
+    async sell(req: TradeRequest & { tokens: bigint }): Promise<FillResult> {
+      const f = await super.sell(req);
+      if (!f.ok) return f;
+      const fee = (f.lamports * BigInt(req.feeBps)) / 10_000n;
+      return { ...f, lamports: f.lamports - fee, feeLamports: fee };
+    }
+  }
+
+  it('friends pay the fee on buys and sells; it counts in their profit and is recorded per fill', async () => {
+    const fx = new FeeExecutor();
+    const e = new Engine({ store, executor: fx, walletFor: () => wallet, now: () => clock, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01, feeBpsFor: () => 100 });
+    addCopy({ sell: { mirror: { enabled: true, mode: 'all' } } });
+    await e.onLeaderTrade(trade()); await e.idle();
+    expect(fx.buys[0]!.feeBps).toBe(100);
+    expect(open()[0]!.costLamports).toBe(SOL / 10n + SOL / 1000n); // 0.1 SOL + 1 %
+    await e.onLeaderTrade(trade({ side: 'sell', tokensBefore: 2_000_000n, tokensAfter: 0n, tokenAmount: 2_000_000n })); await e.idle();
+    const [closed] = store.closedPositions(userId);
+    expect(closed!.proceedsLamports).toBe(SOL / 10n - SOL / 1000n);
+    expect(store.fills(closed!.id).map((f) => f.feeLamports)).toEqual([SOL / 1000n, SOL / 1000n]);
+  });
+
+  it('an exempt user (e.g. the owner) pays none', async () => {
+    const fx = new FeeExecutor();
+    const e = new Engine({ store, executor: fx, walletFor: () => wallet, now: () => clock, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01, feeBpsFor: (id) => (id === userId ? 0 : 100) });
+    addCopy();
+    await e.onLeaderTrade(trade()); await e.idle();
+    expect(fx.buys[0]!.feeBps).toBe(0);
+    expect(open()[0]!.costLamports).toBe(SOL / 10n);
+  });
+
+  it('a live buy needs the fee on top of the buy and the reserve', async () => {
+    const fx = new FeeExecutor(); fx.live = true;
+    fx.sol = SOL / 10n + SOL / 100n + SOL / 2000n; // buy + reserve, but not the 1 % fee
+    const e = new Engine({ store, executor: fx, walletFor: () => wallet, now: () => clock, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01, feeBpsFor: () => 100 });
+    addCopy({ mode: 'live' });
+    await e.onLeaderTrade(trade()); await e.idle();
+    expect(fx.buys).toHaveLength(0);
+    expect(feed()[0]).toMatch(/fee/);
+  });
+});

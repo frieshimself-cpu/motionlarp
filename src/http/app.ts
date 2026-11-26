@@ -27,6 +27,8 @@ export interface AppDeps {
   forgetWallet: (userId: number) => void;
   serverInfo: () => { live: boolean; maxSolPerBuy: number; watching: number; mode: string };
   trustProxy?: boolean;
+  /** Platform fee (basis points) this user pays. */
+  feeBpsFor?: (userId: number) => number;
   maxCopiesPerUser?: number;
   publicDir?: string;
 }
@@ -294,6 +296,7 @@ export function createApp(deps: AppDeps): Server {
       return json(res, 200, {
         user: { username: user?.username },
         server: deps.serverInfo(),
+        feeBps: deps.feeBpsFor?.(uid) ?? 0,
         wallet: w ? { pubkey: w.pubkey, sol: await walletSol(uid, w.pubkey) } : null,
         copies: store.copies(uid).map((c) => ({ id: c.id, ...c.settings, stats: stats.get(c.id) ?? { open: 0, closed: 0, pnlSol: 0 } })),
         positions: store.activePositions(uid).map(positionView),
@@ -302,10 +305,16 @@ export function createApp(deps: AppDeps): Server {
     }
     if (path === '/api/history' && method === 'GET') {
       const closed = store.closedPositions(uid, 200);
-      const views = closed.map((p) => ({ ...positionView(p), fills: store.fills(p.id).map((f) => ({ side: f.side, reason: f.reason, sol: sol(f.lamports), signature: f.simulated ? null : f.signature, simulated: f.simulated, at: f.createdAt })) }));
+      let feesTotal = 0n;
+      const views = closed.map((p) => {
+        const fills = store.fills(p.id);
+        const fees = fills.reduce((a, f) => a + f.feeLamports, 0n);
+        feesTotal += fees;
+        return { ...positionView(p), feesSol: sol(fees), fills: fills.map((f) => ({ side: f.side, reason: f.reason, sol: sol(f.lamports), feeSol: sol(f.feeLamports), signature: f.simulated ? null : f.signature, simulated: f.simulated, at: f.createdAt })) };
+      });
       const total = closed.reduce((a, p) => a + (p.proceedsLamports - p.costLamports), 0n);
       const wins = closed.filter((p) => p.proceedsLamports > p.costLamports).length;
-      return json(res, 200, { positions: views, totalPnlSol: sol(total), trades: closed.length, wins });
+      return json(res, 200, { positions: views, totalPnlSol: sol(total), totalFeesSol: sol(feesTotal), trades: closed.length, wins });
     }
 
     throw new HttpError(404, 'not found');

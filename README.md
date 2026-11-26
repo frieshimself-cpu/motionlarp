@@ -84,6 +84,20 @@ Logs: `docker compose logs -f app`. Update: `git pull && docker compose up -d --
 
 Both switches are needed for a real trade: the server's `LIVE_TRADING=true` **and** the copy set to Live.
 
+## Platform fee (your cut)
+
+Set in `.env`:
+
+- `FEE_BPS`: the fee in basis points. 100 = 1 % of every copy buy and every sell. 0 = off. The cap is 10 %.
+- `FEE_WALLET`: the wallet that receives it. **It must already hold at least 0.001 SOL.** A small transfer into
+  an empty wallet fails, and the trade fails with it, so the server refuses to start until it does.
+- `FEE_EXEMPT_USERS`: usernames that pay nothing (yours, say), comma-separated.
+
+The fee is a transfer inside the same transaction as the trade, after the swap: if the trade fails, no fee is
+paid. Users see the fee on the site (a FEE pill, the copy editor, fees paid in their history), and their profit
+figures include it. The incoming fees are visible on Solscan on `FEE_WALLET`. Checked on mainnet: real buys
+and sells with the fee transfer included simulate cleanly.
+
 ## Safety, in plain words
 
 - **Friends should use a fresh wallet** holding only what they copy with, never their main wallet. The server
@@ -93,7 +107,8 @@ Both switches are needed for a real trade: the server's `LIVE_TRADING=true` **an
 - A wallet can't be removed or swapped while it has open positions (the coins would be stranded).
 - `MAX_SOL_PER_BUY` caps every buy. `FEE_RESERVE_SOL` keeps SOL back for fees.
 - Only pump.fun bonding-curve and PumpSwap coins traded against SOL are copied. Anything else is skipped with a
-  reason in the feed.
+  reason in the feed. That includes PumpSwap pools set up "the other way round" (SOL on the base side), which are
+  common for coins not launched on pump.fun.
 
 ## Run it on your own computer
 
@@ -101,7 +116,7 @@ Both switches are needed for a real trade: the server's `LIVE_TRADING=true` **an
 npm install
 cp .env.example .env        # put MASTER_KEY in (npm run genkey); RPC_URL optional
 npm run dev                 # http://127.0.0.1:3000
-npm test                    # 96 tests
+npm test                    # 103 tests
 npm run check:mainnet       # builds real buys/sells for real wallets on mainnet and simulates them (sends nothing)
 npm run measure             # how many slots behind a copy would be, and how long building it takes
 ```

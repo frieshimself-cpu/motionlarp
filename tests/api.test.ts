@@ -36,7 +36,7 @@ beforeAll(async () => {
     return w ? (cache.get(id) ?? Keypair.fromSecretKey(decryptSecret(w.encKey, id, MASTER))) : null;
   };
   engine = new Engine({ store, executor, walletFor, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01 });
-  server = createApp({ store, engine, executor, masterKey: MASTER, signupCode: 'friends', secureCookies: false, forgetWallet: (id) => cache.delete(id), serverInfo: () => ({ live: false, maxSolPerBuy: 1, watching: 0, mode: 'test' }) });
+  server = createApp({ store, engine, executor, masterKey: MASTER, signupCode: 'friends', secureCookies: false, forgetWallet: (id) => cache.delete(id), serverInfo: () => ({ live: false, maxSolPerBuy: 1, watching: 0, mode: 'test' }), feeBpsFor: (id) => (store.user(id)?.username === 'bob' ? 0 : 100) });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -109,6 +109,9 @@ describe('wallet and copies', () => {
     expect((await bob.call('PUT', `/api/copies/${copyId}`, { leader: LEADER, buySol: 1 })).status).toBe(404);
     expect((await bob.call('DELETE', `/api/copies/${copyId}`)).status).toBe(404);
     expect(((await bob.call('GET', '/api/state')).body.copies as unknown[]).length).toBe(0);
+    // the platform fee each user pays is shown to them (bob is exempt)
+    expect((await bob.call('GET', '/api/state')).body.feeBps).toBe(0);
+    expect((await alice.call('GET', '/api/state')).body.feeBps).toBe(100);
   });
 
   it('an open position blocks removing the wallet; Sell now closes it and only for its owner', async () => {

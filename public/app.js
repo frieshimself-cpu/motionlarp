@@ -133,6 +133,7 @@ function render() {
       ${marquee(['MOTIONLARP'], { crest: 'COPY CLUB' })}
       <div class="right">
         ${modePill(s.server)}
+        ${s.feeBps ? `<span class="pill" title="Platform fee on each buy and sell">FEE ${s.feeBps / 100}%</span>` : ''}
         <span class="muted">@${esc(s.user.username)}</span>
         <button class="btn small ghost" id="logout">Log out</button>
       </div>
@@ -263,7 +264,7 @@ function renderHistory() {
   const winRate = h.trades ? Math.round((h.wins / h.trades) * 100) : 0;
   return `<div class="card">
     <h2>Closed positions <span class="count">${h.trades}</span></h2>
-    <p class="muted" style="margin-top:-4px">Total <b class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</b> · ${h.wins} winners · ${winRate}% win rate</p>
+    <p class="muted" style="margin-top:-4px">Total <b class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</b> · ${h.wins} winners · ${winRate}% win rate${h.totalFeesSol ? ` · fees paid ${fmtSol(h.totalFeesSol)} SOL (included in the profit)` : ''}</p>
     ${h.positions.length ? `<div class="table-wrap"><table class="hist">
       <thead><tr><th>Coin</th><th>Copy</th><th>Sells</th><th class="num">Cost</th><th class="num">Got back</th><th class="num">P/L</th><th>Closed</th></tr></thead>
       <tbody>${h.positions.map((p) => `<tr>
@@ -340,7 +341,7 @@ function openEditor(copy) {
         <div class="field"><label for="f-name">Nickname</label><input id="f-name" type="text" value="${esc(d.name)}" maxlength="40" placeholder="e.g. Cupsey"></div>
       </div>
       <div class="row2">
-        <div class="field"><label for="f-buy">Your buy</label><div class="unit"><input id="f-buy" type="number" min="0.001" step="any" value="${esc(d.buySol)}"><span>SOL</span></div><div class="hint">Server limit: ${config.server.maxSolPerBuy} SOL per buy.</div></div>
+        <div class="field"><label for="f-buy">Your buy</label><div class="unit"><input id="f-buy" type="number" min="0.001" step="any" value="${esc(d.buySol)}"><span>SOL</span></div><div class="hint">Server limit: ${config.server.maxSolPerBuy} SOL per buy.${state.feeBps ? ` Platform fee: ${state.feeBps / 100}% of each buy and sell.` : ''}</div></div>
         <div class="field"><label for="f-min">Only if they buy at least</label><div class="unit"><input id="f-min" type="number" min="0" step="any" value="${esc(d.minLeaderBuySol)}"><span>SOL</span></div><div class="hint">Their smaller buys are skipped.</div></div>
       </div>
       <div class="field">

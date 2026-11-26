@@ -42,6 +42,11 @@ function load() {
     liveTrading: bool('LIVE_TRADING', false),
     maxSolPerBuy: num('MAX_SOL_PER_BUY', 0.05),
 
+    /** Platform fee on every copy buy and sell, in basis points (100 = 1 %), paid to FEE_WALLET. 0 = off. */
+    feeBps: num('FEE_BPS', 0),
+    feeWallet: str('FEE_WALLET'),
+    /** Usernames that pay no platform fee (comma-separated), e.g. the owner. */
+    feeExemptUsers: str('FEE_EXEMPT_USERS').split(',').map((u) => u.trim().toLowerCase()).filter(Boolean),
     /** 32 bytes as 64 hex characters: encrypts the wallet keys at rest. */
     masterKey: str('MASTER_KEY'),
     /** Required to sign up when set. */

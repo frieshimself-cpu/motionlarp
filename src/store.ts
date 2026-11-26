@@ -49,6 +49,8 @@ export interface Fill {
   signature: string | null;
   simulated: boolean;
   error: string | null;
+  /** Platform fee carried by this fill (lamports). */
+  feeLamports: bigint;
   createdAt: number;
 }
 
@@ -121,6 +123,7 @@ CREATE TABLE IF NOT EXISTS fills (
   signature TEXT,
   simulated INTEGER NOT NULL,
   error TEXT,
+  fee_lamports INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS fills_position ON fills(position_id);
@@ -177,7 +180,7 @@ function toFill(r: Row): Fill {
   return {
     id: num(r.id), positionId: num(r.position_id), userId: num(r.user_id), side: r.side as Fill['side'], reason: r.reason as Fill['reason'],
     tokens: big(r.tokens), lamports: big(r.lamports), signature: (r.signature as string | null) ?? null, simulated: num(r.simulated) === 1,
-    error: (r.error as string | null) ?? null, createdAt: num(r.created_at),
+    error: (r.error as string | null) ?? null, feeLamports: big(r.fee_lamports), createdAt: num(r.created_at),
   };
 }
 
@@ -197,6 +200,9 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
+    // Migrations for databases created by earlier versions.
+    const fillCols = this.all('PRAGMA table_info(fills)').map((r) => String(r.name));
+    if (!fillCols.includes('fee_lamports')) this.db.exec('ALTER TABLE fills ADD COLUMN fee_lamports INTEGER NOT NULL DEFAULT 0');
   }
 
   private all(sql: string, ...params: unknown[]): Row[] {
@@ -330,10 +336,10 @@ export class Store {
   closedPositions(userId: number, limit = 100): Position[] {
     return this.all("SELECT * FROM positions WHERE user_id = ? AND status = 'closed' ORDER BY closed_at DESC LIMIT ?", userId, limit).map(toPosition);
   }
-  insertFill(f: Omit<Fill, 'id' | 'createdAt'>): number {
+  insertFill(f: Omit<Fill, 'id' | 'createdAt' | 'feeLamports'> & { feeLamports?: bigint }): number {
     return this.run(
-      'INSERT INTO fills (position_id, user_id, side, reason, tokens, lamports, signature, simulated, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      f.positionId, f.userId, f.side, f.reason, f.tokens, f.lamports, f.signature, f.simulated ? 1 : 0, f.error, Date.now(),
+      'INSERT INTO fills (position_id, user_id, side, reason, tokens, lamports, signature, simulated, error, fee_lamports, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      f.positionId, f.userId, f.side, f.reason, f.tokens, f.lamports, f.signature, f.simulated ? 1 : 0, f.error, f.feeLamports ?? 0n, Date.now(),
     ).lastInsertRowid;
   }
   fills(positionId: number): Fill[] {

@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 96 tests
+## Automated (every change): `npm test`, 103 tests
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -55,6 +55,14 @@ path: buys copied from the websocket logs without a fetch; the public RPC's webs
 
 Also from these runs: PumpSwap pools not created by pump.fun are now found (by base mint, offset verified on a
 real pool); pools quoted the other way round (SOL as base) are refused with a reason.
+
+## Platform fee (26 Nov 2026)
+
+Unit tests: fee maths, the transfer instruction (after the swap, to FEE_WALLET, exact lamports), startup checks,
+fees through the engine (cost and proceeds include them, recorded per fill, exempt users pay none, live buys
+need the fee on top). Mainnet: buys and sells with a 1 % fee transfer simulate cleanly. Found in that run: a fee
+paid into an EMPTY wallet fails the whole trade (below the rent minimum), so the server refuses to start unless
+FEE_WALLET holds at least 0.001 SOL.
 
 ## Not yet verified
 
