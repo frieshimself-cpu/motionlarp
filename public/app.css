@@ -27,7 +27,7 @@
 }
 
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+html { -webkit-text-size-adjust: 100%; background: var(--night-0); }
 body {
   margin: 0;
   min-height: 100vh;
@@ -99,6 +99,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .marquee.big { padding: 18px 26px 20px; }
 .marquee.big .tile { font-size: clamp(30px, 8vw, 54px); min-width: clamp(22px, 5.5vw, 40px); padding: 6px 6px 4px; }
 .marquee.big .crest { font-size: clamp(12px, 2.6vw, 16px); }
+.marquee:not(.big) .bulbs { display: none; }
 .marquee .bulbs { position: absolute; inset: -16px; border-radius: 30px; pointer-events: none;
   background: radial-gradient(circle, #fff7c9 0 2px, transparent 3px) 0 0 / 22px 22px; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); padding: 4px; opacity: .55; animation: chase 1.4s linear infinite; }
 @keyframes chase { to { background-position: 22px 0; } }
@@ -263,3 +264,5 @@ table.hist td { padding: 10px 6px; border-bottom: 1px solid var(--line); vertica
 table.hist td.num { font-family: var(--mono); text-align: right; white-space: nowrap; }
 .table-wrap { overflow-x: auto; }
 @media (prefers-reduced-motion: reduce) { .marquee .bulbs, .pill.live::before { animation: none; } }
+/* the private key box shows dots, like a password field (where the browser supports it) */
+textarea.secret { -webkit-text-security: disc; text-security: disc; }
