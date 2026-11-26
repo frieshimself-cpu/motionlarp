@@ -18,7 +18,7 @@ describe('Jupiter client', () => {
 
   it('sends the API key when one is set, and reports a route error readably', async () => {
     let headers: Headers | null = null;
-    const j = new Jupiter('https://jup.test', 'k123', async (_url, init) => { headers = new Headers(init?.headers); return new Response(JSON.stringify({ error: 'No routes found' }), { status: 400 }); });
+    const j = new Jupiter('https://jup.test', 'k123', async (_url, init) => { headers = new Headers(init?.headers); return new Response(JSON.stringify({ error: 'No routes found' }), { status: 400 }); }, 1);
     await expect(j.quote(SOL, MINT, 1n, 100)).rejects.toThrow(/No routes found/);
     expect(headers!.get('x-api-key')).toBe('k123');
   });
