@@ -1,6 +1,5 @@
 // ported from velo/src/tx/build.ts
-// Assemble one signed v0 transaction: compute budget (priority fee from validator_tip), the venue's
-// instructions, and an optional Jito tip transfer (from tx_fee) when the trade goes through Jito.
+// Assemble one signed v0 transaction: compute budget (priority fee), the venue's instructions, optional tip.
 import {
   ComputeBudgetProgram,
   Keypair,
@@ -13,7 +12,7 @@ import {
 import { config, solToLamports } from '../config.js';
 import { getBlockhash } from '../chain/connection.js';
 
-/** validator_tip (SOL) is the total priority fee the user wants to pay; spread it over the CU limit. */
+/** The priority fee (SOL) is the total the user wants to pay; spread it over the compute-unit limit. */
 export function priorityFeeMicroLamportsPerCu(validatorTipSol: number, cuLimit: number): bigint {
   const lamports = solToLamports(Math.max(0, validatorTipSol || 0));
   if (lamports === 0n || cuLimit <= 0) return 0n;
