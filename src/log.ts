@@ -1,0 +1,64 @@
+// ported from velo/src/log.ts
+// Redacting logger. Rule 4: secret keys never reach a log, a fixture, an error message, or a crash dump.
+// The client sends base58 64-byte secret keys in: wallets[] (buy/sell), private_keys[] (setup/cleanup/close_wsol),
+// walletPrivateKey (sniper), payer_key (vault), instantmode.wallets[].privateKey (heartbeat).
+import { config } from './config.js';
+
+export const REDACTED = '<REDACTED_SECRET_KEY>';
+
+const SECRET_FIELDS = new Set(['private_keys', 'payer_key', 'walletPrivateKey', 'privateKey', 'secretKey', 'secret_key']);
+
+/** A base58 64-byte secret key encodes to 86–88 characters; a public key to 32–44. */
+export function looksLikeSecretKey(value: unknown): boolean {
+  return typeof value === 'string' && value.length >= 80 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(value);
+}
+
+export function redact<T>(value: T, key?: string): T {
+  if (Array.isArray(value)) {
+    if (key === 'private_keys') return value.map(() => REDACTED) as unknown as T;
+    // `wallets` carries public keys in wallet_heartbeat but secret keys in buy/sell: decide per element.
+    return value.map((v) => (looksLikeSecretKey(v) ? REDACTED : redact(v, key))) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SECRET_FIELDS.has(k) && typeof v === 'string') out[k] = REDACTED;
+      else if (typeof v === 'string' && looksLikeSecretKey(v)) out[k] = REDACTED;
+      else out[k] = redact(v, k);
+    }
+    return out as T;
+  }
+  if (looksLikeSecretKey(value)) return REDACTED as unknown as T;
+  return value;
+}
+
+/** Strip anything key-shaped out of free text (error messages, stack traces). */
+export function scrubText(text: string): string {
+  return text.replace(/[1-9A-HJ-NP-Za-km-z]{80,90}/g, REDACTED);
+}
+
+type Level = 'debug' | 'info' | 'warn' | 'error';
+const ORDER: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
+const threshold = ORDER[(config.logLevel as Level) in ORDER ? (config.logLevel as Level) : 'info'];
+
+function emit(level: Level, msg: string, data?: unknown): void {
+  if (ORDER[level] < threshold) return;
+  const line: Record<string, unknown> = { t: new Date().toISOString(), level, msg: scrubText(msg) };
+  if (data !== undefined) line.data = redact(data);
+  const text = JSON.stringify(line, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+  if (level === 'error' || level === 'warn') process.stderr.write(text + '\n');
+  else process.stdout.write(text + '\n');
+}
+
+export const log = {
+  debug: (msg: string, data?: unknown) => emit('debug', msg, data),
+  info: (msg: string, data?: unknown) => emit('info', msg, data),
+  warn: (msg: string, data?: unknown) => emit('warn', msg, data),
+  error: (msg: string, data?: unknown) => emit('error', msg, data),
+};
+
+/** Error text safe to send back to the client and to log. */
+export function safeErrorMessage(err: unknown, max = 200): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return scrubText(raw).slice(0, max);
+}
