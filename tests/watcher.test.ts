@@ -12,7 +12,7 @@ function setup() {
   let sigs: SignatureInfo[] = [{ signature: 'old1', slot: 1, err: null, blockTime: 1 }];
   const fetched: string[] = [];
   const trades: LeaderTrade[] = [];
-  let logCb: ((sig: string, logs?: string[]) => void) | null = null;
+  let logCb: ((sig: string, logs?: string[], slot?: number) => void) | null = null;
   const w = new Watcher({
     leaders: () => [LEADER],
     onTrade: async (t) => { trades.push(t); },
@@ -22,7 +22,7 @@ function setup() {
     subscribe: (_leader, cb) => { logCb = cb; return () => { logCb = null; }; },
     fetchRetryMs: 1,
   });
-  return { w, trades, fetched, push: (s: SignatureInfo[]) => { sigs = [...s, ...sigs]; }, ws: (s: string, logs?: string[]) => logCb?.(s, logs) };
+  return { w, trades, fetched, push: (s: SignatureInfo[]) => { sigs = [...s, ...sigs]; }, ws: (s: string, logs?: string[], slot?: number) => logCb?.(s, logs, slot) };
 }
 
 describe('Watcher', () => {
@@ -69,6 +69,16 @@ describe('Watcher', () => {
     ws(SIG, ['Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]']);
     await w.drain();
     expect(fetched).toEqual([SIG]);
+  });
+
+  it('fast path: a pump.fun buy in the socket logs is passed on without fetching the transaction', async () => {
+    const { w, ws, fetched, trades } = setup();
+    await w.sync();
+    ws(SIG, buyTx.meta!.logMessages!, 123);
+    await w.drain();
+    expect(fetched).toEqual([]);
+    expect(trades).toHaveLength(1);
+    expect(trades[0]).toMatchObject({ side: 'buy', leader: LEADER, slot: 123 });
   });
 
   it('never runs more than the allowed fetches at once', async () => {

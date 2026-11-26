@@ -6,6 +6,7 @@
 //  * test mode: the buy is built and simulated with the user's real wallet when it holds enough SOL (proving the
 //    transaction would go through), the fill is the real quote, nothing is sent. Sells are filled from the quote.
 import { PublicKey, type Keypair } from '@solana/web3.js';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { config } from '../config.js';
 import { getConnection } from '../chain/connection.js';
 import { getTransaction } from '../chain/rpc.js';
@@ -66,6 +67,15 @@ export class ChainExecutor implements Executor {
     return total;
   }
 
+  /** Balance of the owner's associated token account; 0 only when the account does not exist, errors throw. */
+  private async ataBalance(pool: ResolvedPool, owner: PublicKey): Promise<bigint> {
+    const ata = getAssociatedTokenAddressSync(pool.mint, owner, true, pool.tokenProgram);
+    const info = await getConnection().getAccountInfo(ata, 'confirmed');
+    if (!info) return 0n;
+    const bal = await getConnection().getTokenAccountBalance(ata, 'confirmed');
+    return BigInt(bal.value.amount);
+  }
+
   async quoteSell(mint: string, tokens: bigint): Promise<bigint> {
     return this.withPool(mint, (pool) => this.pf.venueFor(pool).quoteSell(pool, tokens));
   }
@@ -122,7 +132,8 @@ export class ChainExecutor implements Executor {
           const lamports = await venue.quoteSell(pool, req.tokens);
           return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports, simulated: true, note: 'test fill from the live quote' };
         }
-        const held = await this.tokenBalance(req.wallet.publicKey.toBase58(), req.mint);
+        // A sell draws from the standard (associated) token account: never ask for more than it holds.
+        const held = await this.ataBalance(pool, req.wallet.publicKey);
         const tokens = req.tokens > held ? held : req.tokens;
         if (tokens <= 0n) return { ok: false, error: 'the wallet holds none of this coin' };
         const built = await venue.buildSell({ pool, user: req.wallet.publicKey, tokensIn: tokens, slippagePct: req.slippagePct });

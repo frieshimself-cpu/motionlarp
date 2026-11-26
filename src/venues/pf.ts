@@ -3,13 +3,14 @@
 import { PublicKey, type Connection } from '@solana/web3.js';
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { getConnection } from '../chain/connection.js';
-import { pumpSdk } from './sdk.js';
+import { pumpSdk, pumpSwapSdk } from './sdk.js';
 import { PumpFunVenue } from './pumpfun.js';
 import { PumpSwapVenue } from './pumpswap.js';
 import { VenueError, type ResolvedPool, type Venue } from './types.js';
 
 const RESOLVE_TTL_MS = 60_000;
-const { PUMP_AMM_PROGRAM_ID, PUMP_PROGRAM_ID, bondingCurvePda, canonicalPumpPoolPda, OnlinePumpSdk } = pumpSdk;
+const { PUMP_AMM_PROGRAM_ID, PUMP_PROGRAM_ID, PUMP_SDK, bondingCurvePda, canonicalPumpPoolPda } = pumpSdk;
+const { PUMP_AMM_SDK } = pumpSwapSdk;
 
 export class PfDispatcher {
   readonly curve = new PumpFunVenue();
@@ -30,36 +31,42 @@ export class PfDispatcher {
     return resolved;
   }
 
+  /** One round trip: the mint, its bonding curve and its canonical PumpSwap pool, fetched together. */
   private async fromMint(connection: Connection, mint: PublicKey): Promise<ResolvedPool | null> {
-    const tokenProgram = await this.tokenProgramOf(connection, mint);
     const curvePda = bondingCurvePda(mint);
-    const curveInfo = await connection.getAccountInfo(curvePda, 'confirmed');
+    const poolPda = canonicalPumpPoolPda(mint);
+    const [mintInfo, curveInfo, poolInfo] = await connection.getMultipleAccountsInfo([mint, curvePda, poolPda], 'confirmed');
+    if (!mintInfo) throw new VenueError(`mint ${mint.toBase58()} not found`, 'unresolved');
+    const tokenProgram = mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : mintInfo.owner.equals(TOKEN_PROGRAM_ID) ? TOKEN_PROGRAM_ID : null;
+    if (!tokenProgram) throw new VenueError(`${mint.toBase58()} is not a token mint`, 'unresolved');
+    const ammPool = poolInfo && poolInfo.owner.equals(PUMP_AMM_PROGRAM_ID) ? poolPda : null;
     if (curveInfo && curveInfo.owner.equals(PUMP_PROGRAM_ID)) {
-      const curve = await new OnlinePumpSdk(connection).fetchBondingCurve(mint);
-      if (curve.complete) return this.migrated(connection, mint, tokenProgram, curvePda);
-      return { kind: 'pumpfun_curve', pool: curvePda, mint, tokenProgram };
+      const curve = PUMP_SDK.decodeBondingCurve(curveInfo as never);
+      if (!curve.complete) return { kind: 'pumpfun_curve', pool: curvePda, mint, tokenProgram };
+      if (!ammPool) throw new VenueError('curve is complete but its PumpSwap pool was not found yet', 'migrating');
+      return { kind: 'pumpswap', pool: ammPool, mint, tokenProgram, migratedFrom: curvePda };
     }
-    // No curve: maybe a PumpSwap canonical pool exists anyway.
-    const poolPda = canonicalPumpPoolPda(mint);
-    const poolInfo = await connection.getAccountInfo(poolPda, 'confirmed');
-    if (poolInfo && poolInfo.owner.equals(PUMP_AMM_PROGRAM_ID)) return { kind: 'pumpswap', pool: poolPda, mint, tokenProgram };
+    if (ammPool) return { kind: 'pumpswap', pool: ammPool, mint, tokenProgram };
+    return this.otherAmmPool(connection, mint, tokenProgram);
+  }
+
+  /**
+   * A PumpSwap pool that is not the coin's canonical one (coins not launched on pump.fun). Found by its base mint
+   * (byte offset 43 of the pool account, checked against a decoded pool on mainnet) and confirmed by decoding.
+   * Only SOL-quoted pools are used; a pool laid out the other way round (SOL as base) is refused.
+   */
+  private async otherAmmPool(connection: Connection, mint: PublicKey, tokenProgram: PublicKey): Promise<ResolvedPool | null> {
+    const res = await connection.getProgramAccounts(PUMP_AMM_PROGRAM_ID, { commitment: 'confirmed', filters: [{ memcmp: { offset: 43, bytes: mint.toBase58() } }] });
+    let best: { pool: PublicKey; reserve: bigint } | null = null;
+    for (const r of res) {
+      const d = PUMP_AMM_SDK.decodePoolNullable(r.account as never);
+      if (!d || !d.baseMint.equals(mint) || !pumpSwapSdk.isSolLikeQuoteMint(d.quoteMint)) continue;
+      const reserve = BigInt(r.account.lamports);
+      if (!best || reserve > best.reserve) best = { pool: r.pubkey, reserve };
+    }
+    if (best) return { kind: 'pumpswap', pool: best.pool, mint, tokenProgram };
+    const reversed = await connection.getProgramAccounts(PUMP_AMM_PROGRAM_ID, { commitment: 'confirmed', filters: [{ memcmp: { offset: 75, bytes: mint.toBase58() } }], dataSlice: { offset: 0, length: 0 } });
+    if (reversed.length) throw new VenueError('this coin\'s pool is quoted the other way round (SOL as the base) — not supported', 'unsupported_pool');
     return null;
-  }
-
-  private async migrated(connection: Connection, mint: PublicKey, tokenProgram: PublicKey, curve: PublicKey): Promise<ResolvedPool> {
-    const poolPda = canonicalPumpPoolPda(mint);
-    const poolInfo = await connection.getAccountInfo(poolPda, 'confirmed');
-    if (!poolInfo || !poolInfo.owner.equals(PUMP_AMM_PROGRAM_ID)) {
-      throw new VenueError('curve is complete but its PumpSwap pool was not found yet', 'migrating');
-    }
-    return { kind: 'pumpswap', pool: poolPda, mint, tokenProgram, migratedFrom: curve };
-  }
-
-  private async tokenProgramOf(connection: Connection, mint: PublicKey): Promise<PublicKey> {
-    const info = await connection.getAccountInfo(mint, 'confirmed');
-    if (!info) throw new VenueError(`mint ${mint.toBase58()} not found`, 'unresolved');
-    if (info.owner.equals(TOKEN_2022_PROGRAM_ID)) return TOKEN_2022_PROGRAM_ID;
-    if (info.owner.equals(TOKEN_PROGRAM_ID)) return TOKEN_PROGRAM_ID;
-    throw new VenueError(`${mint.toBase58()} is not a token mint`, 'unresolved');
   }
 }

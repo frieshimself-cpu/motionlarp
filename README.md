@@ -26,6 +26,26 @@ with pump.fun's official code libraries, the trading code ported from the Velo r
 sells run one at a time, so two sells never collide. Failed sells retry with growing pauses. Wallet keys are
 stored encrypted (AES-256-GCM) and never leave the server.
 
+## Speed
+
+Measured on mainnet (26 Nov 2026): a followed wallet's pump.fun buy reaches the server about **1 slot (~0.4 s)**
+after it happens (websocket at "processed", read straight from the transaction's logs with no extra fetch);
+resolving the coin and building our buy takes **~70–150 ms**; the buy is then sent without a simulation round
+trip. Expect copies to land **about 2–4 slots (~1–1.5 s) behind** the wallet, with a paid RPC close to the
+server. Before this tuning it was ~6–10 slots.
+
+For comparison, OKTech's sniper lands copies in the leader's *own* block (snipetech's record). Every slot behind
+costs on hot coins (snipetech measured +18–43 % entry price at 2–4 trades behind a crowded leader). So:
+
+- Fine for wallets that buy and hold for a while, or trade coins that aren't being swarmed.
+- Weak against the most-copied wallets, where everyone races into the same block. Use a higher priority fee
+  there, and test in test mode first: the history shows what the copy would have made.
+- Next steps if needed: a Geyser / Helius LaserStream feed (sees trades as they are processed, ~1 slot sooner)
+  and sending through Jito / Helius Sender for faster landing.
+
+The free public RPC drops websocket connections; the backup poll then catches trades seconds late. A paid RPC
+keeps the websocket up.
+
 ## Put it online (about 20 minutes)
 
 You need: a small Linux server (2 GB RAM is plenty), a domain name, and a **paid Solana RPC** (Helius, QuickNode
@@ -81,8 +101,9 @@ Both switches are needed for a real trade: the server's `LIVE_TRADING=true` **an
 npm install
 cp .env.example .env        # put MASTER_KEY in (npm run genkey); RPC_URL optional
 npm run dev                 # http://127.0.0.1:3000
-npm test                    # 80 tests
+npm test                    # 96 tests
 npm run check:mainnet       # builds real buys/sells for real wallets on mainnet and simulates them (sends nothing)
+npm run measure             # how many slots behind a copy would be, and how long building it takes
 ```
 
 Without `RPC_URL` the site works but nothing is watched or traded.

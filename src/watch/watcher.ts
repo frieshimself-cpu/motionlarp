@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { getSignaturesForAddress, getTransaction, type RawTransaction, type SignatureInfo } from '../chain/rpc.js';
 import { log, safeErrorMessage } from '../log.js';
 import { parseLeaderTrades, PUMP_AMM_PROGRAM, PUMP_PROGRAM, type LeaderTrade } from './parse.js';
+import { fastBuysFromLogs } from './events.js';
 
 export interface WatcherDeps {
   leaders: () => string[];
@@ -15,7 +16,7 @@ export interface WatcherDeps {
   getSignatures?: (leader: string, until?: string, before?: string) => Promise<SignatureInfo[]>;
   getTransaction?: (signature: string) => Promise<RawTransaction | null>;
   /** Subscribe to a wallet's transactions (with their logs when known); returns an unsubscribe function. */
-  subscribe?: (leader: string, onSignature: (signature: string, logs?: string[]) => void) => () => void;
+  subscribe?: (leader: string, onSignature: (signature: string, logs?: string[], slot?: number) => void) => () => void;
   fetchRetryMs?: number;
   /** Transaction fetches in flight at once (a very busy wallet must not flood the RPC). */
   maxConcurrentFetches?: number;
@@ -38,7 +39,8 @@ export function websocketSubscriber(): WatcherDeps['subscribe'] {
   return (leader, onSignature) => {
     let id: number | null = null;
     try {
-      id = conn.onLogs(new PublicKey(leader), (l) => { if (!l.err) onSignature(l.signature, l.logs); }, 'confirmed');
+      // 'processed': the earliest the RPC can tell us (about a second before 'confirmed').
+      id = conn.onLogs(new PublicKey(leader), (l, ctx) => { if (!l.err) onSignature(l.signature, l.logs, ctx.slot); }, 'processed');
     } catch (err) {
       log.warn('log subscription failed; polling only', { leader, error: safeErrorMessage(err) });
     }
@@ -96,7 +98,7 @@ export class Watcher {
       for (const leader of wanted) {
         if (!this.cursors.has(leader)) {
           this.cursors.set(leader, null);
-          if (this.deps.subscribe) this.unsubs.set(leader, this.deps.subscribe(leader, (sig, logs) => this.handle(sig, leader, logs)));
+          if (this.deps.subscribe) this.unsubs.set(leader, this.deps.subscribe(leader, (sig, logs, slot) => this.handle(sig, leader, logs, slot)));
         }
       }
       await Promise.all([...wanted].map((leader) => this.poll(leader)));
@@ -138,12 +140,24 @@ export class Watcher {
   }
 
   /** Fetch, parse and pass on one signature, once. Logs that never mention pump.fun / PumpSwap skip the fetch. */
-  handle(signature: string, leader: string, logs?: string[]): void {
+  handle(signature: string, leader: string, logs?: string[], slot?: number): void {
     const key = `${signature}:${leader}`;
     if (this.seen.has(key)) return;
     this.seen.add(key);
     const truncated = logs?.some((l) => /log truncated/i.test(l));
     if (logs && logs.length && !truncated && !logs.some((l) => l.includes(PUMP_PROGRAM) || l.includes(PUMP_AMM_PROGRAM))) return;
+    // Fast path: a plain pump.fun buy is copied straight from the logs, no fetch. (The engine's slot check keeps a
+    // later sell that was handled first from being undone by this buy.)
+    const fast = logs && slot !== undefined ? fastBuysFromLogs(logs, signature, leader, slot) : null;
+    if (fast) {
+      for (const t of fast) {
+        log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, fast: true, sig: signature.slice(0, 12) });
+        const job = this.deps.onTrade(t).catch((err) => log.warn('leader trade failed', { signature, error: safeErrorMessage(err) }));
+        this.pending.add(job);
+        void job.finally(() => this.pending.delete(job));
+      }
+      return;
+    }
     if (this.seen.size > SEEN_CAP) {
       const first = this.seen.values().next().value;
       if (first) this.seen.delete(first);
@@ -188,7 +202,7 @@ export class Watcher {
         return;
       }
       for (const t of parseLeaderTrades(tx, leader)) {
-        log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, lagMs: t.blockTime ? Date.now() - t.blockTime * 1000 : null, signature });
+        log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, lagMs: t.blockTime ? Date.now() - t.blockTime * 1000 : null, sig: signature.slice(0, 12) });
         await this.deps.onTrade(t);
       }
     });

@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 80 tests
+## Automated (every change): `npm test`, 96 tests
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -35,6 +35,26 @@
 4. Found and fixed in these runs: sells gave up too fast under RPC rate limits (now retry with backoff, mirror
    included); a very busy wallet (674 trades in 3 minutes) flooded the RPC (now non-pump notifications are
    skipped and fetches are capped); a followed wallet with no history broke polling (empty cursor).
+
+## Code review (26 Nov 2026) and fixes
+
+An independent review of the money paths found, among others: a failed balance read could close a live position
+with the coins still in the wallet; a buy landing after the confirmation timeout left orphaned coins; live sells
+used the wallet's whole balance (two copies of the same coin sold each other's tokens); a partial stage could fire
+twice; old leader sells were dropped; trades could reach the engine out of order; interrupted buys stuck in
+"opening"; a copy flipped to Live on a test server stored paper positions as live. All fixed; each has a
+regression test in `tests/review.test.ts` that reproduced the bug first. Added: a 30 s safety net that settles
+interrupted buys and sells coins the followed wallet no longer holds.
+
+## Speed (26 Nov 2026, public RPC)
+
+`npm run measure`: a pump.fun buy is heard ~1 slot after it happens on the websocket ("processed"); resolving
+the coin and building our buy takes ~70–150 ms (one RPC round trip for the coin). Full server run with the fast
+path: buys copied from the websocket logs without a fetch; the public RPC's websocket dropped several times
+(close code 1006) and the backup poll then delivered trades 3–8 s late, so production needs a paid RPC.
+
+Also from these runs: PumpSwap pools not created by pump.fun are now found (by base mint, offset verified on a
+real pool); pools quoted the other way round (SOL as base) are refused with a reason.
 
 ## Not yet verified
 

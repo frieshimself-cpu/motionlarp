@@ -10,7 +10,6 @@ const { getConnection } = await import('../src/chain/connection.js');
 const { getSignaturesForAddress, getTransaction } = await import('../src/chain/rpc.js');
 const { accountKeys, parseLeaderTrades, PUMP_AMM_PROGRAM, PUMP_PROGRAM } = await import('../src/watch/parse.js');
 const { PfDispatcher } = await import('../src/venues/pf.js');
-const { ChainExecutor } = await import('../src/engine/executor.js');
 
 const pf = new PfDispatcher();
 const conn = getConnection();
@@ -33,7 +32,13 @@ async function findBuy(program: string, wantVenue: 'pumpfun' | 'pumpswap') {
     if (!tx) continue;
     const payer = accountKeys(tx)[0]!;
     const t = parseLeaderTrades(tx, payer).find((x) => x.side === 'buy' && x.venue === wantVenue && x.solLamports > 1_000_000n);
-    if (t) return t;
+    if (!t) continue;
+    try {
+      await pf.resolve(t.mint);
+      return t;
+    } catch (err) {
+      console.log(`(skipping ${t.mint.slice(0, 6)}…: ${err instanceof Error ? err.message : err})`);
+    }
   }
   return null;
 }
@@ -57,7 +62,10 @@ for (const [program, venue] of [[PUMP_PROGRAM, 'pumpfun'], [PUMP_AMM_PROGRAM, 'p
     console.log(`our ${Number(lamports) / 1e9} SOL buy: quote ${quote} tokens; simulation ${simBuy.err ? 'FAILED ' + JSON.stringify(simBuy.err) : `ok (${simBuy.unitsConsumed} CU)`}`);
     if (simBuy.err) { failures++; console.log((simBuy.logs ?? []).slice(-8).join('\n')); }
 
-    const held = await new ChainExecutor().tokenBalance(t.leader, t.mint);
+    // The sell draws from the wallet's standard (associated) token account, where our own copies always hold.
+    const { getAssociatedTokenAddressSync } = await import('@solana/spl-token');
+    const ata = getAssociatedTokenAddressSync(pool.mint, user, true, pool.tokenProgram);
+    const held = await conn.getTokenAccountBalance(ata, 'confirmed').then((b) => BigInt(b.value.amount)).catch(() => 0n);
     if (held > 0n) {
       const tokens = held / 2n;
       const sell = await v.buildSell({ pool, user, tokensIn: tokens, slippagePct: 25 });
@@ -65,7 +73,7 @@ for (const [program, venue] of [[PUMP_PROGRAM, 'pumpfun'], [PUMP_AMM_PROGRAM, 'p
       console.log(`our sell of 50% of their ${held} tokens: quote ${sell.expectedOut} lamports; simulation ${simSell.err ? 'FAILED ' + JSON.stringify(simSell.err) : `ok (${simSell.unitsConsumed} CU)`}`);
       if (simSell.err) { failures++; console.log((simSell.logs ?? []).slice(-8).join('\n')); }
     } else {
-      console.log('wallet already sold out: sell not simulated');
+      console.log('wallet holds none in its standard token account (sold out, or keeps coins elsewhere): sell not simulated');
     }
   } catch (err) {
     failures++;
