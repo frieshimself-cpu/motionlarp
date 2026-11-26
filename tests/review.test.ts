@@ -97,7 +97,7 @@ describe('review findings', () => {
     const w = new Watcher({
       leaders: () => [L1], pollMs: 1e9, fetchRetryMs: 1,
       getSignatures: async () => { call++; return call === 1 ? [] : [{ signature: 'SELL', slot: 2, err: null, blockTime: 1 }, { signature: 'BUY', slot: 1, err: null, blockTime: 1 }]; },
-      getTransaction: async (s) => { await sleep(delay[s]!); return { slot: 1, blockTime: 1, meta: { err: null, fee: 5000, preBalances: [10e9, 0], postBalances: s === 'BUY' ? [9e9, 0] : [10e9, 0], preTokenBalances: s === 'BUY' ? [] : [{ accountIndex: 1, mint: MINT, owner: L1, uiTokenAmount: { amount: '100', decimals: 6 } }], postTokenBalances: s === 'BUY' ? [{ accountIndex: 1, mint: MINT, owner: L1, uiTokenAmount: { amount: '100', decimals: 6 } }] : [] }, transaction: { signatures: [s], message: { accountKeys: [L1, 'acc', '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'] } } } as never; },
+      getTransaction: async (s) => { await sleep(delay[s]!); return { slot: 1, blockTime: 1, meta: { err: null, fee: 5000, preBalances: [10e9, 0], postBalances: s === 'BUY' ? [9e9, 0] : [11e9, 0], preTokenBalances: s === 'BUY' ? [] : [{ accountIndex: 1, mint: MINT, owner: L1, uiTokenAmount: { amount: '100', decimals: 6 } }], postTokenBalances: s === 'BUY' ? [{ accountIndex: 1, mint: MINT, owner: L1, uiTokenAmount: { amount: '100', decimals: 6 } }] : [] }, transaction: { signatures: [s], message: { accountKeys: [L1, 'acc', '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'] } } } as never; },
       onTrade: async (t) => { order.push(`${t.signature}:${t.side}`); },
     });
     await w.sync(); await w.sync();

@@ -1,27 +1,41 @@
-// What a followed wallet did in one transaction, read from balance changes (not instruction names, which differ
-// between pump.fun's buy/sell variants and PumpSwap's base/quote naming).
+// What a followed wallet did in one transaction, read from balance changes, on any launchpad or exchange (not from
+// instruction names, which differ between every program and even between pump.fun's own buy/sell variants).
 //
 // The wallet's SOL position = its own lamports + the lamports of every token account it owns (WSOL balances and
-// token-account rent included), with the network fee added back when it paid it. A pump.fun / PumpSwap transaction
-// where its balance of a coin rises is a buy; where it falls, a sell.
+// token-account rent included), with the network fee added back when it paid it. A coin whose balance rises is a
+// buy, one that falls a sell — but only when something went the other way: SOL, a stablecoin (USDC-, USDT-,
+// USD1-paired coins), or another coin (a coin-for-coin swap). A coin arriving alone is a transfer, not a trade.
 import type { RawTransaction } from '../chain/rpc.js';
 
 export const PUMP_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 export const PUMP_AMM_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+/** Quote currencies: moving them is paying, not trading a coin. */
+export const STABLE_MINTS = new Set([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB', // USD1
+]);
+/** SOL movements below this (rent, tips, dust) do not make a transfer into a trade. */
+const SOL_DUST = 50_000n;
 
 export interface LeaderTrade {
   signature: string;
   leader: string;
   mint: string;
   side: 'buy' | 'sell';
-  /** Buy: SOL the wallet spent (fees and tips it paid included). Sell: SOL it received. */
+  /**
+   * Buy: SOL the wallet spent (fees and tips it paid included). Sell: SOL it received. For a coin bought with a
+   * stablecoin or another coin this is 0 until the watcher values `counter` in SOL.
+   */
   solLamports: bigint;
+  /** What went the other way when it was not SOL: the stablecoin or coin paid (buy) or received (sell). */
+  counter?: { mint: string; amount: bigint };
   /** Tokens bought or sold (base units, always positive). */
   tokenAmount: bigint;
   tokensBefore: bigint;
   tokensAfter: bigint;
-  venue: 'pumpfun' | 'pumpswap';
+  venue: 'pumpfun' | 'pumpswap' | 'other';
   slot: number;
   blockTime: number | null;
 }
@@ -42,8 +56,7 @@ export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTra
   const meta = tx.meta;
   if (!meta || meta.err) return [];
   const keys = accountKeys(tx);
-  const venue = keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : keys.includes(PUMP_PROGRAM) ? 'pumpfun' : null;
-  if (!venue) return [];
+  const venue = keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : keys.includes(PUMP_PROGRAM) ? 'pumpfun' : 'other';
   const leaderIdx = keys.indexOf(leader);
   if (leaderIdx < 0) return [];
 
@@ -62,19 +75,36 @@ export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTra
   }
   for (const i of ownedAccounts) if (i !== leaderIdx) sol += lamportDelta(i);
 
-  const trades: LeaderTrade[] = [];
+  const delta = new Map<string, bigint>();
   for (const mint of new Set([...before.keys(), ...after.keys()])) {
-    if (mint === WSOL_MINT) continue;
+    if (mint === WSOL_MINT) continue; // WSOL is SOL: already in `sol` through the token account's lamports
+    const d = (after.get(mint) ?? 0n) - (before.get(mint) ?? 0n);
+    if (d !== 0n) delta.set(mint, d);
+  }
+  const coins = [...delta.keys()].filter((m) => !STABLE_MINTS.has(m));
+
+  const trades: LeaderTrade[] = [];
+  for (const mint of coins) {
+    const d = delta.get(mint)!;
+    const side = d > 0n ? 'buy' : 'sell';
+    const solPaid = side === 'buy' ? -sol : sol; // positive = SOL went the other way
+    let counter: LeaderTrade['counter'];
+    if (solPaid < SOL_DUST) {
+      // Not paid in SOL: a stablecoin first, else another coin, moving the opposite way (largest wins).
+      const opposite = [...delta.entries()].filter(([m, x]) => m !== mint && (side === 'buy' ? x < 0n : x > 0n));
+      const pick = opposite.find(([m]) => STABLE_MINTS.has(m)) ?? opposite.sort((a, b) => (a[1] < 0n ? -a[1] : a[1]) > (b[1] < 0n ? -b[1] : b[1]) ? -1 : 1)[0];
+      if (!pick) continue; // nothing went the other way: a transfer, not a trade
+      counter = { mint: pick[0], amount: pick[1] < 0n ? -pick[1] : pick[1] };
+    }
     const pre = before.get(mint) ?? 0n;
     const post = after.get(mint) ?? 0n;
-    if (pre === post) continue;
-    const side = post > pre ? 'buy' : 'sell';
     trades.push({
       signature: tx.transaction.signatures[0] ?? '',
       leader,
       mint,
       side,
-      solLamports: side === 'buy' ? (sol < 0n ? -sol : 0n) : sol > 0n ? sol : 0n,
+      solLamports: counter ? 0n : solPaid,
+      ...(counter ? { counter } : {}),
       tokenAmount: side === 'buy' ? post - pre : pre - post,
       tokensBefore: pre,
       tokensAfter: post,
