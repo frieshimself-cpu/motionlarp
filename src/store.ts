@@ -280,9 +280,10 @@ export class Store {
   enabledCopiesForLeader(leader: string): CopyRow[] {
     return this.all('SELECT * FROM copies WHERE leader = ? AND enabled = 1 AND deleted = 0', leader).map((r) => this.toCopy(r));
   }
-  /** Every wallet some enabled copy follows. */
+  /** Every wallet to watch: followed by an enabled copy, or behind an open position ("sell when they sell"
+   *  keeps working after a copy is paused or deleted). */
   watchedLeaders(): string[] {
-    return this.all('SELECT DISTINCT leader FROM copies WHERE enabled = 1 AND deleted = 0').map((r) => String(r.leader));
+    return this.all("SELECT leader FROM copies WHERE enabled = 1 AND deleted = 0 UNION SELECT leader FROM positions WHERE status IN ('opening','open')").map((r) => String(r.leader));
   }
 
   // ── positions and fills ───────────────────────────────────────────────
