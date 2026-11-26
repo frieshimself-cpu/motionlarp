@@ -53,8 +53,9 @@ function load() {
     feeExemptUsers: str('FEE_EXEMPT_USERS').split(',').map((u) => u.trim().toLowerCase()).filter(Boolean),
     /** 32 bytes as 64 hex characters: encrypts the wallet keys at rest. */
     masterKey: str('MASTER_KEY'),
-    /** Required to sign up when set. */
-    signupCode: str('SIGNUP_CODE'),
+    /** Opens the admin area (/admin): license keys, users, settings. Empty = closed. */
+    adminPassword: str('ADMIN_PASSWORD'),
+    brand: str('BRAND_NAME', 'WalletMotion'),
     dbPath: str('DB_PATH', './data/motionlarp.db'),
     logLevel: str('LOG_LEVEL', 'info'),
 

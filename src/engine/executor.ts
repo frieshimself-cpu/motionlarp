@@ -21,6 +21,7 @@ import { buildSignedTx } from '../tx/build.js';
 import { feeLamports, withFee } from '../fee.js';
 import { confirmSignature } from '../tx/confirm.js';
 import { canSendLive, sendTransaction } from '../tx/send.js';
+import { JITO_TIP_ACCOUNTS, tipInstruction, tipLamports } from '../tx/tip.js';
 import { appendInstruction, Jupiter } from '../venues/jupiter.js';
 import { PfDispatcher } from '../venues/pf.js';
 import { VenueError, type ResolvedPool } from '../venues/types.js';
@@ -36,6 +37,8 @@ export interface TradeRequest {
   mint: string;
   slippagePct: number;
   priorityFeeSol: number;
+  /** Tip to the block builder (Jito), in SOL; 0 = none. With a tip the transaction also goes through Jito. */
+  tipSol: number;
   /** The copy is set to live. Sent only if the server is live too. */
   live: boolean;
   /** Platform fee in basis points for this user (0 = none). */
@@ -170,6 +173,20 @@ export class ChainExecutor implements Executor {
     return BigInt(Math.round(config.feeReserveSol * 1e9));
   }
 
+  /** What one transaction costs besides the trade itself: base fee + priority fee + tip (counted in test fills). */
+  private txCost(req: TradeRequest): bigint {
+    return 5_000n + BigInt(Math.round(Math.max(0, req.priorityFeeSol) * 1e9)) + tipLamports(req.tipSol);
+  }
+
+  /** Sign a native transaction: priority fee, the trade, our platform fee, then the tip when one is set. */
+  private nativeTx(req: TradeRequest, instructions: TransactionInstruction[]) {
+    const tipped = tipLamports(req.tipSol) > 0n;
+    return buildSignedTx({
+      signer: req.wallet, instructions, validatorTipSol: req.priorityFeeSol, txFeeSol: tipped ? req.tipSol : 0,
+      tipAccount: tipped ? new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]!) : undefined,
+    });
+  }
+
   private async nativeBuy(req: TradeRequest & { lamports: bigint }, pool: ResolvedPool): Promise<FillResult> {
     const venue = this.pf.venueFor(pool);
     const owner = req.wallet.publicKey.toBase58();
@@ -177,15 +194,16 @@ export class ChainExecutor implements Executor {
       const tokens = await venue.quoteBuy(pool, req.lamports);
       if (tokens <= 0n) return { ok: false, error: 'the quote returned zero tokens' };
       const fee = config.feeWallet ? feeLamports(req.lamports, req.feeBps) : 0n;
-      if ((await this.solBalance(owner)) < req.lamports + fee + this.reserve()) {
-        return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens, lamports: req.lamports + fee, feeLamports: fee, simulated: true, note: 'test fill from the live quote (wallet too empty to simulate)' };
+      const cost = this.txCost(req);
+      if ((await this.solBalance(owner)) < req.lamports + fee + cost + this.reserve()) {
+        return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens, lamports: req.lamports + fee + cost, feeLamports: fee, simulated: true, note: 'test fill from the live quote (wallet too empty to simulate)' };
       }
       const built = await venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct });
       const ixs = withFee(built.instructions, req.wallet.publicKey, req.lamports, req.feeBps, config.feeWallet);
-      const tx = await buildSignedTx({ signer: req.wallet, instructions: ixs.instructions, validatorTipSol: req.priorityFeeSol, txFeeSol: 0 });
+      const tx = await this.nativeTx(req, ixs.instructions);
       const sim = await sendTransaction(tx.tx, false);
       if (!sim.ok) return { ok: false, error: sim.error };
-      return { ok: true, signature: sim.signature, tokens, lamports: req.lamports + ixs.fee, feeLamports: ixs.fee, simulated: true, note: 'simulated on-chain, not sent (test mode)' };
+      return { ok: true, signature: sim.signature, tokens, lamports: req.lamports + ixs.fee + cost, feeLamports: ixs.fee, simulated: true, note: 'simulated on-chain, not sent (test mode)' };
     }
     const [built, before] = await Promise.all([
       venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct }),
@@ -193,7 +211,7 @@ export class ChainExecutor implements Executor {
     ]);
     // The fee transfer rides in the same transaction, after the swap: no trade, no fee.
     const ixs = withFee(built.instructions, req.wallet.publicKey, req.lamports, req.feeBps, config.feeWallet);
-    const tx = await buildSignedTx({ signer: req.wallet, instructions: ixs.instructions, validatorTipSol: req.priorityFeeSol, txFeeSol: 0 });
+    const tx = await this.nativeTx(req, ixs.instructions);
     return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'buy', built.expectedOut, req.lamports + ixs.fee, before, ixs.fee);
   }
 
@@ -206,9 +224,12 @@ export class ChainExecutor implements Executor {
         const { tx, lastValidBlockHeight } = await this.jup.swap(quote, req.wallet.publicKey, BigInt(Math.round(req.priorityFeeSol * 1e9)));
         const fee = config.feeWallet ? feeOn(BigInt(quote.outAmount)) : 0n;
         let signed: VersionedTransaction = tx;
-        if (fee > 0n) {
-          const feeIx: TransactionInstruction = SystemProgram.transfer({ fromPubkey: req.wallet.publicKey, toPubkey: new PublicKey(config.feeWallet), lamports: fee });
-          signed = await appendInstruction(tx, feeIx, async (keys) => (await Promise.all(keys.map((k) => getConnection().getAddressLookupTable(k)))).map((r) => r.value!).filter(Boolean));
+        const extra: TransactionInstruction[] = [];
+        if (fee > 0n) extra.push(SystemProgram.transfer({ fromPubkey: req.wallet.publicKey, toPubkey: new PublicKey(config.feeWallet), lamports: fee }));
+        const tip = tipInstruction(req.wallet.publicKey, req.tipSol);
+        if (tip) extra.push(tip);
+        if (extra.length) {
+          signed = await appendInstruction(tx, extra, async (keys) => (await Promise.all(keys.map((k) => getConnection().getAddressLookupTable(k)))).map((r) => r.value!).filter(Boolean));
         }
         signed.sign([req.wallet]);
         return { tx: signed, lastValidBlockHeight, quote, fee };
@@ -225,14 +246,15 @@ export class ChainExecutor implements Executor {
     const feeOnBuy = () => feeLamports(req.lamports, req.feeBps);
     if (!this.isLive(req)) {
       const fee = config.feeWallet ? feeOnBuy() : 0n;
-      if ((await this.solBalance(owner)) < req.lamports + fee + this.reserve()) {
+      const cost = this.txCost(req);
+      if ((await this.solBalance(owner)) < req.lamports + fee + cost + this.reserve()) {
         const q = await this.jup.quote(WSOL_MINT, req.mint, req.lamports, Math.round(req.slippagePct * 100));
-        return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: BigInt(q.outAmount), lamports: req.lamports + fee, feeLamports: fee, simulated: true, note: 'test fill from the Jupiter quote (wallet too empty to simulate)' };
+        return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: BigInt(q.outAmount), lamports: req.lamports + fee + cost, feeLamports: fee, simulated: true, note: 'test fill from the Jupiter quote (wallet too empty to simulate)' };
       }
       const built = await this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy);
       const sim = await sendTransaction(built.tx, false);
       if (!sim.ok) return { ok: false, error: sim.error };
-      return { ok: true, signature: sim.signature, tokens: BigInt(built.quote.outAmount), lamports: req.lamports + built.fee, feeLamports: built.fee, simulated: true, note: 'Jupiter route simulated on-chain, not sent (test mode)' };
+      return { ok: true, signature: sim.signature, tokens: BigInt(built.quote.outAmount), lamports: req.lamports + built.fee + cost, feeLamports: built.fee, simulated: true, note: 'Jupiter route simulated on-chain, not sent (test mode)' };
     }
     const [built, before] = await Promise.all([this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy), this.tokenBalance(owner, req.mint).catch(() => null)]);
     return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'buy', BigInt(built.quote.outAmount), req.lamports + built.fee, before, built.fee);
@@ -252,7 +274,8 @@ export class ChainExecutor implements Executor {
     if (!this.isLive(req)) {
       const gross = await venue.quoteSell(pool, req.tokens);
       const fee = config.feeWallet ? feeLamports(gross, req.feeBps) : 0n;
-      return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports: gross - fee, feeLamports: fee, simulated: true, note: 'test fill from the live quote' };
+      const net = gross - fee - this.txCost(req);
+      return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports: net > 0n ? net : 0n, feeLamports: fee, simulated: true, note: 'test fill from the live quote' };
     }
     // A sell draws from the standard (associated) token account: never ask for more than it holds.
     const held = await this.ataBalance(req.mint, req.wallet.publicKey, pool.tokenProgram);
@@ -260,7 +283,7 @@ export class ChainExecutor implements Executor {
     if (tokens <= 0n) return { ok: false, error: 'the wallet holds none of this coin' };
     const built = await venue.buildSell({ pool, user: req.wallet.publicKey, tokensIn: tokens, slippagePct: req.slippagePct });
     const ixs = withFee(built.instructions, req.wallet.publicKey, built.expectedOut, req.feeBps, config.feeWallet);
-    const tx = await buildSignedTx({ signer: req.wallet, instructions: ixs.instructions, validatorTipSol: req.priorityFeeSol, txFeeSol: 0 });
+    const tx = await this.nativeTx(req, ixs.instructions);
     return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'sell', tokens, built.expectedOut - ixs.fee, held, ixs.fee);
   }
 
@@ -270,7 +293,8 @@ export class ChainExecutor implements Executor {
       const q = await this.jup.quote(req.mint, WSOL_MINT, req.tokens, Math.round(req.slippagePct * 100));
       const gross = BigInt(q.outAmount);
       const fee = config.feeWallet ? feeOnSell(gross) : 0n;
-      return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports: gross - fee, feeLamports: fee, simulated: true, note: 'test fill from the Jupiter quote' };
+      const net = gross - fee - this.txCost(req);
+      return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports: net > 0n ? net : 0n, feeLamports: fee, simulated: true, note: 'test fill from the Jupiter quote' };
     }
     const held = await this.ataBalance(req.mint, req.wallet.publicKey);
     const tokens = req.tokens > held ? held : req.tokens;
@@ -285,7 +309,7 @@ export class ChainExecutor implements Executor {
    * transaction that landed late is still recorded as a fill, never left as orphaned coins.
    */
   private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBefore: bigint | null, platformFee: bigint): Promise<FillResult> {
-    const sent = await sendTransaction(tx, true);
+    const sent = await sendTransaction(tx, true, tipLamports(req.tipSol) > 0n);
     if (!sent.ok) return { ok: false, error: sent.error };
     const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight);
     const owner = req.wallet.publicKey.toBase58();

@@ -25,7 +25,12 @@ export interface CopySettings {
   /** Copy only buys where the copied wallet spent at least this much SOL. */
   minLeaderBuySol: number;
   slippagePct: number;
+  /** Trading fees, per transaction. Priority fee: paid to the network to be included sooner. Tip: paid to the
+   *  block builder (Jito) to land sooner still; 0 = no tip. Buys and sells are set separately. */
   priorityFeeSol: number;
+  tipSol: number;
+  sellPriorityFeeSol: number;
+  sellTipSol: number;
   /** Buy each coin at most once per copy (leaders often buy in several chunks). */
   oncePerCoin: boolean;
   sell: SellSettings;
@@ -33,7 +38,7 @@ export interface CopySettings {
 
 export class SettingsError extends Error {}
 
-export const LIMITS = { maxStages: 10, maxBuySol: 100, maxPriorityFeeSol: 0.1, minIdleSec: 5, maxSec: 7 * 86_400 };
+export const LIMITS = { maxStages: 10, maxBuySol: 100, maxPriorityFeeSol: 0.1, maxTipSol: 0.5, minIdleSec: 5, maxSec: 7 * 86_400 };
 
 export function defaultSettings(): Omit<CopySettings, 'leader'> & { leader: string } {
   return {
@@ -45,6 +50,9 @@ export function defaultSettings(): Omit<CopySettings, 'leader'> & { leader: stri
     minLeaderBuySol: 0.5,
     slippagePct: 25,
     priorityFeeSol: 0.0005,
+    tipSol: 0,
+    sellPriorityFeeSol: 0.0005,
+    sellTipSol: 0,
     oncePerCoin: true,
     sell: {
       mirror: { enabled: true, mode: 'same' },
@@ -97,8 +105,16 @@ export function validateSettings(input: unknown): CopySettings {
   if (!(minLeaderBuySol >= 0)) throw new SettingsError('the minimum leader buy cannot be negative');
   const slippagePct = number(i.slippagePct, d.slippagePct, 'slippage');
   if (!(slippagePct >= 0.5 && slippagePct <= 100)) throw new SettingsError('slippage must be between 0.5 % and 100 %');
-  const priorityFeeSol = number(i.priorityFeeSol, d.priorityFeeSol, 'priority fee');
-  if (!(priorityFeeSol >= 0 && priorityFeeSol <= LIMITS.maxPriorityFeeSol)) throw new SettingsError(`priority fee must be between 0 and ${LIMITS.maxPriorityFeeSol} SOL`);
+  const fee = (v: unknown, fallback: number, what: string, max: number) => {
+    const n = number(v, fallback, what);
+    if (!(n >= 0 && n <= max)) throw new SettingsError(`${what} must be between 0 and ${max} SOL`);
+    return n;
+  };
+  const priorityFeeSol = fee(i.priorityFeeSol, d.priorityFeeSol, 'priority fee', LIMITS.maxPriorityFeeSol);
+  const tipSol = fee(i.tipSol, d.tipSol, 'tip', LIMITS.maxTipSol);
+  // Sells use the buy fees unless set on their own.
+  const sellPriorityFeeSol = fee(i.sellPriorityFeeSol, priorityFeeSol, 'sell priority fee', LIMITS.maxPriorityFeeSol);
+  const sellTipSol = fee(i.sellTipSol, tipSol, 'sell tip', LIMITS.maxTipSol);
 
   const s = obj(i.sell);
   const m = obj(s.mirror);
@@ -137,6 +153,9 @@ export function validateSettings(input: unknown): CopySettings {
     minLeaderBuySol,
     slippagePct,
     priorityFeeSol,
+    tipSol,
+    sellPriorityFeeSol,
+    sellTipSol,
     oncePerCoin: bool(i.oncePerCoin, d.oncePerCoin),
     sell: { mirror, timed, stopLoss, deadCoin },
   };

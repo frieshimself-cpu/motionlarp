@@ -106,3 +106,19 @@ describe('validateSettings', () => {
     expect(() => validateSettings({ ...base, ...patch })).toThrow(new RegExp(word, 'i'));
   });
 });
+
+describe('trading fees per copy', () => {
+  const base = { leader: LEADER, buySol: 0.1 };
+  it('defaults: sells use the buy fees unless set', () => {
+    const s = validateSettings({ ...base, priorityFeeSol: 0.001, tipSol: 0.002 });
+    expect(s).toMatchObject({ priorityFeeSol: 0.001, tipSol: 0.002, sellPriorityFeeSol: 0.001, sellTipSol: 0.002 });
+    expect(validateSettings(base)).toMatchObject({ priorityFeeSol: 0.0005, tipSol: 0, sellPriorityFeeSol: 0.0005, sellTipSol: 0 });
+  });
+  it('buy and sell fees can differ', () => {
+    const s = validateSettings({ ...base, priorityFeeSol: 0.001, tipSol: 0.003, sellPriorityFeeSol: 0.0002, sellTipSol: 0 });
+    expect(s).toMatchObject({ priorityFeeSol: 0.001, tipSol: 0.003, sellPriorityFeeSol: 0.0002, sellTipSol: 0 });
+  });
+  it.each([[{ tipSol: -1 }, 'tip'], [{ tipSol: 2 }, 'tip'], [{ sellTipSol: 2 }, 'tip'], [{ sellPriorityFeeSol: 5 }, 'priority fee']])('rejects %j', (patch, word) => {
+    expect(() => validateSettings({ ...base, ...patch })).toThrow(new RegExp(word, 'i'));
+  });
+});

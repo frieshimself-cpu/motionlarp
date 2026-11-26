@@ -65,14 +65,14 @@ export class Jupiter {
 }
 
 /**
- * Adds one instruction (our platform fee) at the end of a prebuilt v0 transaction: decompile with its address
+ * Adds instructions (the tip, our platform fee) at the end of a prebuilt v0 transaction: decompile with its address
  * lookup tables, append, recompile with the same tables and blockhash. Throws if the result no longer fits.
  */
-export async function appendInstruction(tx: VersionedTransaction, ix: TransactionInstruction, loadTables: (keys: PublicKey[]) => Promise<AddressLookupTableAccount[]>): Promise<VersionedTransaction> {
+export async function appendInstruction(tx: VersionedTransaction, ix: TransactionInstruction | TransactionInstruction[], loadTables: (keys: PublicKey[]) => Promise<AddressLookupTableAccount[]>): Promise<VersionedTransaction> {
   const lookups = tx.message.addressTableLookups ?? [];
   const tables = lookups.length ? await loadTables(lookups.map((l) => l.accountKey)) : [];
   const msg = TransactionMessage.decompile(tx.message, { addressLookupTableAccounts: tables });
-  msg.instructions.push(ix);
+  msg.instructions.push(...(Array.isArray(ix) ? ix : [ix]));
   const out = new VersionedTransaction(msg.compileToV0Message(tables));
   out.serialize(); // throws "encoding overruns" when the transaction is too large
   return out;

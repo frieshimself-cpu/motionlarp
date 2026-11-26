@@ -10,6 +10,8 @@ import { createApp } from './http/app.js';
 import { log, safeErrorMessage } from './log.js';
 import { Store } from './store.js';
 import { parseFeeConfig } from './fee.js';
+import { applyStoredSettings, saveOwnerSettings, settingsView, type OwnerSettingsPatch } from './owner-settings.js';
+import { rpc } from './chain/rpc.js';
 import { Watcher, websocketSubscriber } from './watch/watcher.js';
 
 if (!/^[0-9a-fA-F]{64}$/.test(config.masterKey)) {
@@ -17,20 +19,23 @@ if (!/^[0-9a-fA-F]{64}$/.test(config.masterKey)) {
   process.exit(1);
 }
 
-let fee: { bps: number; wallet: string };
+const store = new Store(config.dbPath);
+// What the owner saved on the admin page overrides the environment (the RPC link, fee, live switch, …).
+applyStoredSettings(store, config);
 try {
-  fee = parseFeeConfig({ bps: config.feeBps, wallet: config.feeWallet });
+  parseFeeConfig({ bps: config.feeBps, wallet: config.feeWallet });
 } catch (err) {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
+  // A broken fee setting must not keep the site down: run without a fee and say so.
+  log.error('platform fee disabled', { reason: err instanceof Error ? err.message : String(err) });
+  config.feeBps = 0;
 }
 
-const store = new Store(config.dbPath);
-/** The platform fee a user pays: FEE_BPS, unless their username is in FEE_EXEMPT_USERS. */
+/** The platform fee a user pays: their license's own fee if it has one, else the site's; exempt usernames pay none. */
 function feeBpsFor(userId: number): number {
-  if (!fee.bps) return 0;
+  if (!config.feeWallet) return 0;
   const name = store.user(userId)?.username.toLowerCase();
-  return name && config.feeExemptUsers.includes(name) ? 0 : fee.bps;
+  if (name && config.feeExemptUsers.includes(name)) return 0;
+  return store.userLicense(userId)?.feeBps ?? config.feeBps;
 }
 const executor = new ChainExecutor();
 const keyCache = new Map<number, Keypair>();
@@ -50,19 +55,30 @@ function walletFor(userId: number): Keypair | null {
   }
 }
 
-const engine = new Engine({ store, executor, walletFor, priceMs: config.priceMs, maxSolPerBuy: config.maxSolPerBuy, feeReserveSol: config.feeReserveSol, feeBpsFor });
+const engine = new Engine({ store, executor, walletFor, priceMs: config.priceMs, maxSolPerBuy: () => config.maxSolPerBuy, feeReserveSol: config.feeReserveSol, feeBpsFor });
 const watcher = config.rpcUrl
   ? new Watcher({ leaders: () => store.watchedLeaders(), onTrade: (t) => engine.onLeaderTrade(t), pollMs: config.pollMs, subscribe: websocketSubscriber(), valueInSol: (mint, amount) => executor.valueInSol(mint, amount) })
   : null;
 
-const mode = !config.rpcUrl ? 'offline' : canSendLive() ? 'live' : 'test';
+const mode = () => (!config.rpcUrl ? 'offline' : canSendLive() ? 'live' : 'test');
 const app = createApp({
-  store, engine, executor, masterKey: config.masterKey, signupCode: config.signupCode, secureCookies: config.secureCookies,
+  store, engine, executor, masterKey: config.masterKey, secureCookies: config.secureCookies,
+  adminPassword: config.adminPassword,
+  brand: config.brand,
+  owner: {
+    view: () => settingsView(config),
+    save: (patch) => saveOwnerSettings(store, config, patch as OwnerSettingsPatch, {
+      testRpc: async (url) => { await rpc<number>('getSlot', [], url); },
+      balance: (address) => executor.solBalance(address),
+    }),
+    // Docker restarts the container (restart: unless-stopped); in-flight trades finish first.
+    restart: () => void shutdown('settings changed'),
+  },
   forgetWallet: (id) => keyCache.delete(id),
   trustProxy: config.trustProxy,
   feeBpsFor,
   maxCopiesPerUser: config.maxCopiesPerUser,
-  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode }),
+  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode() }),
 });
 
 // Every second. Ticks may overlap: the engine runs one price check per position at a time, and timed sells fire
@@ -80,14 +96,14 @@ const safety = setInterval(() => {
   Promise.all([engine.restore(), engine.reconcile()]).catch((err) => log.warn('safety check failed', { error: safeErrorMessage(err) })).finally(() => { reconciling = false; });
 }, 30_000);
 
-// A fee transfer smaller than the rent minimum into an empty account makes the whole trade fail: the fee wallet
-// must already hold SOL. Checked once at startup (when an RPC is configured).
-if (fee.bps > 0 && config.rpcUrl) {
+// A fee transfer into an empty wallet fails (below the rent minimum) and takes the trade with it: without a funded
+// fee wallet the fee is switched off, loudly, rather than breaking every trade.
+if (config.feeBps > 0 && config.rpcUrl) {
   try {
-    const bal = await executor.solBalance(fee.wallet);
+    const bal = await executor.solBalance(config.feeWallet);
     if (bal < 1_000_000n) {
-      console.error(`FEE_WALLET holds ${Number(bal) / 1e9} SOL. Send it at least 0.001 SOL first: transfers into an empty wallet fail, and every trade with them.`);
-      process.exit(1);
+      log.error('platform fee disabled: FEE_WALLET holds under 0.001 SOL. Fund it, then save the fee again on the admin page.', { feeWallet: config.feeWallet });
+      config.feeBps = 0;
     }
   } catch (err) {
     log.warn('could not check the FEE_WALLET balance', { error: safeErrorMessage(err) });
@@ -95,7 +111,7 @@ if (fee.bps > 0 && config.rpcUrl) {
 }
 
 app.listen(config.port, config.host, () => {
-  log.info('motionlarp up', { url: `http://${config.host}:${config.port}`, mode, maxSolPerBuy: config.maxSolPerBuy, feeBps: fee.bps, feeExempt: config.feeExemptUsers });
+  log.info('motionlarp up', { url: `http://${config.host}:${config.port}`, mode: mode(), maxSolPerBuy: config.maxSolPerBuy, feeBps: config.feeBps, admin: config.adminPassword ? 'on' : 'off (no ADMIN_PASSWORD)' });
   if (!config.rpcUrl) log.warn('no RPC_URL: the site works but nothing is watched or traded');
   if (config.rpcUrl && !config.liveTrading) log.info('test mode: copies are simulated and filled from live quotes; nothing is sent (LIVE_TRADING=true to go live)');
   startBlockhashRefresher();

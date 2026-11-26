@@ -10,23 +10,40 @@ function masterKey(hex: string): Buffer {
 }
 
 export function encryptSecret(secret: Uint8Array, userId: number, masterHex: string): string {
+  return encryptBytes(secret, `user:${userId}`, masterHex);
+}
+
+export function decryptSecret(blob: string, userId: number, masterHex: string): Uint8Array {
+  return decryptBytes(blob, `user:${userId}`, masterHex);
+}
+
+/** Text secrets (the RPC link, API keys), bound to a name so one cannot be swapped for another. */
+export function encryptText(text: string, name: string, masterHex: string): string {
+  return encryptBytes(Buffer.from(text, 'utf8'), `setting:${name}`, masterHex);
+}
+
+export function decryptText(blob: string, name: string, masterHex: string): string {
+  return Buffer.from(decryptBytes(blob, `setting:${name}`, masterHex)).toString('utf8');
+}
+
+function encryptBytes(secret: Uint8Array, aad: string, masterHex: string): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', masterKey(masterHex), iv);
-  cipher.setAAD(Buffer.from(`user:${userId}`));
+  cipher.setAAD(Buffer.from(aad));
   const ct = Buffer.concat([cipher.update(secret), cipher.final()]);
   return ['v1', iv.toString('base64'), cipher.getAuthTag().toString('base64'), ct.toString('base64')].join(':');
 }
 
-export function decryptSecret(blob: string, userId: number, masterHex: string): Uint8Array {
+function decryptBytes(blob: string, aad: string, masterHex: string): Uint8Array {
   const [v, iv, tag, ct] = blob.split(':');
   if (v !== 'v1' || !iv || !tag || !ct) throw new CryptoError('unknown key format');
   try {
     const decipher = createDecipheriv('aes-256-gcm', masterKey(masterHex), Buffer.from(iv, 'base64'));
-    decipher.setAAD(Buffer.from(`user:${userId}`));
+    decipher.setAAD(Buffer.from(aad));
     decipher.setAuthTag(Buffer.from(tag, 'base64'));
     return new Uint8Array(Buffer.concat([decipher.update(Buffer.from(ct, 'base64')), decipher.final()]));
   } catch {
-    throw new CryptoError('wallet key does not decrypt (wrong MASTER_KEY?)');
+    throw new CryptoError('stored secret does not decrypt (wrong MASTER_KEY?)');
   }
 }
 

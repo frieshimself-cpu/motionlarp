@@ -385,3 +385,13 @@ describe('platform fee', () => {
     expect(feed()[0]).toMatch(/fee/);
   });
 });
+
+describe('trading fees per copy reach the trade', () => {
+  it('buys use the buy fees, sells the sell fees', async () => {
+    addCopy({ priorityFeeSol: 0.001, tipSol: 0.002, sellPriorityFeeSol: 0.0001, sellTipSol: 0.0005, sell: { mirror: { enabled: true, mode: 'all' } } });
+    await engine.onLeaderTrade(trade()); await engine.idle();
+    expect(ex.buys[0]).toMatchObject({ priorityFeeSol: 0.001, tipSol: 0.002 });
+    await engine.onLeaderTrade(trade({ side: 'sell', tokensBefore: 2_000_000n, tokensAfter: 0n, tokenAmount: 2_000_000n })); await engine.idle();
+    expect(ex.sells[0]).toMatchObject({ priorityFeeSol: 0.0001, tipSol: 0.0005 });
+  });
+});

@@ -8,7 +8,8 @@ import type { SellReason } from './engine/rules.js';
 
 export type PositionStatus = 'opening' | 'open' | 'closed' | 'failed';
 
-export interface User { id: number; username: string; passHash: string; createdAt: number }
+export interface User { id: number; username: string; passHash: string; createdAt: number; disabled: boolean }
+export interface License { id: number; hint: string; label: string; feeBps: number | null; createdAt: number; usedBy: number | null; usedAt: number | null; revoked: boolean; username: string | null }
 export interface WalletRow { userId: number; pubkey: string; encKey: string; createdAt: number }
 export interface CopyRow { id: number; userId: number; settings: CopySettings; createdAt: number; updatedAt: number }
 
@@ -138,6 +139,21 @@ CREATE TABLE IF NOT EXISTS events (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_user ON events(user_id, id);
+CREATE TABLE IF NOT EXISTS licenses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key_hash TEXT NOT NULL UNIQUE,
+  hint TEXT NOT NULL,
+  label TEXT NOT NULL,
+  fee_bps INTEGER,
+  created_at INTEGER NOT NULL,
+  used_by INTEGER,
+  used_at INTEGER,
+  revoked INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS seen (
   key TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL
@@ -203,6 +219,8 @@ export class Store {
     // Migrations for databases created by earlier versions.
     const fillCols = this.all('PRAGMA table_info(fills)').map((r) => String(r.name));
     if (!fillCols.includes('fee_lamports')) this.db.exec('ALTER TABLE fills ADD COLUMN fee_lamports INTEGER NOT NULL DEFAULT 0');
+    const userCols = this.all('PRAGMA table_info(users)').map((r) => String(r.name));
+    if (!userCols.includes('disabled')) this.db.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
   }
 
   private all(sql: string, ...params: unknown[]): Row[] {
@@ -228,14 +246,77 @@ export class Store {
   createUser(username: string, passHash: string): number {
     return this.run('INSERT INTO users (username, pass_hash, created_at) VALUES (?, ?, ?)', username, passHash, Date.now()).lastInsertRowid;
   }
+  private toUser(r: Row): User {
+    return { id: num(r.id), username: String(r.username), passHash: String(r.pass_hash), createdAt: num(r.created_at), disabled: num(r.disabled) === 1 };
+  }
   userByName(username: string): User | undefined {
     const r = this.get('SELECT * FROM users WHERE username = ?', username);
-    return r && { id: num(r.id), username: String(r.username), passHash: String(r.pass_hash), createdAt: num(r.created_at) };
+    return r && this.toUser(r);
   }
   user(id: number): User | undefined {
     const r = this.get('SELECT * FROM users WHERE id = ?', id);
-    return r && { id: num(r.id), username: String(r.username), passHash: String(r.pass_hash), createdAt: num(r.created_at) };
+    return r && this.toUser(r);
   }
+  users(): User[] {
+    return this.all('SELECT * FROM users ORDER BY id').map((r) => this.toUser(r));
+  }
+  /** A disabled user cannot log in and gets no new copies; open positions keep their sell rules. */
+  setUserDisabled(id: number, disabled: boolean): void {
+    this.run('UPDATE users SET disabled = ? WHERE id = ?', disabled ? 1 : 0, id);
+    if (disabled) this.run('DELETE FROM sessions WHERE user_id = ?', id);
+  }
+  deleteUser(id: number): void {
+    this.run('DELETE FROM users WHERE id = ?', id);
+  }
+
+  // ── license keys ──────────────────────────────────────────────────────
+  createLicense(l: { keyHash: string; hint: string; label: string; feeBps: number | null }): number {
+    return this.run('INSERT INTO licenses (key_hash, hint, label, fee_bps, created_at) VALUES (?, ?, ?, ?, ?)', l.keyHash, l.hint, l.label, l.feeBps, Date.now()).lastInsertRowid;
+  }
+  private toLicense(r: Row): License {
+    return {
+      id: num(r.id), hint: String(r.hint), label: String(r.label), feeBps: r.fee_bps === null ? null : num(r.fee_bps), createdAt: num(r.created_at),
+      usedBy: r.used_by === null ? null : num(r.used_by), usedAt: r.used_at === null ? null : num(r.used_at), revoked: num(r.revoked) === 1,
+      username: (r.username as string | null | undefined) ?? null,
+    };
+  }
+  licenses(): License[] {
+    return this.all('SELECT l.*, u.username AS username FROM licenses l LEFT JOIN users u ON u.id = l.used_by ORDER BY l.id DESC').map((r) => this.toLicense(r));
+  }
+  licenseByHash(keyHash: string): License | undefined {
+    const r = this.get('SELECT l.*, u.username AS username FROM licenses l LEFT JOIN users u ON u.id = l.used_by WHERE l.key_hash = ?', keyHash);
+    return r && this.toLicense(r);
+  }
+  userLicense(userId: number): License | undefined {
+    const r = this.get('SELECT l.*, u.username AS username FROM licenses l LEFT JOIN users u ON u.id = l.used_by WHERE l.used_by = ?', userId);
+    return r && this.toLicense(r);
+  }
+  /** True when this account got the key: a key is redeemed once, and never when revoked. */
+  redeemLicense(id: number, userId: number): boolean {
+    return this.run('UPDATE licenses SET used_by = ?, used_at = ? WHERE id = ? AND used_by IS NULL AND revoked = 0', userId, Date.now(), id).changes === 1;
+  }
+  updateLicense(id: number, patch: { label?: string; feeBps?: number | null }): void {
+    if (patch.label !== undefined) this.run('UPDATE licenses SET label = ? WHERE id = ?', patch.label, id);
+    if (patch.feeBps !== undefined) this.run('UPDATE licenses SET fee_bps = ? WHERE id = ?', patch.feeBps, id);
+  }
+  /** Revoking a key that is in use disables its user; restoring it re-enables them. */
+  setLicenseRevoked(id: number, revoked: boolean): void {
+    this.run('UPDATE licenses SET revoked = ? WHERE id = ?', revoked ? 1 : 0, id);
+    const r = this.get('SELECT used_by FROM licenses WHERE id = ?', id);
+    if (r && r.used_by !== null) this.setUserDisabled(num(r.used_by), revoked);
+  }
+  deleteLicense(id: number): boolean {
+    return this.run('DELETE FROM licenses WHERE id = ? AND used_by IS NULL', id).changes === 1;
+  }
+
+  // ── owner settings (set on the admin page; they override the environment) ─
+  settings(): Record<string, string> {
+    return Object.fromEntries(this.all('SELECT key, value FROM settings').map((r) => [String(r.key), String(r.value)]));
+  }
+  setSettings(values: Record<string, string>): void {
+    for (const [k, v] of Object.entries(values)) this.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, v);
+  }
+
   createSession(tokenHash: string, userId: number, expiresAt: number): void {
     this.run('DELETE FROM sessions WHERE expires_at < ?', Date.now());
     this.run('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)', tokenHash, userId, expiresAt);
@@ -284,12 +365,12 @@ export class Store {
     return this.all('SELECT * FROM copies WHERE user_id = ? AND deleted = 0 ORDER BY id', userId).map((r) => this.toCopy(r));
   }
   enabledCopiesForLeader(leader: string): CopyRow[] {
-    return this.all('SELECT * FROM copies WHERE leader = ? AND enabled = 1 AND deleted = 0', leader).map((r) => this.toCopy(r));
+    return this.all('SELECT c.* FROM copies c JOIN users u ON u.id = c.user_id WHERE c.leader = ? AND c.enabled = 1 AND c.deleted = 0 AND u.disabled = 0', leader).map((r) => this.toCopy(r));
   }
   /** Every wallet to watch: followed by an enabled copy, or behind an open position ("sell when they sell"
    *  keeps working after a copy is paused or deleted). */
   watchedLeaders(): string[] {
-    return this.all("SELECT leader FROM copies WHERE enabled = 1 AND deleted = 0 UNION SELECT leader FROM positions WHERE status IN ('opening','open')").map((r) => String(r.leader));
+    return this.all("SELECT c.leader FROM copies c JOIN users u ON u.id = c.user_id WHERE c.enabled = 1 AND c.deleted = 0 AND u.disabled = 0 UNION SELECT leader FROM positions WHERE status IN ('opening','open')").map((r) => String(r.leader));
   }
 
   // ── positions and fills ───────────────────────────────────────────────
@@ -341,6 +422,11 @@ export class Store {
       'INSERT INTO fills (position_id, user_id, side, reason, tokens, lamports, signature, simulated, error, fee_lamports, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       f.positionId, f.userId, f.side, f.reason, f.tokens, f.lamports, f.signature, f.simulated ? 1 : 0, f.error, f.feeLamports ?? 0n, Date.now(),
     ).lastInsertRowid;
+  }
+  /** Platform fees a user has paid: real ones, and the ones test mode only pretended to. */
+  userFees(userId: number): { live: bigint; test: bigint } {
+    const r = this.get('SELECT COALESCE(SUM(CASE WHEN simulated = 0 THEN fee_lamports ELSE 0 END), 0) AS live, COALESCE(SUM(CASE WHEN simulated = 1 THEN fee_lamports ELSE 0 END), 0) AS test FROM fills WHERE user_id = ?', userId);
+    return { live: big(r?.live), test: big(r?.test) };
   }
   fills(positionId: number): Fill[] {
     return this.all('SELECT * FROM fills WHERE position_id = ? ORDER BY id', positionId).map(toFill);

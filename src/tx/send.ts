@@ -25,22 +25,40 @@ export function canSendLive(): boolean {
   return config.liveTrading && !!config.rpcUrl;
 }
 
+async function sendViaRpc(tx: VersionedTransaction): Promise<string> {
+  return getConnection().sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 3 });
+}
+
+/** Jito's block engine: where a tipped transaction competes on its tip. */
+async function sendViaJito(tx: VersionedTransaction): Promise<string> {
+  const res = await fetch(`${config.jitoUrl.replace(/\/$/, '')}/api/v1/transactions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction', params: [Buffer.from(tx.serialize()).toString('base64'), { encoding: 'base64' }] }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  const body = (await res.json()) as { result?: string; error?: { message?: string } };
+  if (!body.result) throw new Error(`jito: ${body.error?.message ?? `HTTP ${res.status}`}`);
+  return body.result;
+}
+
 /**
  * Test mode: simulate only. Live (request AND server): send at once; simulating first is optional (SIMULATE_LIVE)
  * because every round trip before the send is time the coin's price keeps moving. Slippage limits still apply
- * on-chain, so a bad fill fails instead of filling badly.
+ * on-chain, so a bad fill fails instead of filling badly. A tipped transaction goes out through Jito's block
+ * engine and the RPC at once: the same signed transaction can only land once, and either path is enough.
  */
-export async function sendTransaction(tx: VersionedTransaction, live: boolean): Promise<SendOutcome> {
+export async function sendTransaction(tx: VersionedTransaction, live: boolean, tipped = false): Promise<SendOutcome> {
   if (!config.rpcUrl) return { ok: false, error: 'no RPC_URL configured' };
   if (!(live && canSendLive())) return simulate(tx);
   if (config.simulateLive) {
     const sim = await simulate(tx);
     if (!sim.ok) return sim;
   }
-  try {
-    const signature = await getConnection().sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 3 });
-    return { ok: true, signature, simulated: false };
-  } catch (err) {
-    return { ok: false, error: `send failed: ${safeErrorMessage(err)}` };
-  }
+  const paths = tipped && config.jitoUrl ? [sendViaRpc(tx), sendViaJito(tx)] : [sendViaRpc(tx)];
+  const results = await Promise.allSettled(paths);
+  const ok = results.find((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled');
+  if (ok) return { ok: true, signature: ok.value, simulated: false };
+  const why = results.map((r) => (r.status === 'rejected' ? safeErrorMessage(r.reason) : '')).filter(Boolean).join(' | ');
+  return { ok: false, error: `send failed: ${why}` };
 }

@@ -19,7 +19,8 @@ export interface EngineDeps {
   now?: () => number;
   /** How often an open position is re-quoted. */
   priceMs: number;
-  maxSolPerBuy: number;
+  /** The most one buy may spend; a function when the owner can change it while running. */
+  maxSolPerBuy: number | (() => number);
   feeReserveSol: number;
   /** Platform fee (basis points) a user pays; omitted = none. */
   feeBpsFor?: (userId: number) => number;
@@ -131,7 +132,8 @@ export class Engine {
     if (t.solLamports < minLamports) return skip(`they bought ${fmtSol(t.solLamports)}, under your ${fmtSol(minLamports)} minimum`);
     if (store.activePosition(copy.id, t.mint)) return skip('already holding this coin');
     if (s.oncePerCoin && store.hasTraded(copy.id, t.mint)) return skip('already traded this coin (buy once per coin is on)');
-    if (s.buySol > this.deps.maxSolPerBuy) return skip(`${s.buySol} SOL is above the server limit of ${this.deps.maxSolPerBuy} SOL per buy`);
+    const maxBuy = typeof this.deps.maxSolPerBuy === 'function' ? this.deps.maxSolPerBuy() : this.deps.maxSolPerBuy;
+    if (s.buySol > maxBuy) return skip(`${s.buySol} SOL is above the server limit of ${maxBuy} SOL per buy`);
     const wallet = this.deps.walletFor(copy.userId);
     if (!wallet) return skip('no wallet imported yet');
 
@@ -156,7 +158,7 @@ export class Engine {
           return;
         }
       }
-      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, live: s.mode === 'live', feeBps });
+      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: s.mode === 'live', feeBps });
       if (!fill.ok) {
         store.updatePosition(id, { status: 'failed', closedAt: this.now() });
         store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: 0n, lamports, signature: null, simulated: false, error: fill.error });
@@ -290,8 +292,10 @@ export class Engine {
       }
       const copy = store.copy(p.copyId);
       const slippagePct = copy?.settings.slippagePct ?? 25;
-      const priorityFeeSol = copy?.settings.priorityFeeSol ?? 0.0005;
-      const fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0 });
+      // (copies saved before sell fees existed fall back to their buy fees)
+      const priorityFeeSol = copy?.settings.sellPriorityFeeSol ?? copy?.settings.priorityFeeSol ?? 0.0005;
+      const tipSol = copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0;
+      const fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0 });
       if (!fill.ok) return this.sellFailed(p, order, label, fill.error);
 
       this.retries.delete(this.orderKey(p.id, order));

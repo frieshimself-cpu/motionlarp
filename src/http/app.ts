@@ -7,7 +7,9 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Keypair } from '@solana/web3.js';
 import { lamportsToSol } from '../config.js';
+import { timingSafeEqual } from 'node:crypto';
 import { encryptSecret, hashPassword, newToken, sha256, verifyPassword } from '../crypto.js';
+import { licenseHash, newLicenseKey } from '../licenses.js';
 import type { Engine } from '../engine/engine.js';
 import type { Executor } from '../engine/executor.js';
 import { lossPercent } from '../engine/rules.js';
@@ -21,8 +23,12 @@ export interface AppDeps {
   engine: Engine;
   executor: Executor;
   masterKey: string;
-  signupCode: string;
   secureCookies: boolean;
+  /** Opens /admin. Empty = the admin area is closed. */
+  adminPassword?: string;
+  /** The owner's settings (admin page): a masked view, saving, and restarting the server. */
+  owner?: { view: () => object; save: (patch: Record<string, unknown>) => Promise<{ restart: boolean }>; restart: () => void };
+  brand?: string;
   /** Forget the cached keypair of a user (after a wallet change). */
   forgetWallet: (userId: number) => void;
   serverInfo: () => { live: boolean; maxSolPerBuy: number; watching: number; mode: string };
@@ -34,6 +40,8 @@ export interface AppDeps {
 }
 
 const COOKIE = 'ml_session';
+const ADMIN_COOKIE = 'ml_admin';
+const ADMIN_HOURS = 12;
 const SESSION_DAYS = 30;
 const MAX_BODY = 64 * 1024;
 const PUBLIC_DIR = fileURLToPath(new URL('../../public/', import.meta.url));
@@ -152,8 +160,126 @@ export function createApp(deps: AppDeps): Server {
 
   function requireUser(req: IncomingMessage): number {
     const id = userId(req);
-    if (id === null) throw new HttpError(401, 'please log in');
+    if (id === null || store.user(id)?.disabled !== false) throw new HttpError(401, 'please log in');
     return id;
+  }
+
+  // ── admin: a password only the owner has; its own short-lived cookie ──
+  const adminSessions = new Map<string, number>();
+  const adminLimiter = new Limiter(5, 15 * 60_000);
+
+  function isAdmin(req: IncomingMessage): boolean {
+    const token = cookies(req)[ADMIN_COOKIE];
+    if (!token) return false;
+    const until = adminSessions.get(sha256(token));
+    return !!until && until > Date.now();
+  }
+
+  function passwordMatches(given: string): boolean {
+    const want = deps.adminPassword ?? '';
+    const a = Buffer.from(sha256(given));
+    const b = Buffer.from(sha256(want));
+    return !!want && timingSafeEqual(a, b);
+  }
+
+  const feePercentOf = (bps: number | null) => (bps === null ? null : bps / 100);
+  function parseFeePercent(v: unknown): number | null | undefined {
+    if (v === undefined) return undefined;
+    if (v === null || v === '') return null; // null = use the site's default fee
+    const pct = Number(v);
+    if (!(pct >= 0 && pct <= 10)) throw new HttpError(400, 'a license fee must be between 0 and 10 %');
+    return Math.round(pct * 100);
+  }
+
+  function adminState() {
+    const users = store.users();
+    const active = store.activePositions();
+    const rows = users.map((u) => {
+      const closed = store.closedPositions(u.id, 5000);
+      const fills = store.userFees(u.id);
+      return {
+        id: u.id, username: u.username, createdAt: u.createdAt, disabled: u.disabled,
+        license: store.userLicense(u.id)?.label ?? null,
+        feePercent: (deps.feeBpsFor?.(u.id) ?? 0) / 100,
+        wallet: store.wallet(u.id)?.pubkey ?? null,
+        copies: store.copies(u.id).filter((c) => c.settings.enabled).length,
+        open: active.filter((p) => p.userId === u.id).length,
+        closed: closed.length,
+        pnlSol: sol(closed.reduce((a, p) => a + (p.proceedsLamports - p.costLamports), 0n)),
+        feesLiveSol: sol(fills.live), feesTestSol: sol(fills.test),
+      };
+    });
+    return {
+      server: deps.serverInfo(),
+      settings: deps.owner?.view() ?? {},
+      licenses: store.licenses().map((l) => ({ id: l.id, label: l.label, hint: l.hint, feePercent: feePercentOf(l.feeBps), createdAt: l.createdAt, usedAt: l.usedAt, username: l.username, status: l.revoked ? 'revoked' : l.usedBy !== null ? 'active' : 'unused' })),
+      users: rows,
+      totals: { users: users.length, open: active.length, feesLiveSol: rows.reduce((a, r) => a + r.feesLiveSol, 0), feesTestSol: rows.reduce((a, r) => a + r.feesTestSol, 0) },
+    };
+  }
+
+  async function adminRoute(req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<void> {
+    if (path === '/api/admin/login' && method === 'POST') {
+      if (!deps.adminPassword) throw new HttpError(503, 'the admin area is not set up on this server (no ADMIN_PASSWORD)');
+      if (!adminLimiter.hit(`admin:${clientIp(req)}`)) throw new HttpError(429, 'too many attempts, try again in 15 minutes');
+      const b = await readJson(req);
+      if (!passwordMatches(String(b.password ?? ''))) throw new HttpError(401, 'wrong password');
+      const token = newToken();
+      adminSessions.set(sha256(token), Date.now() + ADMIN_HOURS * 3_600_000);
+      res.setHeader('set-cookie', `${ADMIN_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${ADMIN_HOURS * 3600}${deps.secureCookies ? '; Secure' : ''}`);
+      return json(res, 200, { ok: true });
+    }
+    if (!isAdmin(req)) throw new HttpError(401, 'admin login needed');
+    if (path === '/api/admin/logout' && method === 'POST') {
+      adminSessions.delete(sha256(cookies(req)[ADMIN_COOKIE] ?? ''));
+      res.setHeader('set-cookie', `${ADMIN_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+      return json(res, 200, { ok: true });
+    }
+    if (path === '/api/admin/state' && method === 'GET') return json(res, 200, adminState());
+
+    if (path === '/api/admin/licenses' && method === 'POST') {
+      const b = await readJson(req);
+      const label = String(b.label ?? '').trim().slice(0, 40);
+      if (!label) throw new HttpError(400, 'give the key a name (who it is for)');
+      const feeBps = parseFeePercent(b.feePercent) ?? null;
+      const key = newLicenseKey();
+      const id = store.createLicense({ keyHash: licenseHash(key), hint: key.slice(-4), label, feeBps });
+      return json(res, 200, { ok: true, id, key }); // the only time the key is shown
+    }
+    const lic = /^\/api\/admin\/licenses\/(\d+)$/.exec(path);
+    if (lic && method === 'PUT') {
+      const id = Number(lic[1]);
+      const b = await readJson(req);
+      const feeBps = parseFeePercent(b.feePercent);
+      store.updateLicense(id, { ...(typeof b.label === 'string' && b.label.trim() ? { label: b.label.trim().slice(0, 40) } : {}), ...(feeBps !== undefined ? { feeBps } : {}) });
+      if (typeof b.revoked === 'boolean') store.setLicenseRevoked(id, b.revoked);
+      return json(res, 200, { ok: true });
+    }
+    if (lic && method === 'DELETE') {
+      if (!store.deleteLicense(Number(lic[1]))) throw new HttpError(409, 'this key is in use: revoke it instead');
+      return json(res, 200, { ok: true });
+    }
+    const usr = /^\/api\/admin\/users\/(\d+)$/.exec(path);
+    if (usr && method === 'PUT') {
+      const b = await readJson(req);
+      if (typeof b.disabled === 'boolean') store.setUserDisabled(Number(usr[1]), b.disabled);
+      return json(res, 200, { ok: true });
+    }
+    if (path === '/api/admin/settings' && method === 'POST') {
+      if (!deps.owner) throw new HttpError(503, 'settings are not available');
+      const b = await readJson(req);
+      let result: { restart: boolean };
+      try {
+        result = await deps.owner.save(b);
+      } catch (err) {
+        if (err instanceof Error && err.name === 'OwnerSettingsError') throw new HttpError(400, err.message);
+        throw err;
+      }
+      json(res, 200, { ok: true, restart: result.restart });
+      if (result.restart) setTimeout(() => deps.owner?.restart(), 10);
+      return;
+    }
+    throw new HttpError(404, 'not found');
   }
 
   function setSession(res: ServerResponse, uid: number): void {
@@ -195,6 +321,8 @@ export function createApp(deps: AppDeps): Server {
     if (!path.startsWith('/api/')) return serveStatic(path, res);
     if (method !== 'GET' && req.headers['x-requested-with'] !== 'motionlarp') throw new HttpError(403, 'missing request header');
 
+    if (path.startsWith('/api/admin/')) return adminRoute(req, res, path, method);
+
     // ── accounts ──
     if (path === '/api/signup' && method === 'POST') {
       const ip = clientIp(req);
@@ -202,11 +330,17 @@ export function createApp(deps: AppDeps): Server {
       const b = await readJson(req);
       const username = String(b.username ?? '').trim();
       const password = String(b.password ?? '');
-      if (deps.signupCode && String(b.code ?? '').trim() !== deps.signupCode) throw new HttpError(403, 'wrong invite code');
+      const license = store.licenseByHash(licenseHash(String(b.license ?? '')));
+      if (!license || license.revoked) throw new HttpError(403, 'that license key is not valid');
+      if (license.usedBy !== null) throw new HttpError(403, 'that license key has already been used');
       if (!/^[A-Za-z0-9_.-]{3,24}$/.test(username)) throw new HttpError(400, 'username: 3–24 letters, numbers, _ . -');
       if (password.length < 8) throw new HttpError(400, 'password: at least 8 characters');
       if (store.userByName(username)) throw new HttpError(409, 'that username is taken');
       const id = store.createUser(username, await hashPassword(password));
+      if (!store.redeemLicense(license.id, id)) {
+        store.deleteUser(id); // someone redeemed the key in the same instant
+        throw new HttpError(403, 'that license key has already been used');
+      }
       setSession(res, id);
       return json(res, 200, { ok: true, username });
     }
@@ -217,6 +351,7 @@ export function createApp(deps: AppDeps): Server {
       if (!authLimiter.hit(`login:${ip}:${username.toLowerCase()}`)) throw new HttpError(429, 'too many attempts, try again in a few minutes');
       const user = store.userByName(username);
       if (!user || !(await verifyPassword(String(b.password ?? ''), user.passHash))) throw new HttpError(401, 'wrong username or password');
+      if (user.disabled) throw new HttpError(403, 'your license was revoked: ask the owner');
       setSession(res, user.id);
       return json(res, 200, { ok: true, username: user.username });
     }
@@ -227,7 +362,7 @@ export function createApp(deps: AppDeps): Server {
       return json(res, 200, { ok: true });
     }
     if (path === '/api/config' && method === 'GET') {
-      return json(res, 200, { signupNeedsCode: !!deps.signupCode, defaults: defaultSettings(), limits: LIMITS, server: deps.serverInfo() });
+      return json(res, 200, { brand: deps.brand ?? 'WalletMotion', adminEnabled: !!deps.adminPassword, defaults: defaultSettings(), limits: LIMITS, server: deps.serverInfo() });
     }
 
     const uid = requireUser(req);
