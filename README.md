@@ -51,7 +51,8 @@ keeps the websocket up.
 You need: a small Linux server (2 GB RAM is plenty), a domain name, and a **paid Solana RPC** (Helius, QuickNode
 or Triton). The free public RPC rate-limits within minutes of real use.
 
-1. Point your domain (e.g. `copy.yourdomain.com`) at the server's IP (a DNS "A" record).
+1. Point your domain (e.g. `copy.yourdomain.com`) at the server's IP (a DNS "A" record). Optional: a `CNAME`
+   for `www` pointing to the domain, so `www.` forwards to it.
 2. On the server, install Docker, then:
    ```bash
    git clone https://github.com/frieshimself-cpu/motionlarp && cd motionlarp
