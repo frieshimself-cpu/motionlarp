@@ -212,3 +212,17 @@ describe('review findings', () => {
     expect(new Set(seenSigs).size).toBe(120);
   });
 });
+
+describe('the clock never waits on a price check', () => {
+  it('a timed sell fires while a slow price check is still running', async () => {
+    const ex = new Ex(); ex.quoteDelay = 400;
+    const { store, uid, engine, adv } = setup(ex, 0);
+    store.createCopy(uid, validateSettings({ leader: L1, buySol: 0.1, minLeaderBuySol: 1, sell: { mirror: { enabled: false }, timed: [{ afterSec: 1, percent: 100 }] } }));
+    await engine.onLeaderTrade(trade()); await engine.idle();
+    adv(1000);
+    const t = engine.tick();
+    await sleep(60);
+    expect(ex.sells).toEqual([100_000n]); // sold before the 400 ms quote came back
+    await t; await engine.idle();
+  });
+});

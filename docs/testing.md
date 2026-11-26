@@ -64,6 +64,15 @@ need the fee on top). Mainnet: buys and sells with a 1 % fee transfer simulate c
 paid into an EMPTY wallet fails the whole trade (below the rent minimum), so the server refuses to start unless
 FEE_WALLET holds at least 0.001 SOL.
 
+## Any coin, any launchpad (26 Nov 2026)
+
+Parser tested on real mainnet transactions from Raydium LaunchLab, Meteora DBC and Jupiter routes (buys and
+sells), plus a USDC-paid buy, a coin-for-coin swap and a plain transfer (not a trade). Mainnet check, our buy and
+50 % sell with a 1 % fee, built through Jupiter for real wallets and simulated: Meteora DBC ok, Raydium CPMM ok
+(also via a two-hop route), Raydium LaunchLab ok once Jupiter had indexed the coin. Found: a coin seconds old has
+"no route" on Jupiter for ~10 s, so buys retry for up to ~15 s; price checks never wait on that. Also: timed sells
+no longer wait for a slow price check (regression test).
+
 ## Not yet verified
 
 - A **live** buy and sell with real SOL (needs a funded wallet, a paid RPC and the owner's go-ahead):

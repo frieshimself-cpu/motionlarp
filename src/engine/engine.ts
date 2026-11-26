@@ -190,26 +190,42 @@ export class Engine {
     await Promise.all(positions.map((p) => this.tickOne(p)));
   }
 
+  private readonly quoting = new Set<number>();
+
+  /**
+   * Orders due on the clock fire first, from what we already know; the price check runs after and can add a stop
+   * loss or dead-coin order. A slow price check never delays a timed sell, and ticks may overlap safely (one
+   * price check per position at a time).
+   */
   private async tickOne(p: Position): Promise<void> {
     const now = this.now();
-    let view = p;
-    if (now - (this.lastQuoteAt.get(p.id) ?? 0) >= this.deps.priceMs) {
-      this.lastQuoteAt.set(p.id, now);
-      try {
-        const value = await this.deps.executor.quoteSell(p.mint, p.tokensBought);
-        this.quoteOkAt.set(p.id, this.now());
-        if (value !== p.refValueLamports) {
-          this.deps.store.updatePosition(p.id, { refValueLamports: value, lastChangeAt: now });
-          view = { ...p, refValueLamports: value, lastChangeAt: now };
-        }
-      } catch (err) {
-        log.debug('quote failed', { position: p.id, error: safeErrorMessage(err) });
+    this.fireDue(p, now);
+    if (this.quoting.has(p.id) || now - (this.lastQuoteAt.get(p.id) ?? 0) < this.deps.priceMs) return;
+    this.lastQuoteAt.set(p.id, now);
+    this.quoting.add(p.id);
+    try {
+      const value = await this.deps.executor.quoteSell(p.mint, p.tokensBought);
+      this.quoteOkAt.set(p.id, this.now());
+      const fresh = this.deps.store.position(p.id);
+      if (!fresh || fresh.status !== 'open') return;
+      let view = fresh;
+      if (value !== fresh.refValueLamports) {
+        this.deps.store.updatePosition(p.id, { refValueLamports: value, lastChangeAt: now });
+        view = { ...fresh, refValueLamports: value, lastChangeAt: now };
       }
+      this.fireDue(view, now);
+    } catch (err) {
+      log.debug('quote failed', { position: p.id, error: safeErrorMessage(err) });
+    } finally {
+      this.quoting.delete(p.id);
     }
+  }
+
+  private fireDue(view: Position, now: number): void {
     for (const order of dueSells(view, now)) {
-      if (order.reason === 'dead_coin' && now - (this.quoteOkAt.get(p.id) ?? 0) > QUOTE_FRESH_MS) continue;
-      if (this.retries.has(this.orderKey(p.id, order))) continue; // waiting for its retry time
-      this.run(p.id, order);
+      if (order.reason === 'dead_coin' && now - (this.quoteOkAt.get(view.id) ?? 0) > QUOTE_FRESH_MS) continue;
+      if (this.retries.has(this.orderKey(view.id, order))) continue; // waiting for its retry time
+      this.run(view.id, order);
     }
   }
 

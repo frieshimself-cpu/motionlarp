@@ -6,7 +6,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { config } from '../config.js';
 import { getSignaturesForAddress, getTransaction, type RawTransaction, type SignatureInfo } from '../chain/rpc.js';
 import { log, safeErrorMessage } from '../log.js';
-import { parseLeaderTrades, PUMP_AMM_PROGRAM, PUMP_PROGRAM, type LeaderTrade } from './parse.js';
+import { parseLeaderTrades, type LeaderTrade } from './parse.js';
 import { fastBuysFromLogs } from './events.js';
 
 export interface WatcherDeps {
@@ -18,11 +18,32 @@ export interface WatcherDeps {
   /** Subscribe to a wallet's transactions (with their logs when known); returns an unsubscribe function. */
   subscribe?: (leader: string, onSignature: (signature: string, logs?: string[], slot?: number) => void) => () => void;
   fetchRetryMs?: number;
+  /** SOL value of `amount` of `mint` (for coins bought with a stablecoin or another coin). */
+  valueInSol?: (mint: string, amount: bigint) => Promise<bigint>;
   /** Transaction fetches in flight at once (a very busy wallet must not flood the RPC). */
   maxConcurrentFetches?: number;
 }
 
 const SEEN_CAP = 20_000;
+/** Programs that move SOL or tokens without trading: a transaction that invokes only these is skipped unfetched. */
+const NON_TRADING = new Set([
+  '11111111111111111111111111111111', // System
+  'ComputeBudget111111111111111111111111111111',
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+  'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+  'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr',
+  'Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo',
+]);
+
+/** True when the logs show a program that could be a trade (any DEX, launchpad, aggregator or bot router). */
+export function mightTrade(logs: string[]): boolean {
+  for (const l of logs) {
+    const m = /^Program (\w{32,44}) invoke/.exec(l);
+    if (m && !NON_TRADING.has(m[1]!)) return true;
+  }
+  return false;
+}
 const FETCH_TRIES = 6;
 const PAGE = 50;
 /** After a stall, read back at most this many pages of a busy wallet's history to reach the last one seen. */
@@ -145,7 +166,7 @@ export class Watcher {
     if (this.seen.has(key)) return;
     this.seen.add(key);
     const truncated = logs?.some((l) => /log truncated/i.test(l));
-    if (logs && logs.length && !truncated && !logs.some((l) => l.includes(PUMP_PROGRAM) || l.includes(PUMP_AMM_PROGRAM))) return;
+    if (logs && logs.length && !truncated && !mightTrade(logs)) return;
     // Fast path: a plain pump.fun buy is copied straight from the logs, no fetch. (The engine's slot check keeps a
     // later sell that was handled first from being undone by this buy.)
     const fast = logs && slot !== undefined ? fastBuysFromLogs(logs, signature, leader, slot) : null;
@@ -202,6 +223,10 @@ export class Watcher {
         return;
       }
       for (const t of parseLeaderTrades(tx, leader)) {
+        if (t.counter && t.solLamports === 0n && this.deps.valueInSol) {
+          // Paid (or paid out) in a stablecoin or another coin: its SOL value is what "bought at least X SOL" means.
+          t.solLamports = await this.deps.valueInSol(t.counter.mint, t.counter.amount).catch(() => 0n);
+        }
         log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, lagMs: t.blockTime ? Date.now() - t.blockTime * 1000 : null, sig: signature.slice(0, 12) });
         await this.deps.onTrade(t);
       }

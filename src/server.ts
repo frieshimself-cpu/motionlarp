@@ -52,7 +52,7 @@ function walletFor(userId: number): Keypair | null {
 
 const engine = new Engine({ store, executor, walletFor, priceMs: config.priceMs, maxSolPerBuy: config.maxSolPerBuy, feeReserveSol: config.feeReserveSol, feeBpsFor });
 const watcher = config.rpcUrl
-  ? new Watcher({ leaders: () => store.watchedLeaders(), onTrade: (t) => engine.onLeaderTrade(t), pollMs: config.pollMs, subscribe: websocketSubscriber() })
+  ? new Watcher({ leaders: () => store.watchedLeaders(), onTrade: (t) => engine.onLeaderTrade(t), pollMs: config.pollMs, subscribe: websocketSubscriber(), valueInSol: (mint, amount) => executor.valueInSol(mint, amount) })
   : null;
 
 const mode = !config.rpcUrl ? 'offline' : canSendLive() ? 'live' : 'test';
@@ -65,11 +65,11 @@ const app = createApp({
   serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode }),
 });
 
-let ticking = false;
+// Every second. Ticks may overlap: the engine runs one price check per position at a time, and timed sells fire
+// without waiting for any price check.
 const clock = setInterval(() => {
-  if (ticking || !config.rpcUrl) return;
-  ticking = true;
-  engine.tick().catch((err) => log.warn('tick failed', { error: safeErrorMessage(err) })).finally(() => { ticking = false; });
+  if (!config.rpcUrl) return;
+  engine.tick().catch((err) => log.warn('tick failed', { error: safeErrorMessage(err) }));
 }, 1000);
 
 // Safety nets: settle buys interrupted by a restart, and sell coins whose followed wallet already left.

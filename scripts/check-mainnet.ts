@@ -87,5 +87,66 @@ for (const [program, venue] of [[PUMP_PROGRAM, 'pumpfun'], [PUMP_AMM_PROGRAM, 'p
     console.log('ERROR', err instanceof Error ? err.message : err);
   }
 }
+// ── any other launchpad / exchange, through Jupiter ──────────────────────────────────────────────────────────
+const { Jupiter, appendInstruction } = await import('../src/venues/jupiter.js');
+const { config } = await import('../src/config.js');
+const { SystemProgram } = await import('@solana/web3.js');
+const { WSOL_MINT } = await import('../src/watch/parse.js');
+const jup = new Jupiter(config.jupiterUrl, config.jupiterApiKey);
+const others: Record<string, string> = {
+  'Raydium LaunchLab (Bonk)': 'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj',
+  'Meteora DBC': 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN',
+  'Raydium CPMM': 'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',
+  'Meteora DLMM': 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo',
+};
+const tables = async (keys: InstanceType<typeof PublicKey>[]) => (await Promise.all(keys.map((k) => conn.getAddressLookupTable(k)))).map((r) => r.value!).filter(Boolean);
+async function simulateTx(tx: import('@solana/web3.js').VersionedTransaction) {
+  return (await conn.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' })).value;
+}
+for (const [name, program] of Object.entries(others)) {
+  console.log(`\n=== ${name} (Jupiter route) ===`);
+  const sigs = await getSignaturesForAddress(program, { limit: 60 }).catch(() => []);
+  let t: Awaited<ReturnType<typeof parseLeaderTrades>>[number] | undefined;
+  for (const s of sigs) {
+    if (s.err) continue;
+    const tx = await getTransaction(s.signature).catch(() => null);
+    await sleep(700);
+    if (!tx) continue;
+    t = parseLeaderTrades(tx, accountKeys(tx)[0]!).find((x) => x.side === 'buy' && x.venue === 'other' && x.solLamports > 1_000_000n);
+    if (t) break;
+  }
+  if (!t) { failures++; console.log('no recent wallet buy found (RPC busy?) — run again'); continue; }
+  console.log(`leader trade parsed: ${t.leader.slice(0, 6)}… bought ${t.mint} for ${Number(t.solLamports) / 1e9} SOL`);
+  const user = new PublicKey(t.leader);
+  try {
+    const balance = BigInt(await conn.getBalance(user, 'confirmed'));
+    const lamports = balance / 4n < 10_000_000n ? balance / 4n : 10_000_000n;
+    const q = await jup.quote(WSOL_MINT, t.mint, lamports, 2500);
+    const { tx } = await jup.swap(q, user, 100_000n);
+    const withFeeTx = await appendInstruction(tx, SystemProgram.transfer({ fromPubkey: user, toPubkey: new PublicKey(FEE_TO), lamports: lamports / 100n }), tables);
+    const sim = await simulateTx(withFeeTx);
+    console.log(`our ${Number(lamports) / 1e9} SOL buy + 1% fee via Jupiter (${(q.routePlan as { swapInfo?: { label?: string } }[]).map((r) => r.swapInfo?.label).join(' → ')}): ${q.outAmount} tokens; simulation ${sim.err ? 'FAILED ' + JSON.stringify(sim.err) : `ok (${sim.unitsConsumed} CU)`}`);
+    if (sim.err) { failures++; console.log((sim.logs ?? []).slice(-6).join('\n')); }
+    const { getAssociatedTokenAddressSync } = await import('@solana/spl-token');
+    const mintInfo = await conn.getAccountInfo(new PublicKey(t.mint));
+    const ata = getAssociatedTokenAddressSync(new PublicKey(t.mint), user, true, mintInfo!.owner);
+    const held = await conn.getTokenAccountBalance(ata, 'confirmed').then((b) => BigInt(b.value.amount)).catch(() => 0n);
+    if (held > 0n) {
+      const qs = await jup.quote(t.mint, WSOL_MINT, held / 2n, 2500);
+      const { tx: stx } = await jup.swap(qs, user, 100_000n);
+      const sFee = BigInt(qs.outAmount) / 100n;
+      const sWithFee = sFee > 0n ? await appendInstruction(stx, SystemProgram.transfer({ fromPubkey: user, toPubkey: new PublicKey(FEE_TO), lamports: sFee }), tables) : stx;
+      const ssim = await simulateTx(sWithFee);
+      console.log(`our sell of 50% of their bag + 1% fee via Jupiter: ${qs.outAmount} lamports; simulation ${ssim.err ? 'FAILED ' + JSON.stringify(ssim.err) : `ok (${ssim.unitsConsumed} CU)`}`);
+      if (ssim.err) { failures++; console.log((ssim.logs ?? []).slice(-6).join('\n')); }
+    } else {
+      console.log('wallet holds none in its standard token account: sell not simulated');
+    }
+  } catch (err) {
+    failures++;
+    console.log('ERROR', err instanceof Error ? err.message : err);
+  }
+}
+
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

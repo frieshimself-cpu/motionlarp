@@ -37,6 +37,10 @@ function load() {
     /** Websocket endpoint; derived from RPC_URL (https → wss) when empty. */
     rpcWsUrl: str('RPC_WS_URL'),
     jitoUrl: str('JITO_URL', 'https://frankfurt.mainnet.block-engine.jito.wtf'),
+    /** Jupiter routes every coin the native pump.fun / PumpSwap path does not cover. The free endpoint is
+     *  rate-limited; with a key from portal.jup.ag use https://api.jup.ag and set JUPITER_API_KEY. */
+    jupiterUrl: str('JUPITER_URL', 'https://lite-api.jup.ag'),
+    jupiterApiKey: str('JUPITER_API_KEY'),
 
     // Nothing goes on-chain unless LIVE_TRADING=true AND the copy is set to live. The gate is in src/tx/send.ts.
     liveTrading: bool('LIVE_TRADING', false),

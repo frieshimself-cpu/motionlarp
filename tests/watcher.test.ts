@@ -62,13 +62,28 @@ describe('Watcher', () => {
     expect(trades).toEqual([]);
   });
 
-  it('a socket notification whose logs never touch pump.fun is not fetched', async () => {
+  it('a plain transfer is not fetched; anything touching a trading program is (any DEX or launchpad)', async () => {
     const { w, ws, fetched } = setup();
     await w.sync();
-    ws('transfer1', ['Program 11111111111111111111111111111111 invoke [1]', 'Program 11111111111111111111111111111111 success']);
-    ws(SIG, ['Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]']);
+    ws('transfer1', ['Program 11111111111111111111111111111111 invoke [1]', 'Program 11111111111111111111111111111111 success', 'Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]']);
+    ws('raydium1', ['Program LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj invoke [1]']);
     await w.drain();
-    expect(fetched).toEqual([SIG]);
+    expect(fetched.filter((s) => s === 'transfer1')).toHaveLength(0);
+    expect(fetched.filter((s) => s === 'raydium1').length).toBeGreaterThan(0);
+  });
+
+  it('a coin bought with another currency is valued in SOL before it reaches the engine', async () => {
+    const tx = JSON.parse(readFileSync('tests/fixtures/tx/launchlab_buy.json', 'utf8')) as RawTransaction;
+    const leader = '9f8ma9n3DXCfPGmCh71pMxanSp4Cjj2h9HScnNp7GxTJ';
+    const keys = tx.transaction.message.accountKeys as string[];
+    const i = keys.indexOf(leader);
+    const post = [...tx.meta!.postBalances]; post[i] = tx.meta!.preBalances[i]! - tx.meta!.fee;
+    const usdcTx: RawTransaction = { ...tx, transaction: { ...tx.transaction, message: { accountKeys: [...keys, 'PayAcct1111111111111111111111111111111111111'] } }, meta: { ...tx.meta!, postBalances: [...post, 1], preBalances: [...tx.meta!.preBalances, 1], preTokenBalances: [...(tx.meta!.preTokenBalances ?? []), { accountIndex: keys.length, mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', owner: leader, uiTokenAmount: { amount: '100000000', decimals: 6 } }], postTokenBalances: [...(tx.meta!.postTokenBalances ?? []), { accountIndex: keys.length, mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', owner: leader, uiTokenAmount: { amount: '0', decimals: 6 } }] } };
+    const trades: LeaderTrade[] = [];
+    const w = new Watcher({ leaders: () => [leader], onTrade: async (t) => { trades.push(t); }, pollMs: 0, getSignatures: async () => [], getTransaction: async () => usdcTx, fetchRetryMs: 1, valueInSol: async (mint, amount) => (mint.startsWith('EPjF') ? amount * 7n : 0n) });
+    w.handle('usdcbuy', leader);
+    await w.drain();
+    expect(trades[0]).toMatchObject({ side: 'buy', solLamports: 700_000_000n });
   });
 
   it('fast path: a pump.fun buy in the socket logs is passed on without fetching the transaction', async () => {

@@ -3,8 +3,11 @@
 A website where you and your friends each import a wallet, pick wallets to copy, and let the server copy their
 pump.fun trades around the clock: your buy size, your minimum, your exits.
 
-- **Copy any wallet.** Paste its address. When it buys a pump.fun or PumpSwap coin for at least your minimum, you
-  buy your amount.
+- **Copy any wallet, on any coin.** Paste its address. When it buys a coin for at least your minimum, you buy your
+  amount: pump.fun and PumpSwap through the fast native route; every other launchpad and exchange (Raydium
+  LaunchLab / Bonk, Meteora DBC, Raydium, Meteora, Orca, …) and coins paired with USDC, USD1 or anything else
+  through Jupiter. You always pay and receive SOL. A wallet paying with USDC or another coin counts as a buy too,
+  valued in SOL for your minimum.
 - **Four sell options, mixed however you like.** Every % is a share of what you *still hold*.
   - **Sell when they sell**: the same share of your bag they sold of theirs, or everything.
   - **Timed sells**: e.g. 25 % after 3 s → 50 % after 6 s → 100 % after 9 s.
@@ -107,9 +110,8 @@ and sells with the fee transfer included simulate cleanly.
   shown again, and never sent to the browser.
 - A wallet can't be removed or swapped while it has open positions (the coins would be stranded).
 - `MAX_SOL_PER_BUY` caps every buy. `FEE_RESERVE_SOL` keeps SOL back for fees.
-- Only pump.fun bonding-curve and PumpSwap coins traded against SOL are copied. Anything else is skipped with a
-  reason in the feed. That includes PumpSwap pools set up "the other way round" (SOL on the base side), which are
-  common for coins not launched on pump.fun.
+- Any coin Jupiter can route is copied. A coin only seconds old on a non-pump.fun launchpad can take Jupiter
+  ~10–15 s to pick up: the buy waits for it (up to ~15 s), so such copies land later. pump.fun coins don't wait.
 
 ## Run it on your own computer
 
