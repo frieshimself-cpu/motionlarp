@@ -29,7 +29,10 @@
    @30 s: buys copied within seconds of the leader; every position sold 25 %, 50 % of the rest, then the rest, on
    time, priced from live quotes; positions closed with their profit recorded. A coin quoted in USDC was
    refused with a reason.
-3. Found and fixed in these runs: sells gave up too fast under RPC rate limits (now retry with backoff, mirror
+3. One copy switched to "sell when they sell" only: it bought five coins the wallet bought and sold each out
+   when the wallet sold (about a minute later), positions closed; repeat buys of the same coin were skipped by
+   "buy once per coin".
+4. Found and fixed in these runs: sells gave up too fast under RPC rate limits (now retry with backoff, mirror
    included); a very busy wallet (674 trades in 3 minutes) flooded the RPC (now non-pump notifications are
    skipped and fetches are capped); a followed wallet with no history broke polling (empty cursor).
 
