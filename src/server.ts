@@ -44,6 +44,8 @@ const mode = !config.rpcUrl ? 'offline' : canSendLive() ? 'live' : 'test';
 const app = createApp({
   store, engine, executor, masterKey: config.masterKey, signupCode: config.signupCode, secureCookies: config.secureCookies,
   forgetWallet: (id) => keyCache.delete(id),
+  trustProxy: config.trustProxy,
+  maxCopiesPerUser: config.maxCopiesPerUser,
   serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode }),
 });
 
@@ -54,21 +56,32 @@ const clock = setInterval(() => {
   engine.tick().catch((err) => log.warn('tick failed', { error: safeErrorMessage(err) })).finally(() => { ticking = false; });
 }, 1000);
 
+// Safety nets: settle buys interrupted by a restart, and sell coins whose followed wallet already left.
+let reconciling = false;
+const safety = setInterval(() => {
+  if (reconciling || !config.rpcUrl) return;
+  reconciling = true;
+  Promise.all([engine.restore(), engine.reconcile()]).catch((err) => log.warn('safety check failed', { error: safeErrorMessage(err) })).finally(() => { reconciling = false; });
+}, 30_000);
+
 app.listen(config.port, config.host, () => {
   log.info('motionlarp up', { url: `http://${config.host}:${config.port}`, mode, maxSolPerBuy: config.maxSolPerBuy });
   if (!config.rpcUrl) log.warn('no RPC_URL: the site works but nothing is watched or traded');
   if (config.rpcUrl && !config.liveTrading) log.info('test mode: copies are simulated and filled from live quotes; nothing is sent (LIVE_TRADING=true to go live)');
   startBlockhashRefresher();
   watcher?.start();
+  if (config.rpcUrl) setTimeout(() => void engine.restore().catch(() => undefined), 3_000);
 });
 
 async function shutdown(signal: string) {
   log.info('shutting down', { signal });
   clearInterval(clock);
+  clearInterval(safety);
   watcher?.stop();
   stopBlockhashRefresher();
   app.close();
-  await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 20_000))]);
+  // Live buys can take a while to confirm: give them up to 2 minutes (restore() settles anything cut off).
+  await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 120_000))]);
   store.close();
   process.exit(0);
 }

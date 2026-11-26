@@ -6,7 +6,6 @@
 //  * test mode: the buy is built and simulated with the user's real wallet when it holds enough SOL (proving the
 //    transaction would go through), the fill is the real quote, nothing is sent. Sells are filled from the quote.
 import { PublicKey, type Keypair } from '@solana/web3.js';
-import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { config } from '../config.js';
 import { getConnection } from '../chain/connection.js';
 import { getTransaction } from '../chain/rpc.js';
@@ -56,19 +55,15 @@ export class ChainExecutor implements Executor {
     return BigInt(await getConnection().getBalance(new PublicKey(owner), 'confirmed'));
   }
 
+  /**
+   * Tokens of `mint` the owner holds across all its token accounts. An RPC failure throws: it must never read as
+   * "holds nothing" (that would close a position whose coins are still in the wallet).
+   */
   async tokenBalance(owner: string, mint: string): Promise<bigint> {
-    const pool = await this.pf.resolve(mint);
-    return this.tokenBalanceIn(pool, new PublicKey(owner));
-  }
-
-  private async tokenBalanceIn(pool: ResolvedPool, owner: PublicKey): Promise<bigint> {
-    const ata = getAssociatedTokenAddressSync(pool.mint, owner, true, pool.tokenProgram);
-    try {
-      const bal = await getConnection().getTokenAccountBalance(ata, 'confirmed');
-      return BigInt(bal.value.amount);
-    } catch {
-      return 0n;
-    }
+    const res = await getConnection().getParsedTokenAccountsByOwner(new PublicKey(owner), { mint: new PublicKey(mint) }, 'confirmed');
+    let total = 0n;
+    for (const a of res.value) total += BigInt((a.account.data as { parsed?: { info?: { tokenAmount?: { amount?: string } } } }).parsed?.info?.tokenAmount?.amount ?? '0');
+    return total;
   }
 
   async quoteSell(mint: string, tokens: bigint): Promise<bigint> {
@@ -107,8 +102,11 @@ export class ChainExecutor implements Executor {
           if (!sim.ok) return { ok: false, error: sim.error };
           return { ok: true, signature: sim.signature, tokens, lamports: req.lamports, simulated: true, note: 'simulated on-chain, not sent (test mode)' };
         }
-        const built = await venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct });
-        return this.sendAndRead(req, built.instructions, 'buy', built.expectedOut, req.lamports);
+        const [built, before] = await Promise.all([
+          venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct }),
+          this.tokenBalance(req.wallet.publicKey.toBase58(), req.mint).catch(() => null),
+        ]);
+        return this.sendAndRead(req, built.instructions, 'buy', built.expectedOut, req.lamports, before);
       });
     } catch (err) {
       return { ok: false, error: safeErrorMessage(err) };
@@ -124,25 +122,42 @@ export class ChainExecutor implements Executor {
           const lamports = await venue.quoteSell(pool, req.tokens);
           return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports, simulated: true, note: 'test fill from the live quote' };
         }
-        const held = await this.tokenBalanceIn(pool, req.wallet.publicKey);
+        const held = await this.tokenBalance(req.wallet.publicKey.toBase58(), req.mint);
         const tokens = req.tokens > held ? held : req.tokens;
         if (tokens <= 0n) return { ok: false, error: 'the wallet holds none of this coin' };
         const built = await venue.buildSell({ pool, user: req.wallet.publicKey, tokensIn: tokens, slippagePct: req.slippagePct });
-        return this.sendAndRead(req, built.instructions, 'sell', tokens, built.expectedOut);
+        return this.sendAndRead(req, built.instructions, 'sell', tokens, built.expectedOut, held);
       });
     } catch (err) {
       return { ok: false, error: safeErrorMessage(err) };
     }
   }
 
-  /** Live path: sign, simulate, send, confirm, then read what really happened from the confirmed transaction. */
-  private async sendAndRead(req: TradeRequest, instructions: import('@solana/web3.js').TransactionInstruction[], side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint): Promise<FillResult> {
+  /**
+   * Live path: sign, send, confirm (until the blockhash expires), then read what really happened from our own
+   * confirmed transaction. If confirmation is unknown or says "not landed", the wallet's balance of the coin
+   * decides: a transaction that landed late is still recorded as a fill, never left as orphaned coins.
+   */
+  private async sendAndRead(req: TradeRequest, instructions: import('@solana/web3.js').TransactionInstruction[], side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBefore: bigint | null): Promise<FillResult> {
     const built = await buildSignedTx({ signer: req.wallet, instructions, validatorTipSol: req.priorityFeeSol, txFeeSol: 0 });
     const sent = await sendTransaction(built.tx, true);
     if (!sent.ok) return { ok: false, error: sent.error };
-    const confirmed = await confirmSignature(sent.signature);
-    if (!confirmed.landed) return { ok: false, error: `sent but did not land: ${confirmed.reason}` };
+    const confirmed = await confirmSignature(sent.signature, built.lastValidBlockHeight);
     const owner = req.wallet.publicKey.toBase58();
+    if (!confirmed.landed) {
+      if (balanceBefore !== null) {
+        try {
+          const after = await this.tokenBalance(owner, req.mint);
+          const moved = side === 'buy' ? after - balanceBefore : balanceBefore - after;
+          if (moved > 0n) {
+            return { ok: true, signature: sent.signature, tokens: moved, lamports: side === 'buy' ? expectedLamports : (expectedLamports * moved) / (expectedTokens || 1n), simulated: false, note: 'landed late; fill estimated from the balance change' };
+          }
+        } catch {
+          // fall through
+        }
+      }
+      return { ok: false, error: `sent but did not land: ${confirmed.reason}` };
+    }
     for (let i = 0; i < FETCH_FILL_TRIES; i++) {
       try {
         const tx = await getTransaction(sent.signature);
@@ -156,9 +171,8 @@ export class ChainExecutor implements Executor {
       } catch (err) {
         log.warn('could not read the fill yet', { signature: sent.signature, error: safeErrorMessage(err) });
       }
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 700));
     }
-    // Landed, but the transaction could not be read back: fall back to the quote (the balance check corrects it).
     return { ok: true, signature: sent.signature, tokens: expectedTokens, lamports: expectedLamports, simulated: false, note: 'landed; fill estimated from the quote' };
   }
 }

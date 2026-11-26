@@ -12,7 +12,7 @@ export interface WatcherDeps {
   leaders: () => string[];
   onTrade: (t: LeaderTrade) => Promise<void>;
   pollMs: number;
-  getSignatures?: (leader: string, until?: string) => Promise<SignatureInfo[]>;
+  getSignatures?: (leader: string, until?: string, before?: string) => Promise<SignatureInfo[]>;
   getTransaction?: (signature: string) => Promise<RawTransaction | null>;
   /** Subscribe to a wallet's transactions (with their logs when known); returns an unsubscribe function. */
   subscribe?: (leader: string, onSignature: (signature: string, logs?: string[]) => void) => () => void;
@@ -23,6 +23,9 @@ export interface WatcherDeps {
 
 const SEEN_CAP = 20_000;
 const FETCH_TRIES = 6;
+const PAGE = 50;
+/** After a stall, read back at most this many pages of a busy wallet's history to reach the last one seen. */
+const MAX_PAGES = 6;
 
 export function wsUrlFor(rpcUrl: string): string {
   return rpcUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
@@ -54,7 +57,7 @@ export class Watcher {
   private readonly getTx: NonNullable<WatcherDeps['getTransaction']>;
 
   constructor(private readonly deps: WatcherDeps) {
-    this.getSigs = deps.getSignatures ?? ((leader, until) => getSignaturesForAddress(leader, { limit: 50, until }));
+    this.getSigs = deps.getSignatures ?? ((leader, until, before) => getSignaturesForAddress(leader, { limit: PAGE, until, before }));
     this.getTx = deps.getTransaction ?? ((s) => getTransaction(s));
   }
 
@@ -104,10 +107,16 @@ export class Watcher {
   }
 
   private async poll(leader: string): Promise<void> {
-    let sigs: SignatureInfo[];
     const cursor = this.cursors.get(leader);
+    let sigs: SignatureInfo[];
     try {
       sigs = await this.getSigs(leader, cursor || undefined); // "" = started, wallet had no history
+      // A full page that does not reach the last signature seen: page back so nothing in between is skipped.
+      for (let page = 1; cursor && sigs.length >= PAGE * page && page < MAX_PAGES; page++) {
+        const older = await this.getSigs(leader, cursor, sigs[sigs.length - 1]!.signature);
+        if (!older.length) break;
+        sigs = [...sigs, ...older];
+      }
     } catch (err) {
       log.warn('signature poll failed', { leader, error: safeErrorMessage(err) });
       return;
@@ -133,7 +142,8 @@ export class Watcher {
     const key = `${signature}:${leader}`;
     if (this.seen.has(key)) return;
     this.seen.add(key);
-    if (logs && logs.length && !logs.some((l) => l.includes(PUMP_PROGRAM) || l.includes(PUMP_AMM_PROGRAM))) return;
+    const truncated = logs?.some((l) => /log truncated/i.test(l));
+    if (logs && logs.length && !truncated && !logs.some((l) => l.includes(PUMP_PROGRAM) || l.includes(PUMP_AMM_PROGRAM))) return;
     if (this.seen.size > SEEN_CAP) {
       const first = this.seen.values().next().value;
       if (first) this.seen.delete(first);
@@ -156,19 +166,36 @@ export class Watcher {
     };
   }
 
+  /** Per wallet, the previous transaction's hand-off to the engine: trades are passed on in arrival order. */
+  private readonly delivery = new Map<string, Promise<void>>();
+
   private async process(signature: string, leader: string): Promise<void> {
-    const release = await this.slot();
-    let tx: RawTransaction | null = null;
-    try {
-      tx = await this.fetchTx(signature);
-    } finally {
-      release();
-    }
-    if (!tx) return;
-    for (const t of parseLeaderTrades(tx, leader)) {
-      log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, signature });
-      await this.deps.onTrade(t);
-    }
+    // Fetch now (in parallel, within the cap) but hand over strictly after this wallet's earlier transactions, so
+    // a quick buy-then-sell is never seen as sell-then-buy.
+    const fetched = (async () => {
+      const release = await this.slot();
+      try {
+        return await this.fetchTx(signature);
+      } finally {
+        release();
+      }
+    })();
+    const prev = this.delivery.get(leader) ?? Promise.resolve();
+    const mine = prev.then(async () => {
+      const tx = await fetched;
+      if (!tx) {
+        this.seen.delete(`${signature}:${leader}`); // let a later poll try again
+        return;
+      }
+      for (const t of parseLeaderTrades(tx, leader)) {
+        log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, lagMs: t.blockTime ? Date.now() - t.blockTime * 1000 : null, signature });
+        await this.deps.onTrade(t);
+      }
+    });
+    const tail = mine.catch(() => undefined);
+    this.delivery.set(leader, tail);
+    void tail.then(() => { if (this.delivery.get(leader) === tail) this.delivery.delete(leader); });
+    await mine;
   }
 
   private async fetchTx(signature: string): Promise<RawTransaction | null> {

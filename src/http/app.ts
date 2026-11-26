@@ -26,6 +26,8 @@ export interface AppDeps {
   /** Forget the cached keypair of a user (after a wallet change). */
   forgetWallet: (userId: number) => void;
   serverInfo: () => { live: boolean; maxSolPerBuy: number; watching: number; mode: string };
+  trustProxy?: boolean;
+  maxCopiesPerUser?: number;
   publicDir?: string;
 }
 
@@ -136,6 +138,11 @@ export function createApp(deps: AppDeps): Server {
   const authLimiter = new Limiter(10, 10 * 60_000);
   const balanceCache = new Map<number, { at: number; sol: number | null }>();
 
+  function clientIp(req: IncomingMessage): string {
+    const fwd = deps.trustProxy ? String(req.headers['x-forwarded-for'] ?? '').split(',')[0]?.trim() : '';
+    return fwd || req.socket.remoteAddress || '';
+  }
+
   function userId(req: IncomingMessage): number | null {
     const token = cookies(req)[COOKIE];
     return token ? store.sessionUser(sha256(token)) : null;
@@ -188,7 +195,7 @@ export function createApp(deps: AppDeps): Server {
 
     // ── accounts ──
     if (path === '/api/signup' && method === 'POST') {
-      const ip = req.socket.remoteAddress ?? '';
+      const ip = clientIp(req);
       if (!authLimiter.hit(`signup:${ip}`)) throw new HttpError(429, 'too many attempts, try again in a few minutes');
       const b = await readJson(req);
       const username = String(b.username ?? '').trim();
@@ -204,7 +211,7 @@ export function createApp(deps: AppDeps): Server {
     if (path === '/api/login' && method === 'POST') {
       const b = await readJson(req);
       const username = String(b.username ?? '').trim();
-      const ip = req.socket.remoteAddress ?? '';
+      const ip = clientIp(req);
       if (!authLimiter.hit(`login:${ip}:${username.toLowerCase()}`)) throw new HttpError(429, 'too many attempts, try again in a few minutes');
       const user = store.userByName(username);
       if (!user || !(await verifyPassword(String(b.password ?? ''), user.passHash))) throw new HttpError(401, 'wrong username or password');
@@ -251,6 +258,8 @@ export function createApp(deps: AppDeps): Server {
     // ── copies ──
     if (path === '/api/copies' && method === 'POST') {
       const s = validated(await readJson(req));
+      const cap = deps.maxCopiesPerUser ?? 20;
+      if (store.countCopies(uid) >= cap) throw new HttpError(409, `at most ${cap} copies per account`);
       const id = store.createCopy(uid, s);
       store.addEvent({ userId: uid, copyId: id, kind: 'info', message: `Now copying ${s.name} (${s.leader.slice(0, 4)}…${s.leader.slice(-4)})${s.mode === 'paper' ? ' in test mode' : ''}` });
       return json(res, 200, { ok: true, id });

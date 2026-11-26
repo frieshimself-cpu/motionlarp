@@ -66,16 +66,28 @@ export class Engine {
   private readonly retries = new Map<string, { positionId: number; order: SellOrder; tries: number; nextAt: number }>();
   private readonly lastQuoteAt = new Map<number, number>();
   private readonly quoteOkAt = new Map<number, number>();
+  /** Latest slot at which each leader sold each coin: a buy that arrives after its own later sell is not copied. */
+  private readonly lastSellSlot = new Map<string, number>();
+  private readonly solCache = new Map<string, { lamports: bigint; at: number }>();
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? Date.now;
   }
 
   // ── leader trades ─────────────────────────────────────────────────────
+  /**
+   * Decides synchronously and queues the work; it does not wait for buys and sells to finish (the watcher must
+   * keep reading the next transactions meanwhile).
+   */
   async onLeaderTrade(t: LeaderTrade): Promise<void> {
     const staleSec = this.deps.staleSec ?? 60;
-    if (t.blockTime && this.now() / 1000 - t.blockTime > staleSec) return;
+    // Old buys are not copied (caught up after downtime). Old sells still are: we may be holding that coin.
+    if (t.side === 'buy' && t.blockTime && this.now() / 1000 - t.blockTime > staleSec) return;
     if (!this.deps.store.markSeen(`${t.signature}:${t.mint}`)) return;
+    const coinKey = `${t.leader}:${t.mint}`;
+    if (t.side === 'sell') this.lastSellSlot.set(coinKey, Math.max(t.slot, this.lastSellSlot.get(coinKey) ?? 0));
+    else if ((this.lastSellSlot.get(coinKey) ?? -1) > t.slot) return; // they already sold after this buy
+    if (this.lastSellSlot.size > 50_000) this.lastSellSlot.clear();
     const jobs: Promise<unknown>[] = [];
     if (t.side === 'buy') {
       for (const copy of this.deps.store.enabledCopiesForLeader(t.leader)) {
@@ -93,7 +105,16 @@ export class Engine {
         jobs.push(this.enqueue(p.id, () => this.sell(p.id, order)).finally(() => this.inFlight.delete(key)));
       }
     }
-    await Promise.all(jobs);
+    void Promise.all(jobs);
+  }
+
+  /** SOL balance, cached for 15 s (a fresh RPC round trip before every buy costs time). */
+  private async solBalance(owner: string): Promise<bigint> {
+    const hit = this.solCache.get(owner);
+    if (hit && this.now() - hit.at < 15_000) return hit.lamports;
+    const lamports = await this.deps.executor.solBalance(owner);
+    this.solCache.set(owner, { lamports, at: this.now() });
+    return lamports;
   }
 
   /** Synchronous checks and the 'opening' row happen before any await, so a sell right behind the buy finds it. */
@@ -124,7 +145,7 @@ export class Engine {
     try {
       if (executor.isLive({ live: s.mode === 'live' })) {
         const need = lamports + BigInt(Math.round(this.deps.feeReserveSol * 1e9));
-        const have = await executor.solBalance(wallet.publicKey.toBase58());
+        const have = await this.solBalance(wallet.publicKey.toBase58());
         if (have < need) {
           store.updatePosition(id, { status: 'failed', closedAt: this.now() });
           store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: wallet has ${fmtSol(have)}, needs ${fmtSol(need)} (buy + fee reserve)`, mint: t.mint, signature: t.signature });
@@ -139,7 +160,9 @@ export class Engine {
         return;
       }
       const now = this.now();
-      store.updatePosition(id, { status: 'open', tokensBought: fill.tokens, tokensHeld: fill.tokens, costLamports: fill.lamports, openedAt: now, lastChangeAt: now, refValueLamports: fill.lamports, buySig: fill.signature });
+      this.solCache.delete(wallet.publicKey.toBase58());
+      // The position is live only if the buy really went on-chain (a copy flipped to Live on a test server is paper).
+      store.updatePosition(id, { mode: fill.simulated ? 'paper' : 'live', status: 'open', tokensBought: fill.tokens, tokensHeld: fill.tokens, costLamports: fill.lamports, openedAt: now, lastChangeAt: now, refValueLamports: fill.lamports, buySig: fill.signature });
       store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null });
       store.addEvent({
         userId: copy.userId, copyId: copy.id, kind: 'buy',
@@ -156,6 +179,7 @@ export class Engine {
   async tick(): Promise<void> {
     const now = this.now();
     for (const [key, r] of this.retries) {
+      if (this.deps.store.position(r.positionId)?.status !== 'open') { this.retries.delete(key); continue; }
       if (r.nextAt <= now && !this.inFlight.has(key)) this.run(r.positionId, r.order);
     }
     const positions = this.deps.store.activePositions().filter((p) => p.status === 'open');
@@ -221,9 +245,19 @@ export class Engine {
       return { ok: false, error: 'no wallet' };
     }
     const owner = wallet.publicKey.toBase58();
-    const live = executor.isLive({ live: p.mode === 'live' });
+    // A stage that already fired (e.g. finished while this order waited in the queue) never sells twice.
+    if ((order.reason === 'timed' && order.stage !== undefined && p.firedTimed.includes(order.stage))
+      || (order.reason === 'stop_loss' && order.stage !== undefined && p.firedStop.includes(order.stage))
+      || (order.reason === 'dead_coin' && p.deadFired)) return { ok: true };
+    const live = p.mode === 'live';
+    if (live && !executor.isLive({ live: true })) {
+      return this.sellFailed(p, order, label, 'the server is in test mode: a live position can only be sold once LIVE_TRADING is back on');
+    }
     try {
-      const held = live ? await executor.tokenBalance(owner, p.mint) : p.tokensHeld;
+      // Live: this position's own tokens, never more than the wallet really holds (other copies or coins the user
+      // holds by hand in the same wallet are not touched).
+      const onChain = live ? await executor.tokenBalance(owner, p.mint) : p.tokensHeld;
+      const held = onChain < p.tokensHeld ? onChain : p.tokensHeld;
       if (held <= 0n) {
         store.updatePosition(p.id, { status: 'closed', tokensHeld: 0n, closedAt: this.now(), ...this.markDone(p, order) });
         store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${label}: the wallet holds none of it any more (sold elsewhere?) — closed`, mint: p.mint });
@@ -241,7 +275,13 @@ export class Engine {
       if (!fill.ok) return this.sellFailed(p, order, label, fill.error);
 
       this.retries.delete(this.orderKey(p.id, order));
-      let left = live ? await executor.tokenBalance(owner, p.mint) : held - fill.tokens;
+      let left = held - fill.tokens;
+      if (live) {
+        // If the wallet now holds less than our books say (sold elsewhere), believe the wallet. A failed read
+        // keeps our own figure: an RPC hiccup must not close a position.
+        const after = await executor.tokenBalance(owner, p.mint).catch(() => null);
+        if (after !== null && after < left) left = after;
+      }
       if (left < 0n) left = 0n;
       const closed = left === 0n;
       store.updatePosition(p.id, {
@@ -284,6 +324,62 @@ export class Engine {
       if (tries === 1) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error} — retrying`, mint: p.mint });
     }
     return { ok: false, error };
+  }
+
+  // ── after a restart, and as a safety net ─────────────────────────────
+  /**
+   * Buys that were in flight when the server stopped. Test fills are dropped; a live one is settled by the wallet:
+   * if it holds the coin, the position opens with those tokens (so its sell rules run), otherwise it failed.
+   */
+  async restore(): Promise<void> {
+    const { store, executor } = this.deps;
+    for (const p of store.openingPositions()) {
+      if (this.queues.has(p.id)) continue; // still running in this process
+      const label = `${shortMint(p.mint)} (${p.copyName})`;
+      const wallet = this.deps.walletFor(p.userId);
+      if (p.mode !== 'live' || !wallet || !executor.isLive({ live: true })) {
+        store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
+        continue;
+      }
+      try {
+        const held = await executor.tokenBalance(wallet.publicKey.toBase58(), p.mint);
+        if (held > 0n) {
+          const cost = BigInt(Math.round((store.copy(p.copyId)?.settings.buySol ?? 0) * 1e9));
+          const now = this.now();
+          store.updatePosition(p.id, { status: 'open', tokensBought: held, tokensHeld: held, costLamports: cost, refValueLamports: cost, openedAt: now, lastChangeAt: now });
+          store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${label}: a buy interrupted by a restart did land — position recovered (cost estimated)`, mint: p.mint });
+        } else {
+          store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
+        }
+      } catch (err) {
+        log.warn('could not settle an interrupted buy yet', { position: p.id, error: safeErrorMessage(err) });
+      }
+    }
+  }
+
+  /**
+   * "Sell when they sell" safety net: if a followed wallet holds none of a coin we still hold (its sell was missed,
+   * e.g. while the server was down, or it moved the coins away), sell everything.
+   */
+  async reconcile(): Promise<void> {
+    const { store, executor } = this.deps;
+    const open = store.activePositions().filter((p) => p.status === 'open' && p.sell.mirror.enabled);
+    const byCoin = new Map<string, Position[]>();
+    for (const p of open) byCoin.set(`${p.leader}:${p.mint}`, [...(byCoin.get(`${p.leader}:${p.mint}`) ?? []), p]);
+    for (const [, group] of byCoin) {
+      const first = group[0]!;
+      let leaderHolds: bigint;
+      try {
+        leaderHolds = await executor.tokenBalance(first.leader, first.mint);
+      } catch {
+        continue; // unknown is not zero
+      }
+      if (leaderHolds > 0n) continue;
+      for (const p of group) {
+        if (this.now() - p.openedAt < 30_000) continue; // their balance may lag our own buy's view
+        this.run(p.id, { reason: 'mirror', percent: 100, tag: 'reconcile' });
+      }
+    }
   }
 
   // ── plumbing ──────────────────────────────────────────────────────────

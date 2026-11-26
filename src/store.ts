@@ -181,10 +181,10 @@ function toFill(r: Row): Fill {
   };
 }
 
-export type PositionPatch = Partial<Pick<Position, 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt'>>;
+export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt'>>;
 
 const COLUMN: Record<keyof PositionPatch, string> = {
-  status: 'status', tokensBought: 'tokens_bought', tokensHeld: 'tokens_held', costLamports: 'cost_lamports', proceedsLamports: 'proceeds_lamports',
+  mode: 'mode', status: 'status', tokensBought: 'tokens_bought', tokensHeld: 'tokens_held', costLamports: 'cost_lamports', proceedsLamports: 'proceeds_lamports',
   openedAt: 'opened_at', closedAt: 'closed_at', buySig: 'buy_sig', firedTimed: 'fired_timed', firedStop: 'fired_stop', deadFired: 'dead_fired',
   refValueLamports: 'ref_value', lastChangeAt: 'last_change_at',
 };
@@ -317,6 +317,12 @@ export class Store {
   activePosition(copyId: number, mint: string): Position | undefined {
     const r = this.get("SELECT * FROM positions WHERE copy_id = ? AND mint = ? AND status IN ('opening','open') ORDER BY id DESC LIMIT 1", copyId, mint);
     return r && toPosition(r);
+  }
+  openingPositions(): Position[] {
+    return this.all("SELECT * FROM positions WHERE status = 'opening' ORDER BY id").map(toPosition);
+  }
+  countCopies(userId: number): number {
+    return Number(this.get('SELECT COUNT(*) AS n FROM copies WHERE user_id = ? AND deleted = 0', userId)?.n ?? 0);
   }
   hasTraded(copyId: number, mint: string): boolean {
     return !!this.get("SELECT 1 FROM positions WHERE copy_id = ? AND mint = ? AND status != 'failed' LIMIT 1", copyId, mint);

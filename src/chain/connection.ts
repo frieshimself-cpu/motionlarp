@@ -28,9 +28,9 @@ export async function refreshBlockhash(): Promise<BlockhashWithExpiryBlockHeight
   return bh;
 }
 
-/** Cached when fresh (< 20 s), otherwise fetched. */
+/** Cached when fresh (< 5 s; refreshed every 2 s in the background), otherwise fetched. */
 export async function getBlockhash(): Promise<BlockhashWithExpiryBlockHeight> {
-  if (cached && Date.now() - cachedAt < 20_000) return cached;
+  if (cached && Date.now() - cachedAt < 5_000) return cached;
   return refreshBlockhash();
 }
 

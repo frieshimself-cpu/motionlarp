@@ -7,6 +7,7 @@ services:
     environment:
       HOST: 0.0.0.0
       SECURE_COOKIES: "true"
+      TRUST_PROXY: "true"
       DB_PATH: /data/motionlarp.db
     volumes:
       - data:/data

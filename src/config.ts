@@ -25,6 +25,11 @@ function load() {
   return {
     port: num('PORT', 3000),
     host: str('HOST', '127.0.0.1'),
+    /** Behind a reverse proxy (Caddy): take the visitor's IP from X-Forwarded-For for rate limits. */
+    trustProxy: bool('TRUST_PROXY', false),
+    maxCopiesPerUser: num('MAX_COPIES_PER_USER', 20),
+    /** Simulate live transactions before sending. Off by default: it costs a round trip (~0.2–0.5 s) per trade. */
+    simulateLive: bool('SIMULATE_LIVE', false),
     /** Behind HTTPS (production): session cookies get the Secure flag. */
     secureCookies: bool('SECURE_COOKIES', false),
 

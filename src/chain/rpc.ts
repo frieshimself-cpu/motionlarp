@@ -65,6 +65,6 @@ export interface SignatureInfo {
   blockTime: number | null;
 }
 
-export function getSignaturesForAddress(address: string, opts: { limit?: number; until?: string } = {}, url?: string): Promise<SignatureInfo[]> {
-  return rpc<SignatureInfo[]>('getSignaturesForAddress', [address, { limit: opts.limit ?? 20, until: opts.until, commitment: 'confirmed' }], url);
+export function getSignaturesForAddress(address: string, opts: { limit?: number; until?: string; before?: string } = {}, url?: string): Promise<SignatureInfo[]> {
+  return rpc<SignatureInfo[]>('getSignaturesForAddress', [address, { limit: opts.limit ?? 20, until: opts.until, before: opts.before, commitment: 'confirmed' }], url);
 }

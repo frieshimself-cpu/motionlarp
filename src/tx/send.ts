@@ -25,11 +25,18 @@ export function canSendLive(): boolean {
   return config.liveTrading && !!config.rpcUrl;
 }
 
-/** Simulate first, always; only a clean simulation of a live request on a live server is sent. */
+/**
+ * Test mode: simulate only. Live (request AND server): send at once; simulating first is optional (SIMULATE_LIVE)
+ * because every round trip before the send is time the coin's price keeps moving. Slippage limits still apply
+ * on-chain, so a bad fill fails instead of filling badly.
+ */
 export async function sendTransaction(tx: VersionedTransaction, live: boolean): Promise<SendOutcome> {
   if (!config.rpcUrl) return { ok: false, error: 'no RPC_URL configured' };
-  const sim = await simulate(tx);
-  if (!sim.ok || !(live && canSendLive())) return sim;
+  if (!(live && canSendLive())) return simulate(tx);
+  if (config.simulateLive) {
+    const sim = await simulate(tx);
+    if (!sim.ok) return sim;
+  }
   try {
     const signature = await getConnection().sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 3 });
     return { ok: true, signature, simulated: false };
