@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 103 tests
+## Automated (every change): `npm test`, 157 tests
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -73,8 +73,22 @@ sells), plus a USDC-paid buy, a coin-for-coin swap and a plain transfer (not a t
 "no route" on Jupiter for ~10 s, so buys retry for up to ~15 s; price checks never wait on that. Also: timed sells
 no longer wait for a slow price check (regression test).
 
+## License keys, admin page, trading fees (26 Nov 2026)
+
+Unit and API tests: keys are stored hashed, redeemed once, carry their own fee, revoke/restore lock a user out
+and back in; the admin area is closed without the password and to ordinary users; owner settings are validated
+before anything is stored (RPC link tested, fee wallet funded), secrets stored encrypted and shown masked; an RPC
+change restarts. Per-copy buy/sell priority fee and tip reach the trade; a tip is a transfer to a Jito tip account
+and tipped trades also go out through Jito's block engine. In a real browser: admin login, creating keys, sign-up
+with a bad and a good key, a copy with custom fees, the redesigned pages on desktop and phone (no sideways
+scroll, no script errors). Saving a new RPC link on the admin page restarted the server and came back with it.
+Mainnet: a PumpSwap buy with platform fee and tip simulated cleanly.
+
 ## Not yet verified
 
+- The installer and the automatic updater on a real server (only dry-run here: no Docker engine in the build
+  container).
+- Sending through Jito's block engine (needs a live trade).
 - A **live** buy and sell with real SOL (needs a funded wallet, a paid RPC and the owner's go-ahead):
   `LIVE_TRADING=true`, one copy set to Live, 0.01 SOL. Check on Solscan that the buy lands, the fill in the
   history matches the transaction, and the sells fire.

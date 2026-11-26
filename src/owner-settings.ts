@@ -35,7 +35,9 @@ export interface SettingsChecks {
   balance: (address: string) => Promise<bigint>;
 }
 
-export class OwnerSettingsError extends Error {}
+export class OwnerSettingsError extends Error {
+  override name = 'OwnerSettingsError';
+}
 
 export function applyStoredSettings(store: Store, config: MutableConfig): void {
   const s = store.settings();

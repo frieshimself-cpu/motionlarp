@@ -62,6 +62,11 @@ describe('owner settings', () => {
     expect(store.settings()).toEqual({});
   });
 
+  it('its errors carry their name (the API turns them into a readable 400)', async () => {
+    const err = await saveOwnerSettings(store, cfg(), { rpcUrl: 'https://bad.example' }, checks).catch((e) => e);
+    expect(err.name).toBe('OwnerSettingsError');
+  });
+
   it('going live needs an RPC', async () => {
     await expect(saveOwnerSettings(store, cfg(), { liveTrading: true }, checks)).rejects.toThrow(/Helius/i);
   });

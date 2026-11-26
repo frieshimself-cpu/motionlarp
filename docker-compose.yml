@@ -3,6 +3,8 @@ services:
   app:
     build: .
     restart: unless-stopped
+    # In-flight trades finish before a stop or restart (live buys can take a while to confirm).
+    stop_grace_period: 150s
     env_file: .env
     environment:
       HOST: 0.0.0.0

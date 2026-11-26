@@ -14,11 +14,14 @@ pump.fun trades around the clock: your buy size, your minimum, your exits.
   - **Stop loss levels**: e.g. −30 % sell half, −60 % sell the rest. Each fires once.
   - **Dead coin**: no trades for N seconds → sell everything.
 - **Sell now** button on every open position.
+- **License keys and an owner page.** Friends sign up with a key you create; you manage keys, users, fees and
+  settings at `/admin`.
+- **Custom trading fees.** Priority fee and tip per copy, for buys and sells.
 - **Test mode first.** Every copy starts in test mode: buys are checked against the real chain, fills come from
   real prices, nothing is sent. Switch a copy to Live once you trust it.
 - A live feed of every buy, sell and skipped copy (with the reason), and a history with profit per trade.
 
-The look is Miami at night: a lit marquee sign, neon glass, a skyline over the water. It works on a phone.
+A clean, dense trading dashboard that also works on a phone.
 
 ## How it works (one paragraph)
 
@@ -49,58 +52,53 @@ costs on hot coins (snipetech measured +18–43 % entry price at 2–4 trades be
 The free public RPC drops websocket connections; the backup poll then catches trades seconds late. A paid RPC
 keeps the websocket up.
 
-## Put it online (about 20 minutes)
+## Put it online
 
-You need: a small Linux server (2 GB RAM is plenty), a domain name, and a **paid Solana RPC** (Helius, QuickNode
-or Triton). The free public RPC rate-limits within minutes of real use.
+You need a small Ubuntu server, a domain pointed at it (a DNS "A" record), and a paid Solana RPC (Helius).
 
-1. Point your domain (e.g. `copy.yourdomain.com`) at the server's IP (a DNS "A" record). Optional: a `CNAME`
-   for `www` pointing to the domain, so `www.` forwards to it.
-2. On the server, install Docker, then:
-   ```bash
-   git clone https://github.com/frieshimself-cpu/motionlarp && cd motionlarp
-   cp .env.example .env
-   ```
-3. Edit `.env`:
-   - `RPC_URL`: your Helius / QuickNode URL.
-   - `MASTER_KEY`: run `openssl rand -hex 32` and paste the result. **Back it up somewhere safe.** Without it the
-     stored wallet keys can never be read again.
-   - `SIGNUP_CODE`: the invite code your friends type to sign up.
-   - `DOMAIN`: your domain.
-   - Leave `LIVE_TRADING=false` for now.
-4. Start it:
-   ```bash
-   docker compose up -d --build
-   ```
-   Caddy fetches the HTTPS certificate by itself. Open `https://your-domain`, sign up, and send friends the link
-   and the code.
+Log in to the server and paste one line:
 
-Logs: `docker compose logs -f app`. Update: `git pull && docker compose up -d --build`.
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/frieshimself-cpu/motionlarp/claude/ecstatic-mccarthy-q58vzz/deploy/install.sh)
+```
+
+It installs Docker, downloads the site, asks for your **domain** and an **admin password**, starts everything
+(HTTPS certificate included), and switches on automatic updates: every 2 minutes the server checks this branch
+for new code and, if there is any, rebuilds and restarts by itself (trades in flight finish first; open positions
+and their sell rules survive a restart). Running the line again later is safe: it keeps your settings.
+
+Everything else is done in the browser.
+
+## The owner page: `https://your-domain/admin`
+
+Log in with the admin password. Only you have it; a user account is never an admin.
+
+- **Settings.** Paste your Helius RPC link (stored encrypted, shown again only as its host and last 4
+  characters), set the platform fee and the wallet it is paid to, the most a single buy may spend, an optional
+  Jupiter API key, and the **Live trading** switch. Changing the RPC link restarts the site by itself.
+- **License keys.** One key = one account. Create a key for each friend (and one for yourself), copy it when it
+  is shown (once), send it to them; they sign up with it. A key can carry its own fee (0 % for you, say).
+  Revoke a key and its user is locked out and gets no new copies; open positions still sell by their rules.
+- **Users.** Wallet, copies, open and closed positions, profit, fees paid; disable or enable anyone.
+
+## Fees
+
+- **Trading fees, set per copy by each user:** priority fee and tip, separately for buys and sells, plus slippage,
+  with Eco / Fast / Turbo presets. The priority fee goes to the network; the tip goes to the block builder, and a
+  tipped trade is also sent through Jito so it lands sooner.
+- **Platform fee, set by you on the admin page:** a % of every copy buy and sell, sent to your fee wallet inside
+  the same transaction, after the swap: no trade, no fee. A license key can override it. The fee wallet must hold
+  at least 0.001 SOL (a transfer into an empty wallet fails and would take the trade with it). Users see the fee
+  they pay, and their profit figures include it.
 
 ## Going live
 
-1. Run copies in test mode for a day and read the feed and history: are the right buys copied, and do the
-   sells fire when they should?
+1. Run copies in test mode first and read the activity feed and history.
 2. Fund a **fresh** wallet with a little SOL, import it, set one copy to Live with a small buy (0.01–0.02 SOL).
-3. Set `LIVE_TRADING=true` and `MAX_SOL_PER_BUY` (the most any single copy buy may spend) in `.env`, then
-   `docker compose up -d`.
+3. On the admin page turn **Live trading** on and save.
 4. Watch the first live buys and sells on Solscan (the feed links each one).
 
-Both switches are needed for a real trade: the server's `LIVE_TRADING=true` **and** the copy set to Live.
-
-## Platform fee (your cut)
-
-Set in `.env`:
-
-- `FEE_BPS`: the fee in basis points. 100 = 1 % of every copy buy and every sell. 0 = off. The cap is 10 %.
-- `FEE_WALLET`: the wallet that receives it. **It must already hold at least 0.001 SOL.** A small transfer into
-  an empty wallet fails, and the trade fails with it, so the server refuses to start until it does.
-- `FEE_EXEMPT_USERS`: usernames that pay nothing (yours, say), comma-separated.
-
-The fee is a transfer inside the same transaction as the trade, after the swap: if the trade fails, no fee is
-paid. Users see the fee on the site (a FEE pill, the copy editor, fees paid in their history), and their profit
-figures include it. The incoming fees are visible on Solscan on `FEE_WALLET`. Checked on mainnet: real buys
-and sells with the fee transfer included simulate cleanly.
+Both switches are needed for a real trade: Live trading on the admin page **and** the copy set to Live.
 
 ## Safety, in plain words
 
@@ -117,9 +115,9 @@ and sells with the fee transfer included simulate cleanly.
 
 ```bash
 npm install
-cp .env.example .env        # put MASTER_KEY in (npm run genkey); RPC_URL optional
+cp .env.example .env        # MASTER_KEY (npm run genkey) and ADMIN_PASSWORD; the rest at /admin
 npm run dev                 # http://127.0.0.1:3000
-npm test                    # 103 tests
+npm test                    # 157 tests
 npm run check:mainnet       # builds real buys/sells for real wallets on mainnet and simulates them (sends nothing)
 npm run measure             # how many slots behind a copy would be, and how long building it takes
 ```
@@ -138,7 +136,11 @@ src/engine/settings.ts a copy's settings and their validation
 src/engine/executor.ts builds, simulates and (live) sends transactions; reads real fills back
 src/venues/, src/tx/   pump.fun + PumpSwap transaction building (ported from Velo, official pump.fun SDKs)
 src/store.ts           SQLite: accounts, encrypted wallets, copies, positions, fills, feed
-src/http/app.ts        the JSON API and the static site
+src/http/app.ts        the JSON API (users and admin) and the static site
+src/owner-settings.ts  what the owner saves on the admin page (encrypted, applied over the environment)
+src/licenses.ts        license keys
+src/venues/jupiter.ts  Jupiter route for every coin outside pump.fun / PumpSwap
+deploy/                install.sh (one-command install), update.sh (automatic updates)
 public/                the website (no framework, no build step)
 docs/                  design, plan, test record
 ```

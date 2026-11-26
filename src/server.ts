@@ -112,8 +112,8 @@ if (config.feeBps > 0 && config.rpcUrl) {
 
 app.listen(config.port, config.host, () => {
   log.info('motionlarp up', { url: `http://${config.host}:${config.port}`, mode: mode(), maxSolPerBuy: config.maxSolPerBuy, feeBps: config.feeBps, admin: config.adminPassword ? 'on' : 'off (no ADMIN_PASSWORD)' });
-  if (!config.rpcUrl) log.warn('no RPC_URL: the site works but nothing is watched or traded');
-  if (config.rpcUrl && !config.liveTrading) log.info('test mode: copies are simulated and filled from live quotes; nothing is sent (LIVE_TRADING=true to go live)');
+  if (!config.rpcUrl) log.warn('no RPC link yet: the site works but nothing is watched or traded (add it at /admin)');
+  if (config.rpcUrl && !config.liveTrading) log.info('test mode: copies are simulated and filled from live quotes; nothing is sent (the owner turns live trading on at /admin)');
   startBlockhashRefresher();
   watcher?.start();
   if (config.rpcUrl) setTimeout(() => void engine.restore().catch(() => undefined), 3_000);
