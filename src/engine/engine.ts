@@ -682,8 +682,9 @@ export class Engine {
           });
           this.retries.delete(key);
           if (partial && order.reason !== 'manual') this.retries.set(key, { positionId: p.id, order, tries: 1, nextAt: this.now() + (this.deps.slowRetryMs ?? SLOW_RETRY_MS) });
-          // A full exit that left coins to our other sells on their way: whatever they do not sell is sold after them.
-          if (!closed && !partial && order.percent >= 100 && this.reservedExcept(p.id, key) > 0n) this.exitOwed.set(p.id, order);
+          // A full exit that left coins (to our other sells on their way, or to one between its retries that may yet
+          // fail for good): once nothing else is out, whatever is still held is sold too.
+          if (!closed && !partial && order.percent >= 100) this.exitOwed.set(p.id, order);
           fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
         }
       } finally {

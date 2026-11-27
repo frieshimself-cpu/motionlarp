@@ -857,3 +857,23 @@ describe('found by the independent review of the overlap fixes', () => {
     expect(open()).toHaveLength(0);
   });
 });
+
+describe('their full exit while a timed step is between its retries (fuzzer case 10)', () => {
+  it('the half that step was selling is sold right after the exit, not left until a later step or for good', async () => {
+    ex.live = true;
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: true, mode: 'exit' }, timedOf: 'bag', timed: [{ afterSec: 2, percent: 50 }, { afterSec: 600, percent: 100 }], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } } }));
+    engine = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 100, 100, 100], slowRetryMs: 1, zeroRecheckMs: 1 });
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    // The +2 s step's first try is out (its half reserved) when their exit sizes its sell, and fails just before the
+    // exit is booked; every later try of the step fails too (then it gives up). The exit and the rest go through.
+    let failFirst!: (v: 'fail') => void;
+    ex.plan = (n, req) => (n === 1 ? new Promise((r) => { failFirst = r as never; }) : n === 2 ? 'ok' : req.closeIfEmpty ? 'ok' : 'fail');
+    clock = 1_002_000; await engine.tick(); await sleep(5);
+    const start = ex.balanceReads;
+    ex.balanceHook = async (k) => { if (k === start + 2) { failFirst('fail'); await sleep(20); } }; // the exit's read after its sell
+    await engine.onLeaderTrade({ ...sellTrade(0n), signature: 'out' });
+    await sleep(50); await engine.idle();
+    expect(ex.held).toBe(0n);
+    expect(open()).toHaveLength(0);
+  });
+});
