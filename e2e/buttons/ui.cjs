@@ -27,9 +27,10 @@ async function toast(page, timeout = 6000) {
   return h ? h.jsonValue() : null;
 }
 
-/** The server's own answer for this session (the page's data), fetched from inside the page. */
-const state = (page) => page.evaluate(async () => { const r = await fetch(`/api/state?tz=${-new Date().getTimezoneOffset()}`); return r.ok ? r.json() : { __status: r.status }; });
-const historyApi = (page) => page.evaluate(async () => { const r = await fetch(`/api/history?tz=${-new Date().getTimezoneOffset()}`); return r.ok ? r.json() : { __status: r.status }; });
+/** The server's own answer for this session (the page's data), fetched from inside the page with the page's own clock:
+ *  its offset now and its time zone. */
+const state = (page) => page.evaluate(async () => { const r = await fetch(`/api/state?tz=${-new Date().getTimezoneOffset()}&zone=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`); return r.ok ? r.json() : { __status: r.status }; });
+const historyApi = (page) => page.evaluate(async () => { const r = await fetch(`/api/history?tz=${-new Date().getTimezoneOffset()}&zone=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`); return r.ok ? r.json() : { __status: r.status }; });
 
 const READ_DASH = `(() => {
   const $ = (s, r = document) => r.querySelector(s);

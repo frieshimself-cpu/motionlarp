@@ -7,8 +7,13 @@ let state = null;
 let tab = 'dash';
 let history = null;
 let pollTimer = null;
-/** The viewer's clock decides what "today" is. */
-const TZ = `?tz=${-new Date().getTimezoneOffset()}`;
+/** The viewer's clock decides what "today" is, and on which day each trade closed: its offset now, and its time zone,
+ *  whose offset may have been another one when a trade closed (summer time). */
+const TZ = (() => {
+  let zone = '';
+  try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { /* a browser without time zones: the offset alone */ }
+  return `?tz=${-new Date().getTimezoneOffset()}${zone ? `&zone=${encodeURIComponent(zone)}` : ''}`;
+})();
 
 // ── getting in: the license key is the login ────────────────────────────
 function renderAuth(error = '') {

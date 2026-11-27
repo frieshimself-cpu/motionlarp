@@ -400,6 +400,18 @@ position({ // the same day as H4: a day with both real and test trades
     });
   }
 }
+// The same for someone in Los Angeles: 07:30 UTC on 25 October 2026 is 00:30 there, a week before the clocks went back
+// (1 November); with November's offset it reads 23:30 on the 24th. Without it, the Los Angeles checks saw such a trade
+// only when the suite ran between 07:00 and 08:00 UTC (the 40-day-old trade then closed at that hour).
+{
+  const closedAt = Date.UTC(2026, 9, 25, 7, 30, 0);
+  if (NOW - closedAt > 2 * DAY && NOW - closedAt < 45 * DAY) {
+    position({
+      key: 'H10-live-dst-edge-la', copy: allSame!, mode: 'live', end: 'closed', boughtAgo: NOW - closedAt + 60_000, tokens: T(100_000), buy: { lamports: L('0.3'), fee: L('0.0015') },
+      sells: [sell('manual', T(100_000), '0.33', '0.0015', 60_000, 100)],
+    });
+  }
+}
 // Alice, a buy that failed ──────────────────────────────────────────────
 position({ key: 'F1-failed-buy', copy: allSame!, mode: 'live', end: 'failed', boughtAgo: 40 * MIN, failError: 'custom program error: 0x1772 TooMuchSolRequired', failText: 'price moved more than your slippage allows' });
 

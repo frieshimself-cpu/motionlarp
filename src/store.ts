@@ -584,6 +584,31 @@ export class Store {
       offsetMs, userId,
     ).map((r) => ({ day: num(r.day), mode: String(r.mode), trades: num(r.trades), wins: num(r.wins), pnlLamports: big(r.pnl) }));
   }
+  /**
+   * Closed positions per local day and mode, each moved by the offset its OWN closing time had where the viewer lives
+   * (pnlByDay moves them all by one offset: across a change of the clocks, a trade closed in the hour they moved went
+   * to the wrong day). `offsets(first, last)` gets the earliest and latest closing time and lists the offsets (ms east
+   * of UTC) in force from each moment on, oldest first; the first one also covers anything before its moment.
+   */
+  pnlByLocalDay(userId: number, offsets: (first: number, last: number) => { from: number; offsetMs: number }[]): { day: number; mode: string; trades: number; wins: number; pnlLamports: bigint }[] {
+    const span = this.get("SELECT MIN(closed_at) AS first, MAX(closed_at) AS last FROM positions WHERE user_id = ? AND status = 'closed' AND closed_at IS NOT NULL", userId);
+    if (!span || span.first === null || span.first === undefined) return [];
+    const list = offsets(num(span.first), num(span.last));
+    if (!list.length) return [];
+    // One offset per stretch of time: CASE WHEN closed_at < <start of the 2nd> THEN <1st> WHEN … ELSE <last> END.
+    const params: unknown[] = [];
+    for (let i = 1; i < list.length; i++) params.push(list[i]!.from, list[i - 1]!.offsetMs);
+    params.push(list[list.length - 1]!.offsetMs);
+    const shift = list.length === 1 ? 'CAST(? AS INTEGER)' : `CASE${' WHEN closed_at < CAST(? AS INTEGER) THEN CAST(? AS INTEGER)'.repeat(list.length - 1)} ELSE CAST(? AS INTEGER) END`;
+    return this.all(
+      `SELECT (closed_at + ${shift}) / 86400000 AS day, mode, COUNT(*) AS trades,
+              SUM(CASE WHEN proceeds_lamports > cost_lamports THEN 1 ELSE 0 END) AS wins,
+              SUM(proceeds_lamports - cost_lamports) AS pnl
+       FROM positions WHERE user_id = ? AND status = 'closed' AND closed_at IS NOT NULL
+       GROUP BY day, mode ORDER BY day DESC, mode`,
+      ...params, userId,
+    ).map((r) => ({ day: num(r.day), mode: String(r.mode), trades: num(r.trades), wins: num(r.wins), pnlLamports: big(r.pnl) }));
+  }
   /** `exactPending`: booked from the quote; its exact figures are still to be read from its transaction. */
   insertFill(f: Omit<Fill, 'id' | 'createdAt' | 'feeLamports'> & { feeLamports?: bigint; exactPending?: boolean }): number {
     return this.run(

@@ -492,6 +492,9 @@ export function createApp(deps: AppDeps): Server {
     }
 
     // ── reads ──
+    // The viewer's calendar: the page sends its clock's offset (tz, minutes east of UTC) and its time zone (zone, e.g.
+    // Europe/Berlin): each trade is dated by the offset its own closing time had there.
+    const viewerPnl = () => pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0), Date.now(), url.searchParams.get('zone'));
     if (path === '/api/state' && method === 'GET') {
       renewSession(req, res);
       const user = store.user(uid);
@@ -501,7 +504,7 @@ export function createApp(deps: AppDeps): Server {
         user: { username: user?.username },
         server: deps.serverInfo(),
         feeBps: deps.feeBpsFor?.(uid) ?? 0,
-        pnl: (({ days: _days, ...rest }) => rest)(pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0))),
+        pnl: (({ days: _days, ...rest }) => rest)(viewerPnl()),
         wallet: w ? { pubkey: w.pubkey, sol: await walletSol(uid, w.pubkey) } : null,
         copies: store.copies(uid).map((c) => ({ id: c.id, ...c.settings, stats: stats.get(c.id) ?? { open: 0, closed: 0, pnlSol: 0 } })),
         positions: store.activePositions(uid).map(positionView),
@@ -520,7 +523,7 @@ export function createApp(deps: AppDeps): Server {
       const mode = shownMode(uid);
       const t = store.closedTotals(uid, mode);
       const closedAll = t.trades + store.closedTotals(uid, mode === 'live' ? 'paper' : 'live').trades;
-      return json(res, 200, { positions: views, shown: views.length, closedAll, totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0)) });
+      return json(res, 200, { positions: views, shown: views.length, closedAll, totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: viewerPnl() });
     }
 
     throw new HttpError(404, 'not found');
