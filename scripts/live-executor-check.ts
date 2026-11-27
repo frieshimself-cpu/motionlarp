@@ -106,7 +106,7 @@ if (held > 0n) {
   await step('SELL 40 %', 'sell', () => ex.sell({ ...base, tokens: (held * 40n) / 100n }));
   await sleep(1500);
   held = await ex.tokenBalance(owner, mint);
-  await step('SELL everything left', 'sell', () => ex.sell({ ...base, tokens: held }));
+  await step('SELL everything left', 'sell', () => ex.sell({ ...base, tokens: held, closeIfEmpty: true }));
   await sleep(1500);
   console.log(`left in the wallet: ${await ex.tokenBalance(owner, mint)} tokens`);
 }

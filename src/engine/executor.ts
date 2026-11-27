@@ -12,7 +12,7 @@
 //    through), the fill is the real quote, nothing is sent. Sells are filled from the quote.
 // The platform fee rides inside the same transaction as the trade on both routes.
 import { PublicKey, SystemProgram, type Keypair, type TransactionInstruction, type VersionedTransaction } from '@solana/web3.js';
-import { getAssociatedTokenAddressSync } from '@solana/spl-token';
+import { createCloseAccountInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { config } from '../config.js';
 import { getConnection, getShortBlockhash } from '../chain/connection.js';
 import { getTransaction } from '../chain/rpc.js';
@@ -58,6 +58,9 @@ export interface TradeRequest {
   checkFirst?: boolean;
   /** Told the transaction's signature the moment it is signed, before it is sent (so it can be written down). */
   onSigned?: (signature: string) => void;
+  /** A sell of everything: when it empties the coin's token account, that account is closed in the same
+   *  transaction and its rent (about 0.002 SOL) comes back. Never on a retry. */
+  closeIfEmpty?: boolean;
 }
 
 export interface Executor {
@@ -366,7 +369,13 @@ export class ChainExecutor implements Executor {
     if (tokens <= 0n) return { ok: false, error: 'the wallet holds none of this coin' };
     const built = await venue.buildSell({ pool, user: req.wallet.publicKey, tokensIn: tokens, slippagePct: req.slippagePct });
     const ixs = withFee(built.instructions, req.wallet.publicKey, built.expectedOut, req.feeBps, config.feeWallet);
-    const tx = await this.nativeTx(req, ixs.instructions);
+    // The whole balance goes: close the emptied token account after the swap (its rent returns to the wallet). Not
+    // on a retry, so a close that cannot work (an account with withheld fees) can never block the sell itself.
+    const closing = !!req.closeIfEmpty && !req.checkFirst && tokens === held;
+    const all = closing
+      ? [...ixs.instructions, createCloseAccountInstruction(getAssociatedTokenAddressSync(new PublicKey(req.mint), req.wallet.publicKey, true, pool.tokenProgram), req.wallet.publicKey, req.wallet.publicKey, [], pool.tokenProgram)]
+      : ixs.instructions;
+    const tx = await this.nativeTx(req, all);
     return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'sell', tokens, built.expectedOut - ixs.fee - this.txCost(req), held, ixs.fee);
   }
 

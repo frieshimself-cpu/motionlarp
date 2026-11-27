@@ -356,7 +356,7 @@ export class Engine {
             wallet, mint: p.mint, tokens, slippagePct: copy?.settings.slippagePct ?? 25,
             priorityFeeSol: copy?.settings.sellPriorityFeeSol ?? copy?.settings.priorityFeeSol ?? 0.0005,
             tipSol: copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0, live, feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0,
-            exit: live, checkFirst: failures > 0,
+            exit: live, checkFirst: failures > 0, closeIfEmpty: !!order.everything,
           });
         } finally {
           mine.delete(key);
@@ -534,7 +534,7 @@ export class Engine {
       this.reserved.set(p.id, mine);
       let fill: Awaited<ReturnType<Executor['sell']>>;
       try {
-        fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0, exit: live, checkFirst });
+        fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0, exit: live, checkFirst, closeIfEmpty: order.percent >= 100 && inFlight === 0n });
       } finally {
         mine.delete(key);
         if (!mine.size) this.reserved.delete(p.id);

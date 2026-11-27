@@ -498,3 +498,13 @@ describe('a buy cut short (crash, lost connection) is settled from its own trans
     answer = 'failed';
   });
 });
+
+describe('the sell that empties the bag closes the coin\'s token account (its rent comes back)', () => {
+  it('the last step and a full exit ask for it; partial steps and retries do not', async () => {
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.plan = (n) => (n === 3 ? 'fail' : 'ok'); // the last step fails once, then is retried
+    await at(2); await at(4); await at(6);
+    expect(ex.requests.map((r) => [!!r.closeIfEmpty, !!r.checkFirst])).toEqual([[false, false], [false, false], [true, false], [true, true]]);
+  });
+});
