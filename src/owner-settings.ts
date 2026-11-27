@@ -33,6 +33,8 @@ export interface SettingsChecks {
   testRpc: (url: string) => Promise<void>;
   /** Lamports held by an address. */
   balance: (address: string) => Promise<bigint>;
+  /** Throws when Jupiter refuses the key (a real quote is asked with it). */
+  testJupiter?: (key: string) => Promise<void>;
 }
 
 export class OwnerSettingsError extends Error {
@@ -113,6 +115,13 @@ export async function saveOwnerSettings(store: Store, config: MutableConfig, pat
 
   const jup = patch.jupiterApiKey?.trim();
   if (jup) {
+    if (checks.testJupiter && jup !== config.jupiterApiKey) {
+      try {
+        await checks.testJupiter(jup);
+      } catch {
+        throw new OwnerSettingsError('Jupiter did not accept that key: copy the whole key from portal.jup.ag');
+      }
+    }
     toStore.jupiter_api_key = encryptText(jup, 'jupiter_api_key', config.masterKey);
     if (jup !== config.jupiterApiKey) restart = true;
   }

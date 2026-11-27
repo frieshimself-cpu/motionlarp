@@ -227,3 +227,20 @@ tbody tr:hover { background: rgba(255, 255, 255, .015); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 
 .saved { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 38px; }
+
+.preset-bar .presets { gap: 10px; }
+.preset-bar .btn { min-width: 96px; }
+
+/* connections page */
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--border-strong); flex: none; }
+.dot.good { background: #2fd08a; box-shadow: 0 0 0 3px rgba(47, 208, 138, .15); }
+.dot.bad { background: #f5546d; box-shadow: 0 0 0 3px rgba(245, 84, 109, .15); }
+.dot.warn { background: #e6b34a; }
+.nav .dot { width: 7px; height: 7px; margin-left: 4px; vertical-align: middle; }
+.conn-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; flex-wrap: wrap; }
+.conn-row:last-of-type { border-bottom: 0; }
+.conn-row b { min-width: 120px; }
+.conn-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 12px; }
+.conn-form[hidden] { display: none; }
+.conn-form .hint { grid-column: 1 / -1; }
+@media (max-width: 560px) { .conn-form { grid-template-columns: 1fr; } }

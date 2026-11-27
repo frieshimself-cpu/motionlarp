@@ -5,6 +5,10 @@ let config = null;
 let state = null;
 let newKey = null; // the key just created: shown once, until the page is left or another is made
 let timer = null;
+let tab = 'admin';
+let conn = null; // the last connection report (null: not checked yet)
+let connBusy = false;
+const openForms = new Set(); // "replace" forms the owner opened: they stay open across re-draws
 
 function renderLogin(error = '') {
   clearInterval(timer);
@@ -27,6 +31,7 @@ function renderLogin(error = '') {
       await api('POST', '/api/admin/login', { password: $('#ap').value });
       await load();
       timer = setInterval(() => { if (!document.hidden) load(true); }, 5000);
+      checkConnections();
     } catch (err) { renderLogin(err.message); }
   });
 }
@@ -34,21 +39,137 @@ function renderLogin(error = '') {
 const STATUS = { unused: '<span class="pill">Unused</span>', active: '<span class="pill live">Active</span>', revoked: '<span class="pill off">Revoked</span>' };
 const feeLabel = (l) => (l.feePercent === null ? `Default (${state.settings.feePercent}%)` : `${l.feePercent}%`);
 
-function render() {
-  const s = state;
-  const st = s.settings;
-  app.innerHTML = `
+const topbar = (s) => `
     <header class="topbar"><div class="topbar-in">
       ${brandHtml(config.brand)}
-      <nav class="nav"><button class="on">Admin</button></nav>
+      <nav class="nav"><button data-tab="admin" class="${tab === 'admin' ? 'on' : ''}">Admin</button><button data-tab="connections" class="${tab === 'connections' ? 'on' : ''}">Connections${conn && !conn.ok ? ' <span class="dot bad"></span>' : ''}</button></nav>
       <div class="right">${modePill(s.server)}<a class="btn small ghost" href="/">Open site</a><button class="btn small ghost" id="admin-logout">Log out</button></div>
-    </div></header>
+    </div></header>`;
+
+function bindTop() {
+  $('#admin-logout').addEventListener('click', async () => { await api('POST', '/api/admin/logout').catch(() => {}); newKey = null; renderLogin(); });
+  $$('[data-tab]', app).forEach((b) => b.addEventListener('click', () => {
+    tab = b.dataset.tab;
+    render();
+    if (tab === 'connections') checkConnections();
+  }));
+}
+
+// ── Connections: the Helius link and the Jupiter key, saved once, used for every user ──
+const connRow = (c) => `<div class="conn-row"><span class="dot ${c.ok ? 'good' : c.optional ? 'warn' : 'bad'}"></span><b>${esc(c.name)}</b><span class="${c.ok ? 'muted' : c.optional ? 'muted' : 'down'}">${esc(c.detail)}</span></div>`;
+
+function renderConnections() {
+  const s = state;
+  const st = s.settings;
+  const by = (id) => conn?.checks.find((c) => c.id === id);
+  const rows = (ids) => (conn ? ids.map((id) => by(id)).filter(Boolean).map(connRow).join('') : '<div class="conn-row"><span class="dot"></span><span class="muted">Checking…</span></div>');
+  const head = !conn ? '<span class="pill">Checking…</span>' : conn.ok ? '<span class="pill live">All connected</span>' : '<span class="pill off">Needs attention</span>';
+  app.innerHTML = `${topbar(s)}
     <main class="page">
+      <div class="stack">
+        <div class="card">
+          <div class="card-head"><h2>Connections<span class="sub">saved once here · used for every user on the site · they survive updates and restarts</span></h2><div style="display:flex;gap:10px;align-items:center">${head}<button class="btn small" id="conn-check" ${connBusy ? 'disabled' : ''}>${connBusy ? 'Checking…' : 'Check again'}</button></div></div>
+          <div class="card-body"><div class="muted" style="font-size:13px">Each row below is a real request sent just now, not just "a key is saved". Nobody else has to set anything: every license key trades through these.</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Helius<span class="sub">the connection to Solana: reading the copied wallets and sending trades</span></h2>${st.rpcSet ? '<span class="pill live">Saved</span>' : '<span class="pill off">Not set</span>'}</div>
+          <div class="card-body">
+            ${st.rpcSet ? `<div class="saved" style="margin-bottom:6px"><span class="mono">${esc(st.rpc)}</span></div>` : ''}
+            ${rows(['rpc', 'stream', 'sender'])}
+            <form id="conn-rpc" class="conn-form" ${st.rpcSet && !openForms.has('conn-rpc') ? 'hidden' : ''}>
+              <input id="set-rpc" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="https://mainnet.helius-rpc.com/?api-key=…">
+              <button class="btn primary" type="submit">Test and save</button>
+              <div class="hint">Helius → RPC → "RPC URL". It is tested first, then stored encrypted; saving restarts the site for a few seconds.</div>
+            </form>
+            ${st.rpcSet ? '<button type="button" class="btn small ghost" data-show="conn-rpc" style="margin-top:10px">Replace the link</button>' : ''}
+            <div id="conn-rpc-msg" class="down" style="margin-top:8px"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Jupiter<span class="sub">buys and sells every coin that is not on pump.fun</span></h2>${st.jupiterKeySet ? '<span class="pill live">Saved</span>' : '<span class="pill">No key</span>'}</div>
+          <div class="card-body">
+            ${rows(['jupiter'])}
+            <form id="conn-jup" class="conn-form" ${st.jupiterKeySet && !openForms.has('conn-jup') ? 'hidden' : ''}>
+              <input id="set-jup" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="The API key from portal.jup.ag">
+              <button class="btn primary" type="submit">Test and save</button>
+              <div class="hint">A real quote is asked with the key before it is saved: a wrong key is refused, the old one stays.</div>
+            </form>
+            ${st.jupiterKeySet ? '<button type="button" class="btn small ghost" data-show="conn-jup" style="margin-top:10px">Replace the key</button>' : ''}
+            <div id="conn-jup-msg" class="down" style="margin-top:8px"></div>
+          </div>
+        </div>
+      </div>
+    </main>`;
+  bindTop();
+  $('#conn-check').addEventListener('click', () => checkConnections());
+  $$('[data-show]', app).forEach((b) => b.addEventListener('click', () => {
+    const f = $(`#${b.dataset.show}`);
+    f.hidden = !f.hidden;
+    if (f.hidden) openForms.delete(f.id); else openForms.add(f.id);
+    if (!f.hidden) $('input', f).focus();
+  }));
+  const saver = (formId, inputId, field, check) => $(`#${formId}`).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = $(`#${formId}-msg`);
+    const value = $(`#${inputId}`).value.trim();
+    msg.className = 'down';
+    if (!value) { msg.textContent = 'Paste it first.'; return; }
+    const bad = check(value);
+    if (bad) { msg.textContent = bad; return; }
+    msg.className = 'muted';
+    msg.textContent = 'Testing…';
+    try {
+      const r = await api('POST', '/api/admin/settings', { [field]: value });
+      if (r.restart) {
+        msg.textContent = 'Saved. Restarting the site…';
+        await waitForRestart();
+      }
+      toast('Saved and working');
+      openForms.delete(formId);
+      $(`#${inputId}`).value = '';
+      conn = null;
+      await load();
+      checkConnections();
+    } catch (err) {
+      msg.className = 'down';
+      msg.textContent = err.message;
+    }
+  });
+  saver('conn-rpc', 'set-rpc', 'rpcUrl', (v) => (/^https:\/\//.test(v) ? '' : 'That is not a link. Copy the whole "RPC URL" from Helius: it starts with https://'));
+  saver('conn-jup', 'set-jup', 'jupiterApiKey', () => '');
+}
+
+async function checkConnections() {
+  if (connBusy) return;
+  connBusy = true;
+  if (tab === 'connections' && !typingNow()) renderConnections();
+  try {
+    conn = await api('GET', '/api/admin/connections');
+  } catch (err) {
+    if (err.status === 401) { connBusy = false; return renderLogin(); }
+    conn = { ok: false, checks: [{ id: 'rpc', name: 'Check', ok: false, detail: err.message }] };
+  }
+  connBusy = false;
+  if (!typingNow()) render();
+}
+
+/** Someone is typing, or has pasted a link or key that is not saved yet: do not re-draw under them. */
+const typingNow = () => (!!document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName) && app.contains(document.activeElement)) || $$('.conn-form input', app).some((i) => i.value);
+
+function render() {
+  if (tab === 'connections') return renderConnections();
+  const s = state;
+  const st = s.settings;
+  app.innerHTML = `${topbar(s)}
+    <main class="page">
+      ${conn && !conn.ok ? `<div class="err" style="margin-bottom:16px">A connection needs attention: ${esc(conn.checks.filter((c) => !c.ok && !c.optional).map((c) => `${c.name} — ${c.detail}`).join(' · '))}. Open <b>Connections</b>.</div>` : ''}
       <section class="grid stats">
         <div class="card stat"><div class="label">Users</div><div class="value">${s.totals.users}</div><div class="foot">${s.licenses.filter((l) => l.status === 'unused').length} unused keys</div></div>
         <div class="card stat"><div class="label">Open positions</div><div class="value">${s.totals.open}</div><div class="foot">watching ${s.server.watching} wallets</div></div>
         <div class="card stat"><div class="label">Fees earned</div><div class="value">${fmtSol(s.totals.feesLiveSol, 4)} <small>SOL</small></div><div class="foot">real trades · test mode would have: ${fmtSol(s.totals.feesTestSol, 4)}</div></div>
-        <div class="card stat"><div class="label">Trading</div><div class="value">${s.server.mode === 'offline' ? 'Offline' : s.server.live ? 'Live' : 'Test'}</div><div class="foot">${st.rpcSet ? `Sender ${esc(s.server.sender ?? '—')} · feed: ${esc(s.server.feed ?? 'standard')}` : 'add your Helius link below'}</div></div>
+        <div class="card stat"><div class="label">Trading</div><div class="value">${s.server.mode === 'offline' ? 'Offline' : s.server.live ? 'Live' : 'Test'}</div><div class="foot">${st.rpcSet ? `Sender ${esc(s.server.sender ?? '—')} · feed: ${esc(s.server.feed ?? 'standard')}` : 'add your Helius link under Connections'}</div></div>
       </section>
 
       <div class="stack">
@@ -96,16 +217,6 @@ function render() {
         <div class="card">
           <div class="card-head"><h2>Settings</h2></div>
           <form id="settings">
-            <div class="setting"><div class="what"><b>Helius RPC link</b><span>The connection to Solana. Saved once; it stays until you change it.</span></div>
-              <div>${st.rpcSet
-                ? `<div class="saved"><span class="pill live">Saved</span><span class="mono">${esc(st.rpc)}</span><button type="button" class="btn small ghost" data-change="rpc">Change</button></div>
-                   <div id="change-rpc" hidden style="margin-top:10px"><input id="set-rpc" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="Paste the new RPC URL from Helius"><div class="hint">Stored encrypted. Changing it restarts the site (a few seconds).</div></div>`
-                : `<input id="set-rpc" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="https://mainnet.helius-rpc.com/?api-key=…"><div class="hint">Helius → RPC → "RPC URL". Stored encrypted; nothing is watched or traded until it is set.</div>`}</div></div>
-            <div class="setting"><div class="what"><b>Jupiter API key</b><span>For coins outside pump.fun. Saved once; it stays until you change it.</span></div>
-              <div>${st.jupiterKeySet
-                ? `<div class="saved"><span class="pill live">Saved</span><span class="muted">in use for every Jupiter request</span><button type="button" class="btn small ghost" data-change="jup">Change</button></div>
-                   <div id="change-jup" hidden style="margin-top:10px"><input id="set-jup" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="Paste the new key from portal.jup.ag"></div>`
-                : `<input id="set-jup" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="Optional: a key from portal.jup.ag">`}</div></div>
             <div class="setting"><div class="what"><b>Platform fee</b><span>Your cut of every buy and sell, paid inside the same transaction. A license can have its own.</span></div>
               <div class="row2"><div><label for="set-fee">Fee</label><div class="unit"><input id="set-fee" type="number" min="0" max="10" step="any" value="${esc(st.feePercent)}"><span>%</span></div></div>
               <div><label for="set-wallet">Paid to wallet</label><input id="set-wallet" type="text" autocomplete="off" spellcheck="false" value="${esc(st.feeWallet)}" placeholder="Wallet address (must hold ≥ 0.001 SOL)"></div></div></div>
@@ -122,7 +233,7 @@ function render() {
 }
 
 function bind() {
-  $('#admin-logout').addEventListener('click', async () => { await api('POST', '/api/admin/logout').catch(() => {}); newKey = null; renderLogin(); });
+  bindTop();
   $('#new-license').addEventListener('submit', async (e) => {
     e.preventDefault();
     const label = $('#lic-label').value.trim();
@@ -161,11 +272,6 @@ function bind() {
   act('[data-disable]', 'disable', async (id) => { if (confirm('Disable this user? They are logged out and get no new copies.')) await api('PUT', `/api/admin/users/${id}`, { disabled: true }); });
   act('[data-enable]', 'enable', (id) => api('PUT', `/api/admin/users/${id}`, { disabled: false }));
 
-  $$('[data-change]', app).forEach((b) => b.addEventListener('click', () => {
-    const box = $(`#change-${b.dataset.change}`);
-    box.hidden = !box.hidden;
-    if (!box.hidden) $('input', box).focus();
-  }));
   $('#set-live').addEventListener('change', (e) => {
     if (e.target.checked && !confirm('Turn live trading ON? Every enabled copy on the site will then buy and sell with real SOL.')) e.target.checked = false;
     $('#live-text').textContent = e.target.checked ? 'Live trading will be ON after saving' : 'Test mode';
@@ -178,20 +284,9 @@ function bind() {
     const body = { feePercent: Number($('#set-fee').value || 0), feeWallet: $('#set-wallet').value.trim(), liveTrading: $('#set-live').checked };
     // An empty "max per buy" keeps the current value.
     if ($('#set-max').value.trim()) body.maxSolPerBuy = Number($('#set-max').value);
-    // The RPC link is a link: anything else in that box (a password a browser filled in by itself) is ignored.
-    const rpcBox = $('#set-rpc').value.trim();
-    if (rpcBox && !/^https:\/\//.test(rpcBox)) $('#set-rpc').value = '';
-    if ($('#set-rpc').value.trim()) body.rpcUrl = $('#set-rpc').value.trim();
-    if ($('#set-jup').value.trim()) body.jupiterApiKey = $('#set-jup').value.trim();
     try {
-      const r = await api('POST', '/api/admin/settings', body);
-      if (r.restart) {
-        msg.textContent = 'Saved. Restarting the site…';
-        await waitForRestart();
-        toast('Saved — the site is back up');
-      } else {
-        toast('Settings saved');
-      }
+      await api('POST', '/api/admin/settings', body);
+      toast('Settings saved');
       await load();
     } catch (err) {
       msg.className = 'down';
@@ -212,7 +307,7 @@ async function load(quiet = false) {
   try {
     const next = await api('GET', '/api/admin/state');
     // Do not re-draw under someone typing in a form.
-    const typing = document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName) && app.contains(document.activeElement);
+    const typing = typingNow();
     const dirty = $$('#settings input', app).some((i) => (i.type === 'checkbox' ? i.checked !== i.defaultChecked : i.value !== i.defaultValue));
     state = next;
     if (!(quiet && (typing || dirty))) render();
@@ -230,6 +325,9 @@ export async function bootAdmin(cfg) {
       state = await api('GET', '/api/admin/state');
       render();
       timer = setInterval(() => { if (!document.hidden) load(true); }, 5000);
+      // The connections are tested when the owner opens the page, and again every two minutes while it is open.
+      checkConnections();
+      setInterval(() => { if (!document.hidden) checkConnections(); }, 120_000);
       return;
     } catch (err) {
       if (err.status === 401 || err.status === 503) return renderLogin();

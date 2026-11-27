@@ -14,7 +14,7 @@ import { pnlSummary } from '../pnl.js';
 import type { Engine } from '../engine/engine.js';
 import type { Executor } from '../engine/executor.js';
 import { lossPercent } from '../engine/rules.js';
-import { SettingsError, validateSettings, defaultSettings, LIMITS } from '../engine/settings.js';
+import { SettingsError, validateSettings, defaultSettings, LIMITS, PRESETS } from '../engine/settings.js';
 import { log, safeErrorMessage } from '../log.js';
 import type { Position, Store } from '../store.js';
 import { parseSecretKey, WalletKeyError } from '../wallets.js';
@@ -28,7 +28,7 @@ export interface AppDeps {
   /** Opens /admin. Empty = the admin area is closed. */
   adminPassword?: string;
   /** The owner's settings (admin page): a masked view, saving, and restarting the server. */
-  owner?: { view: () => object; save: (patch: Record<string, unknown>) => Promise<{ restart: boolean }>; restart: () => void };
+  owner?: { view: () => object; save: (patch: Record<string, unknown>) => Promise<{ restart: boolean }>; restart: () => void; connections?: () => Promise<object> };
   brand?: string;
   /** Forget the cached keypair of a user (after a wallet change). */
   forgetWallet: (userId: number) => void;
@@ -284,6 +284,10 @@ export function createApp(deps: AppDeps): Server {
       if (typeof b.disabled === 'boolean') store.setUserDisabled(Number(usr[1]), b.disabled);
       return json(res, 200, { ok: true });
     }
+    if (path === '/api/admin/connections' && method === 'GET') {
+      if (!deps.owner?.connections) throw new HttpError(503, 'connection checks are not available');
+      return json(res, 200, await deps.owner.connections());
+    }
     if (path === '/api/admin/settings' && method === 'POST') {
       if (!deps.owner) throw new HttpError(503, 'settings are not available');
       const b = await readJson(req);
@@ -386,7 +390,7 @@ export function createApp(deps: AppDeps): Server {
       return json(res, 200, { ok: true });
     }
     if (path === '/api/config' && method === 'GET') {
-      return json(res, 200, { brand: deps.brand ?? 'WalletMotion', adminEnabled: !!deps.adminPassword, defaults: defaultSettings(), limits: LIMITS, server: deps.serverInfo() });
+      return json(res, 200, { brand: deps.brand ?? 'WalletMotion', adminEnabled: !!deps.adminPassword, defaults: defaultSettings(), presets: PRESETS, limits: LIMITS, server: deps.serverInfo() });
     }
 
     const uid = requireUser(req);

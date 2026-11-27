@@ -75,6 +75,16 @@ describe('getting in', () => {
     expect((await again.call('POST', '/api/enter', { license: ` ${aliceKey().toLowerCase()} ` })).body.username).toBe(first.body.username);
     expect(store.users()).toHaveLength(1);
   });
+  it('the site offers the ready-made presets (Scharo: one click fills the whole copy)', async () => {
+    const cfg = await new Client().call('GET', '/api/config');
+    const presets = cfg.body.presets as { id: string; name: string; settings: { leader: string; slippagePct: number; tipSol: number; priorityFeeSol: number; sell: { timedOf: string; timed: unknown[]; mirror: { mode: string } } } }[];
+    const scharo = presets.find((p) => p.id === 'scharo')!;
+    expect(scharo.name).toBe('Scharo');
+    expect(scharo.settings).toMatchObject({
+      leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih', slippagePct: 100, priorityFeeSol: 0.001, tipSol: 0.005,
+      sell: { timedOf: 'bag', mirror: { enabled: true, mode: 'exit' }, timed: [{ afterSec: 2, percent: 40 }, { afterSec: 4, percent: 30 }, { afterSec: 6, percent: 100 }], stopLoss: [], deadCoin: { enabled: false } },
+    });
+  });
   it('there is no sign-up or password login any more', async () => {
     const c = new Client();
     expect((await c.call('POST', '/api/signup', { username: 'x', password: 'password1', license: lic() })).status).toBe(401);

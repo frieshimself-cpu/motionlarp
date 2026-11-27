@@ -29,6 +29,7 @@ beforeAll(async () => {
       view: () => ({ rpc: 'mainnet.helius-rpc.com (key …90ab)', rpcSet: true, jupiterKeySet: false, feePercent: 1, feeWallet: 'W', maxSolPerBuy: 1, liveTrading: false }),
       save: async (patch) => { if ((patch as { feePercent?: number }).feePercent === 99) throw Object.assign(new Error('the fee must be between 0 and 10 %'), { name: 'OwnerSettingsError' }); saved.push(patch); return { restart: !!(patch as { rpcUrl?: string }).rpcUrl }; },
       restart: () => { restarted++; },
+      connections: async () => ({ ok: true, checks: [{ id: 'rpc', name: 'Helius RPC', ok: true, detail: 'answered' }] }),
     },
     feeBpsFor: (id) => store.userLicense(id)?.feeBps ?? 100,
   });
@@ -151,6 +152,14 @@ describe('admin area', () => {
     await new Promise((res) => setTimeout(res, 30));
     expect(restarted).toBe(1);
     expect(saved).toHaveLength(2);
+  });
+
+  it('connections: the live checks are for the owner only', async () => {
+    const stranger = new Client();
+    expect((await stranger.call('GET', '/api/admin/connections')).status).toBe(401);
+    const r = await admin.call('GET', '/api/admin/connections');
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ ok: true, checks: [{ id: 'rpc', ok: true }] });
   });
 
   it('logging out closes the admin area again', async () => {

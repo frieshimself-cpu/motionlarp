@@ -8,9 +8,18 @@ pump.fun trades around the clock: your buy size, your minimum, your exits.
   LaunchLab / Bonk, Meteora DBC, Raydium, Meteora, Orca, …) and coins paired with USDC, USD1 or anything else
   through Jupiter. You always pay and receive SOL. A wallet paying with USDC or another coin counts as a buy too,
   valued in SOL for your minimum.
-- **Four sell options, mixed however you like.** Every % is a share of what you *still hold*.
-  - **Sell when they sell**: the same share of your bag they sold of theirs, or everything.
-  - **Timed sells**: e.g. 25 % after 3 s → 50 % after 6 s → 100 % after 9 s.
+- **Four sell options, mixed however you like.**
+  - **Sell when they sell**: the same share of your bag they sold of theirs; or everything on any sell of theirs;
+    or everything only when they sell their whole bag in one go (their partial sells are then ignored).
+  - **Timed sells**: e.g. 25 % after 3 s → 50 % after 6 s → 100 % after 9 s, each a share of what you still hold.
+    Or "% of the original bag": every step sells a share of the coins your buy received, on its own clock from the
+    moment your buy is confirmed; a failed sell is retried at once without pushing the later steps back, and the
+    last step always sells whatever is left in the wallet. Every sell is logged with its time after the buy, the
+    tokens sold and the SOL received.
+- **Presets.** One click fills a whole copy. "Scharo": copies `wtb3G6oV…8ksih` with 0.001 SOL priority fee, 0.005
+  SOL tip, 100 % slippage; sells 40 % of the bag at +2 s, 30 % at +4 s, everything left at +6 s; sells everything
+  at once if that wallet sells its whole bag first; no stop loss, no dead coin. The user only sets the buy amount.
+  Presets live in `src/engine/settings.ts` (`PRESETS`).
   - **Stop loss levels**: e.g. −30 % sell half, −60 % sell the rest. Each fires once.
   - **Dead coin**: no trades for N seconds → sell everything.
 - **Sell now** button on every open position.
@@ -75,9 +84,14 @@ Everything else is done in the browser.
 
 Log in with the admin password. Only you have it; a user account is never an admin.
 
-- **Settings.** Paste your Helius RPC link (stored encrypted, shown again only as its host and last 4
-  characters), set the platform fee and the wallet it is paid to, the most a single buy may spend, an optional
-  Jupiter API key, and the **Live trading** switch. Changing the RPC link restarts the site by itself.
+- **Connections** (its own tab). The Helius RPC link and the Jupiter API key are saved here once and used for
+  every user; they are stored encrypted in the database, so they survive updates and restarts, and are shown again
+  only as "saved" (the link as its host and last 4 characters). Each is tested with a real request before it is
+  saved (a wrong one is refused and the old one stays), and the page re-tests all four pieces live: the RPC, the
+  Helius transaction stream, the Helius Sender region, and a real Jupiter quote with the key. A red row also
+  shows as a banner on the Admin tab.
+- **Settings.** The platform fee and the wallet it is paid to, the most a single buy may spend, and the
+  **Live trading** switch.
 - **License keys.** One key = one account. Create a key for each friend (and one for yourself), copy it when it
   is shown (once), send it to them; pasting it on the site is all they need. "New key" replaces a lost one. A key can carry its own fee (0 % for you, say).
   Revoke a key and its user is locked out and gets no new copies; open positions still sell by their rules.
@@ -153,6 +167,7 @@ src/venues/, src/tx/   pump.fun + PumpSwap transaction building (ported from Vel
 src/store.ts           SQLite: accounts, encrypted wallets, copies, positions, fills, feed
 src/http/app.ts        the JSON API (users and admin) and the static site
 src/owner-settings.ts  what the owner saves on the admin page (encrypted, applied over the environment)
+src/connections.ts     the Connections page's live checks (RPC, stream, Sender, Jupiter)
 src/licenses.ts        license keys
 src/venues/jupiter.ts  Jupiter route for every coin outside pump.fun / PumpSwap
 deploy/                install.sh (one-command install), update.sh (automatic updates)

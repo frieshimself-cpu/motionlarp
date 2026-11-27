@@ -67,6 +67,16 @@ describe('owner settings', () => {
     expect(err.name).toBe('OwnerSettingsError');
   });
 
+  it('a Jupiter key is tried with a real request before it is saved: a refused key is not stored', async () => {
+    const strict = { ...checks, testJupiter: async (key: string) => { if (key !== 'good-key') throw new Error('jupiter: HTTP 401'); } };
+    const c = cfg();
+    await expect(saveOwnerSettings(store, c, { jupiterApiKey: 'typo-key' }, strict)).rejects.toThrow(/Jupiter did not accept/);
+    expect(store.settings().jupiter_api_key).toBeUndefined();
+    const r = await saveOwnerSettings(store, c, { jupiterApiKey: 'good-key' }, strict);
+    expect(r.restart).toBe(true);
+    expect(store.settings().jupiter_api_key).toBeTruthy();
+  });
+
   it('going live needs an RPC', async () => {
     await expect(saveOwnerSettings(store, cfg(), { liveTrading: true }, checks)).rejects.toThrow(/Helius/i);
   });

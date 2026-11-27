@@ -10,6 +10,9 @@ import { createApp } from './http/app.js';
 import { log, safeErrorMessage } from './log.js';
 import { Store } from './store.js';
 import { parseFeeConfig } from './fee.js';
+import { checkConnections } from './connections.js';
+import { Jupiter } from './venues/jupiter.js';
+import { WSOL_MINT } from './watch/parse.js';
 import { applyStoredSettings, saveOwnerSettings, settingsView, type OwnerSettingsPatch } from './owner-settings.js';
 import { rpc } from './chain/rpc.js';
 import { chooseSender, GLOBAL_SENDER, pingRegion } from './tx/sender-region.js';
@@ -74,6 +77,19 @@ if (watcher && streamUrl) {
 const feedNote = () => (stream ? `Helius stream ${stream.status()}` : 'standard');
 
 const mode = () => (!config.rpcUrl ? 'offline' : canSendLive() ? 'live' : 'test');
+const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+/** One real quote (0.01 SOL into USDC): throws when Jupiter refuses the key or does not answer. */
+async function jupiterProbe(base: string, key: string): Promise<void> {
+  await new Jupiter(base, key).quote(WSOL_MINT, USDC, 10_000_000n, 50, 48, false);
+}
+async function pingGlobalSender(): Promise<number> {
+  const t0 = performance.now();
+  const res = await fetch('https://sender.helius-rpc.com/ping', { signal: AbortSignal.timeout(3_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  await res.text();
+  return performance.now() - t0;
+}
+let senderRegion: string | null = null;
 const app = createApp({
   store, engine, executor, masterKey: config.masterKey, secureCookies: config.secureCookies,
   adminPassword: config.adminPassword,
@@ -83,6 +99,16 @@ const app = createApp({
     save: (patch) => saveOwnerSettings(store, config, patch as OwnerSettingsPatch, {
       testRpc: async (url) => { await rpc<number>('getSlot', [], url); },
       balance: (address) => executor.solBalance(address),
+      testJupiter: (key) => jupiterProbe('https://api.jup.ag', key),
+    }),
+    // A real request to each service, on demand (the Connections page).
+    connections: () => checkConnections({
+      rpcSet: !!config.rpcUrl,
+      jupiterKeySet: !!config.jupiterApiKey,
+      rpc: () => rpc<number>('getSlot', [{ commitment: 'processed' }]),
+      stream: () => (stream ? { ok: /^(live|connected)/.test(stream.status()), note: stream.status() } : null),
+      sender: async () => (config.senderUrl === 'off' ? null : { region: senderRegion ?? 'global', ms: senderRegion ? await pingRegion(senderRegion) : await pingGlobalSender() }),
+      jupiter: () => jupiterProbe(config.jupiterUrl, config.jupiterApiKey),
     }),
     // Docker restarts the container (restart: unless-stopped); in-flight trades finish first.
     restart: () => void shutdown('settings changed'),
@@ -130,6 +156,7 @@ if (config.rpcUrl && config.senderUrl === GLOBAL_SENDER) {
   const nearest = await chooseSender().catch(() => null);
   if (nearest) {
     config.senderUrl = nearest.url;
+    senderRegion = nearest.region;
     senderNote = `${nearest.region} (${nearest.ms} ms)`;
     const warm = setInterval(() => void pingRegion(nearest.region).catch(() => undefined), 20_000);
     warm.unref();

@@ -88,7 +88,7 @@ function renderDash() {
     <div class="stack">
       ${renderWallet()}
       <div class="card">
-        <div class="card-head"><h2>Copies</h2><button class="btn small primary" id="new-copy">New copy</button></div>
+        <div class="card-head"><h2>Copies</h2><div style="display:flex;gap:8px">${(config.presets ?? []).map((p) => `<button class="btn small" data-preset-open="${esc(p.id)}" title="One click: the wallet, fees and sell rules filled in">${esc(p.name)} preset</button>`).join('')}<button class="btn small primary" id="new-copy">New copy</button></div></div>
         <div class="card-body flush">${s.copies.length ? s.copies.map(renderCopy).join('') : '<div class="empty"><b>No copies yet</b>Paste a wallet address, set your buy size, fees and sell rules.</div>'}</div>
       </div>
       <div class="card">
@@ -140,8 +140,12 @@ const feeText = (c) => {
 
 function sellTags(sell) {
   const t = [];
-  if (sell.mirror.enabled) t.push(`<span class="tag">Sell when they sell${sell.mirror.mode === 'all' ? ' · all' : ''}</span>`);
-  if (sell.timed.length) t.push(`<span class="tag">${sell.timed.map((x) => `${x.percent}% @ ${x.afterSec}s`).join(' → ')}</span>`);
+  if (sell.mirror.enabled) t.push(`<span class="tag">${sell.mirror.mode === 'exit' ? 'Sell all when they sell all' : `Sell when they sell${sell.mirror.mode === 'all' ? ' · all' : ''}`}</span>`);
+  if (sell.timed.length) {
+    const bag = sell.timedOf === 'bag';
+    const last = sell.timed.length - 1;
+    t.push(`<span class="tag">${sell.timed.map((x, i) => `${bag && i === last ? 'rest' : `${x.percent}%`} @ ${x.afterSec}s`).join(' → ')}${bag ? ' · of the bag' : ''}</span>`);
+  }
   if (sell.stopLoss.length) t.push(`<span class="tag">Stop ${sell.stopLoss.map((l) => `−${l.lossPct}% → ${l.percent}%`).join(', ')}</span>`);
   if (sell.deadCoin.enabled) t.push(`<span class="tag">Dead coin ${sell.deadCoin.idleSec}s</span>`);
   return t.length ? t.join('') : '<span class="tag off">No automatic sells</span>';
@@ -188,6 +192,12 @@ function renderEvent(e) {
   return `<li class="${esc(e.kind)}"><span class="ic">${ICON[e.kind] || '·'}</span><div><div class="msg">${esc(e.message)}${link}</div><div class="when">${ago(e.createdAt)}</div></div></li>`;
 }
 
+/** "+2.1s " in front of a sell that came within ten minutes of the buy. */
+function afterBuy(p, f) {
+  const ms = f.at - p.openedAt;
+  return ms >= 0 && ms < 600_000 ? `+${(ms / 1000).toFixed(1)}s ` : '';
+}
+
 function renderHistory() {
   if (!history) return '<div class="card"><div class="empty">Loading…</div></div>';
   const h = history;
@@ -212,7 +222,7 @@ function renderHistory() {
       <tbody>${h.positions.map((p) => `<tr>
         <td><a class="mono" href="${coinLink(p.mint)}" target="_blank" rel="noopener">${esc(short(p.mint))}</a> ${p.mode === 'live' ? '' : '<span class="tag off">test</span>'}</td>
         <td>${esc(p.copyName)}</td>
-        <td>${p.fills.filter((f) => f.side === 'sell').map((f) => `<span class="tag">${esc(f.reason.replace('_', ' '))} ${fmtSol(f.sol)}${f.signature ? ` <a href="${solscanTx(f.signature)}" target="_blank" rel="noopener">↗</a>` : ''}</span>`).join('')}</td>
+        <td>${p.fills.filter((f) => f.side === 'sell').map((f) => `<span class="tag">${afterBuy(p, f)}${esc(f.reason.replace('_', ' '))} ${fmtSol(f.sol)}${f.signature ? ` <a href="${solscanTx(f.signature)}" target="_blank" rel="noopener">↗</a>` : ''}</span>`).join('')}</td>
         <td class="num">${fmtSol(p.costSol)}</td><td class="num">${fmtSol(p.proceedsSol)}</td>
         <td class="num ${cls(p.pnlSol)}">${signed(p.pnlSol)}<div style="font-size:11.5px">${pct(p.pnlPct)}</div></td>
         <td class="dim">${p.closedAt ? ago(p.closedAt) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed positions yet</b>They show up here with every sell and the profit.</div>'}</div>
@@ -221,6 +231,7 @@ function renderHistory() {
 
 function bindDash() {
   $('#new-copy')?.addEventListener('click', () => openEditor());
+  $$('[data-preset-open]', app).forEach((b) => b.addEventListener('click', () => openEditor(undefined, config.presets.find((p) => p.id === b.dataset.presetOpen))));
   $$('[data-edit]', app).forEach((b) => b.addEventListener('click', () => openEditor(state.copies.find((c) => c.id === Number(b.dataset.edit)))));
   $$('[data-toggle]', app).forEach((el) => el.addEventListener('change', async () => {
     const c = state.copies.find((x) => x.id === Number(el.dataset.toggle));
@@ -256,11 +267,11 @@ function bindDash() {
 }
 
 // ── copy editor ──────────────────────────────────────────────────────────
-function stageRow(kind, a, b) {
+function stageRow(kind, a, b, of = "of what's left") {
   const first = kind === 'timed'
-    ? `<span>After</span><div class="unit"><input type="number" min="0" step="1" value="${esc(a)}" data-a aria-label="seconds"><span>sec</span></div>`
+    ? `<span>After</span><div class="unit"><input type="number" min="0" step="any" value="${esc(a)}" data-a aria-label="seconds"><span>sec</span></div>`
     : `<span>At −</span><div class="unit"><input type="number" min="1" max="99" step="any" value="${esc(a)}" data-a aria-label="loss percent"><span>%</span></div>`;
-  return `<div class="stage" data-row="${kind}">${first}<span>sell</span><div class="unit"><input type="number" min="0.01" max="100" step="any" value="${esc(b)}" data-b aria-label="percent to sell"><span>%</span></div><span class="rest dim">of what's left</span><button type="button" class="btn small ghost" data-remove aria-label="Remove">✕</button></div>`;
+  return `<div class="stage" data-row="${kind}">${first}<span>sell</span><div class="unit"><input type="number" min="0.01" max="100" step="any" value="${esc(b)}" data-b aria-label="percent to sell"><span>%</span></div><span class="rest dim">${of}</span><button type="button" class="btn small ghost" data-remove aria-label="Remove">✕</button></div>`;
 }
 
 function rule(id, title, desc, on, body) {
@@ -270,8 +281,14 @@ function rule(id, title, desc, on, body) {
     <div class="body">${body}</div></div>`;
 }
 
-function openEditor(copy) {
-  const d = copy || { ...config.defaults, sell: structuredClone(config.defaults.sell) };
+const OF = { left: "of what's left", bag: 'of the original bag' };
+
+function openEditor(copy, preset) {
+  // A preset fills everything except the buy amount, which stays yours to choose.
+  const d = copy || { ...config.defaults, ...(preset ? structuredClone(preset.settings) : {}), sell: structuredClone((preset?.settings ?? config.defaults).sell) };
+  const timedOf = d.sell.timedOf === 'bag' ? 'bag' : 'left';
+  const mirrorMode = ['all', 'exit'].includes(d.sell.mirror.mode) ? d.sell.mirror.mode : 'same';
+  const presets = config.presets ?? [];
   const live = state.server.live;
   const sp = d.sellPriorityFeeSol ?? d.priorityFeeSol;
   const st = d.sellTipSol ?? d.tipSol ?? 0;
@@ -279,12 +296,17 @@ function openEditor(copy) {
     <form id="copy-form" novalidate>
     <div class="modal-head"><h3>${copy ? `Edit ${esc(copy.name)}` : 'New copy'}</h3><button type="button" class="btn small ghost" id="cancel-x" aria-label="Close">✕</button></div>
     <div class="modal-body">
+      ${!copy && presets.length ? `<div class="group preset-bar">
+        <div class="title">One-click setup</div>
+        <div class="presets">${presets.map((p) => `<button type="button" class="btn ${preset?.id === p.id ? 'primary' : ''}" data-use-preset="${esc(p.id)}">${esc(p.name)}</button>`).join('')}
+          <span class="dim" style="font-size:12.5px">${preset ? `<b>${esc(preset.name)}</b> is filled in below. Set your buy amount and press Start copying.` : 'Fills in the wallet, the fees and the sell rules for you.'}</span></div>
+      </div>` : ''}
       <div class="group">
         <div class="title">Who and how much</div>
         <div class="row2">
           <div class="field"><label for="f-leader">${copy ? 'Wallet to copy' : 'Wallets to copy'}</label>${copy
             ? `<input id="f-leader" type="text" value="${esc(d.leader)}" placeholder="Solana wallet address" autocomplete="off" spellcheck="false" required>`
-            : '<textarea id="f-leader" rows="2" style="min-height:42px" placeholder="One wallet address — or several, one per line" autocomplete="off" spellcheck="false" required></textarea><div class="hint">Several addresses make one copy each, with these same settings.</div>'}</div>
+            : `<textarea id="f-leader" rows="2" style="min-height:42px" placeholder="One wallet address — or several, one per line" autocomplete="off" spellcheck="false" required>${esc(preset ? d.leader : '')}</textarea><div class="hint">Several addresses make one copy each, with these same settings.</div>`}</div>
           <div class="field"><label for="f-name">Nickname</label><input id="f-name" type="text" value="${esc(d.name)}" maxlength="40" placeholder="Optional"></div>
         </div>
         <div class="row2">
@@ -308,12 +330,14 @@ function openEditor(copy) {
       </div>
 
       <div class="group">
-        <div class="title">Sell rules <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">every % is of what you still hold</span></div>
+        <div class="title">Sell rules</div>
         ${rule('mirror', 'Sell when they sell', 'When the wallet sells, you sell.', d.sell.mirror.enabled,
-          `<div class="seg" id="f-mirror-mode"><button type="button" data-v="same" class="${d.sell.mirror.mode !== 'all' ? 'on' : ''}">Same % as them</button><button type="button" data-v="all" class="${d.sell.mirror.mode === 'all' ? 'on' : ''}">Sell everything</button></div>
-           <div class="hint">Same %: they sell 40% of their bag, you sell 40% of yours.</div>`)}
-        ${rule('timed', 'Timed sells', 'Sell parts of your bag after set times.', d.sell.timed.length > 0,
-          `<div id="timed-rows">${(d.sell.timed.length ? d.sell.timed : [{ afterSec: 3, percent: 25 }, { afterSec: 6, percent: 50 }, { afterSec: 9, percent: 100 }]).map((t) => stageRow('timed', t.afterSec, t.percent)).join('')}</div>
+          `<div class="seg" id="f-mirror-mode"><button type="button" data-v="same" class="${mirrorMode === 'same' ? 'on' : ''}">Same % as them</button><button type="button" data-v="all" class="${mirrorMode === 'all' ? 'on' : ''}">Sell everything</button><button type="button" data-v="exit" class="${mirrorMode === 'exit' ? 'on' : ''}">Only their full exit</button></div>
+           <div class="hint" id="mirror-hint"></div>`)}
+        ${rule('timed', 'Timed sells', 'Sell parts of your bag at set times after your buy lands.', d.sell.timed.length > 0,
+          `<div class="seg" id="f-timed-of" style="margin-bottom:10px"><button type="button" data-v="left" class="${timedOf === 'left' ? 'on' : ''}">% of what's left</button><button type="button" data-v="bag" class="${timedOf === 'bag' ? 'on' : ''}">% of the original bag</button></div>
+           <div class="hint" id="timed-hint" style="margin:0 0 10px"></div>
+           <div id="timed-rows">${(d.sell.timed.length ? d.sell.timed : [{ afterSec: 3, percent: 25 }, { afterSec: 6, percent: 50 }, { afterSec: 9, percent: 100 }]).map((t) => stageRow('timed', t.afterSec, t.percent, OF[timedOf])).join('')}</div>
            <div class="presets"><button type="button" class="btn small" data-add="timed">Add step</button><span class="dim" style="font-size:12px">Presets</span>
              <button type="button" class="btn small ghost" data-preset="25,50,100@3">25/50/100% every 3s</button>
              <button type="button" class="btn small ghost" data-preset="50,100@10">50/100% every 10s</button>
@@ -339,16 +363,36 @@ function openEditor(copy) {
   const form = $('#copy-form');
   const seg = (el) => $$('button', el).forEach((b) => b.addEventListener('click', () => $$('button', el).forEach((x) => x.classList.toggle('on', x === b))));
   seg($('#f-mirror-mode'));
+  seg($('#f-timed-of'));
+  const MIRROR_HINT = {
+    same: 'They sell 40% of their bag, you sell 40% of yours.',
+    all: 'Any sell of theirs, even a small one, sells your whole bag.',
+    exit: 'They sell their whole bag in one go: you sell everything. They only take a part: nothing happens.',
+  };
+  const TIMED_HINT = {
+    left: 'Each step sells a share of what you still hold at that moment.',
+    bag: 'Each step sells a share of the coins your buy received, on its own clock. The last step always sells everything that is left.',
+  };
+  const hints = () => {
+    $('#mirror-hint').textContent = MIRROR_HINT[$('#f-mirror-mode .on').dataset.v];
+    const of = $('#f-timed-of .on').dataset.v;
+    $('#timed-hint').textContent = TIMED_HINT[of];
+    $$('#timed-rows .rest', form).forEach((el) => { el.textContent = OF[of]; });
+  };
+  hints();
+  $('#f-mirror-mode').addEventListener('click', hints);
+  $('#f-timed-of').addEventListener('click', hints);
+  $$('[data-use-preset]', form).forEach((b) => b.addEventListener('click', () => openEditor(undefined, presets.find((p) => p.id === b.dataset.usePreset))));
   $$('[data-rule] [data-on]', form).forEach((cb) => cb.addEventListener('change', () => cb.closest('.rule').classList.toggle('off', !cb.checked)));
   form.addEventListener('click', (e) => {
     const t = e.target.closest('button');
     if (!t) return;
     if (t.hasAttribute('data-remove')) t.closest('.stage').remove();
-    if (t.dataset.add === 'timed') $('#timed-rows').insertAdjacentHTML('beforeend', stageRow('timed', '', 100));
+    if (t.dataset.add === 'timed') $('#timed-rows').insertAdjacentHTML('beforeend', stageRow('timed', '', 100, OF[$('#f-timed-of .on').dataset.v]));
     if (t.dataset.add === 'stop') $('#stop-rows').insertAdjacentHTML('beforeend', stageRow('stop', '', 100));
     if (t.dataset.preset) {
       const [parts, every] = t.dataset.preset.split('@');
-      $('#timed-rows').innerHTML = parts.split(',').map((p, i) => stageRow('timed', Number(every) * (i + 1), p)).join('');
+      $('#timed-rows').innerHTML = parts.split(',').map((p, i) => stageRow('timed', Number(every) * (i + 1), p, OF[$('#f-timed-of .on').dataset.v])).join('');
     }
   });
   $('#cancel').addEventListener('click', closeModal);
@@ -378,6 +422,7 @@ function openEditor(copy) {
       sell: {
         mirror: { enabled: on('mirror'), mode: $('#f-mirror-mode .on').dataset.v },
         timed: on('timed') ? rows('[data-row="timed"]', 'afterSec', 'percent') : [],
+        timedOf: $('#f-timed-of .on').dataset.v,
         stopLoss: on('stop') ? rows('[data-row="stop"]', 'lossPct', 'percent') : [],
         deadCoin: { enabled: on('dead'), idleSec: Number($('#f-idle').value) },
       },
@@ -403,7 +448,7 @@ function openEditor(copy) {
       if (done) loadState();
     }
   });
-  setTimeout(() => (copy ? $('#f-buy') : $('#f-leader')).focus(), 30);
+  setTimeout(() => (copy || preset ? $('#f-buy') : $('#f-leader')).focus(), 30);
 }
 
 // ── data loop ────────────────────────────────────────────────────────────
