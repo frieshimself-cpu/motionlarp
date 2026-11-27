@@ -1,7 +1,9 @@
 // ported from velo/src/venues/types.ts
 // A venue knows how to turn (pool, wallet, amount) into instructions for one program family.
 import type { PublicKey, TransactionInstruction } from '@solana/web3.js';
+import type { CurveHint } from '../watch/parse.js';
 
+export type { CurveHint };
 export type VenueKind = 'pumpfun_curve' | 'pumpswap';
 
 export interface ResolvedPool {
@@ -35,7 +37,8 @@ export interface Venue {
   quoteBuy(pool: ResolvedPool, lamportsIn: bigint): Promise<bigint>;
   /** Lamports out for `tokensIn`, before slippage. */
   quoteSell(pool: ResolvedPool, tokensIn: bigint): Promise<bigint>;
-  buildBuy(args: { pool: ResolvedPool; user: PublicKey; lamportsIn: bigint; slippagePct: number }): Promise<BuildResult>;
+  /** `curve`: a pump.fun curve as the copied wallet's trade left it (from pump.fun's event): no read is needed then. */
+  buildBuy(args: { pool: ResolvedPool; user: PublicKey; lamportsIn: bigint; slippagePct: number; curve?: CurveHint }): Promise<BuildResult>;
   buildSell(args: { pool: ResolvedPool; user: PublicKey; tokensIn: bigint; slippagePct: number }): Promise<BuildResult>;
 }
 

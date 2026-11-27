@@ -100,6 +100,10 @@ export class Engine {
   /** Latest slot at which each leader sold each coin: a buy that arrives after its own later sell is not copied. */
   private readonly lastSellSlot = new Map<string, number>();
   private readonly solCache = new Map<string, { lamports: bigint; at: number }>();
+  /** The balance read under way per wallet (one at a time; a trade of ours that lands starts a newer one). */
+  private readonly balanceReads = new Map<string, Promise<bigint>>();
+  /** SOL each wallet's buys under way have counted on (released once the wallet has been read after them). */
+  private readonly spending = new Map<string, bigint>();
   /** Their sells that arrived while our buy's outcome was unknown: run once the buy is settled. */
   private readonly pendingMirror = new Map<number, SellOrder[]>();
   /** Full exits that went out while another of our sells was on its way: once nothing is out any more, whatever is
@@ -149,13 +153,63 @@ export class Engine {
     void Promise.all(jobs);
   }
 
-  /** SOL balance, cached for 15 s (a fresh RPC round trip before every buy costs time). */
+  /** SOL balance from memory when it is under a minute old (keepBalancesFresh() renews it every few seconds, and each
+   *  of our trades renews it as it lands), so a buy never waits for a read; read now otherwise. */
   private async solBalance(owner: string): Promise<bigint> {
     const hit = this.solCache.get(owner);
-    if (hit && this.now() - hit.at < 15_000) return hit.lamports;
-    const lamports = await this.deps.executor.solBalance(owner);
-    this.solCache.set(owner, { lamports, at: this.now() });
-    return lamports;
+    if (hit && this.now() - hit.at < 60_000) return hit.lamports;
+    return this.readBalance(owner);
+  }
+
+  /** Reads the wallet's SOL and keeps it. `fresh`: a new read even while one is out (that one may predate a trade). */
+  private readBalance(owner: string, fresh = false): Promise<bigint> {
+    const out = this.balanceReads.get(owner);
+    if (out && !fresh) return out;
+    const read: Promise<bigint> = this.deps.executor.solBalance(owner).then((lamports) => {
+      // Only the newest read is kept: an older one may have been answered before our trade landed.
+      if (this.balanceReads.get(owner) === read) this.solCache.set(owner, { lamports, at: this.now() });
+      return lamports;
+    });
+    this.balanceReads.set(owner, read);
+    void read.catch(() => undefined).finally(() => { if (this.balanceReads.get(owner) === read) this.balanceReads.delete(owner); });
+    return read;
+  }
+
+  /**
+   * One of our trades just moved this wallet's SOL: it is read again at once, in the background. Until that read is
+   * in, the balance from before stays (a buy never waits for it), and `release` (the buy's reservation) waits too.
+   */
+  private balanceChanged(owner: string, release?: () => void): void {
+    void this.readBalance(owner, true).catch(() => { this.solCache.delete(owner); }).finally(() => release?.());
+  }
+
+  /** Sets SOL aside for a buy under way, so two buys at once never count the same SOL; returns its release. */
+  private reserveSol(owner: string, lamports: bigint): () => void {
+    this.spending.set(owner, (this.spending.get(owner) ?? 0n) + lamports);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      const left = (this.spending.get(owner) ?? 0n) - lamports;
+      if (left > 0n) this.spending.set(owner, left);
+      else this.spending.delete(owner);
+    };
+  }
+
+  /**
+   * Renews the SOL balance of every wallet that may buy soon (its owner has an enabled copy), so the check in front
+   * of a buy reads memory, not the network. The server calls it every few seconds; failed reads keep the old value.
+   */
+  async keepBalancesFresh(): Promise<void> {
+    const { store } = this.deps;
+    const owners = new Set<string>();
+    for (const leader of store.watchedLeaders()) {
+      for (const copy of store.enabledCopiesForLeader(leader)) {
+        const w = this.deps.walletFor(copy.userId);
+        if (w) owners.add(w.publicKey.toBase58());
+      }
+    }
+    await Promise.all([...owners].map((owner) => this.readBalance(owner).catch(() => undefined)));
   }
 
   /** Synchronous checks and the 'opening' row happen before any await, so a sell right behind the buy finds it. */
@@ -194,6 +248,9 @@ export class Engine {
     const s = copy.settings;
     const lamports = BigInt(Math.round(s.buySol * 1e9));
     const label = `${shortMint(t.mint)} (${s.name})`;
+    const owner = wallet.publicKey.toBase58();
+    // The SOL this buy counts on, set aside until the wallet has been read again after it (whatever its outcome).
+    let release: (() => void) | null = null;
     try {
       const feeBps = this.deps.feeBpsFor?.(copy.userId) ?? 0;
       if (executor.isLive({ live: true })) {
@@ -205,19 +262,26 @@ export class Engine {
         const lam = (v: number | undefined) => BigInt(Math.round(Math.max(0, v ?? 0) * 1e9));
         const costs = lam(s.priorityFeeSol) + lam(s.tipSol) + lam(s.sellPriorityFeeSol ?? s.priorityFeeSol) + lam(s.sellTipSol ?? s.tipSol) + TOKEN_ACCOUNTS_RENT;
         const need = lamports + platformFee + (costs > reserve ? costs : reserve);
-        // The coin is looked up while the balance is read (one round trip less in front of the buy).
-        const [have] = await Promise.all([this.solBalance(wallet.publicKey.toBase58()), executor.warm?.(t.mint).catch(() => undefined)]);
-        if (have < need) {
+        // The balance is kept fresh in the background (no read in front of the buy). The coin is looked up meanwhile,
+        // unless pump.fun's own event of their trade already says everything the buy needs.
+        const [have] = await Promise.all([this.solBalance(owner), t.curve ? undefined : executor.warm?.(t.mint).catch(() => undefined)]);
+        // Other buys of this wallet under way have counted on part of it.
+        const busy = this.spending.get(owner) ?? 0n;
+        if (have - busy < need) {
           store.updatePosition(id, { status: 'failed', closedAt: this.now() });
-          store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: wallet has ${fmtSol(have)}, needs ${fmtSol(need)} (buy${platformFee > 0n ? ' + platform fee' : ''} + ${costs > reserve ? 'the fees to get in and out again' : 'fee reserve'})`, mint: t.mint, signature: t.signature });
+          store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: wallet has ${fmtSol(have)}${busy > 0n ? ` (${fmtSol(busy)} of it going into other buys right now)` : ''}, needs ${fmtSol(need)} (buy${platformFee > 0n ? ' + platform fee' : ''} + ${costs > reserve ? 'the fees to get in and out again' : 'fee reserve'})`, mint: t.mint, signature: t.signature });
           return;
         }
+        release = this.reserveSol(owner, need);
       }
       // The buy's signature is written down the moment it is signed: if the outcome is lost (a crash, no answer from
       // the RPC), restore() reads that very transaction instead of guessing from the wallet.
       // (Signed means sent for real: the row says live from here on, even if Live was switched on while it was built.)
-      const onSigned = (sig: string) => store.updatePosition(id, { buySig: sig, mode: 'live' });
-      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: true, feeBps, onSigned });
+      let signedAt = 0;
+      const onSigned = (sig: string) => { signedAt = Date.now(); store.updatePosition(id, { buySig: sig, mode: 'live' }); };
+      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: true, feeBps, onSigned, ...(t.curve ? { curve: t.curve } : {}), ...(t.heardAt ? { heardAt: t.heardAt } : {}) });
+      // How long after their trade was heard ours went out (signed and handed to the senders).
+      const copyMs = signedAt && t.heardAt ? signedAt - t.heardAt : null;
       if (!fill.ok && fill.uncertain) {
         // It went out and nobody could tell us what became of it. Not failed, not bought: the position stays
         // "opening" (so the coin is not bought twice) and restore() settles it from the wallet within a minute.
@@ -232,7 +296,6 @@ export class Engine {
       }
       // Timed sells count from the moment OUR buy was confirmed, not from when the copied wallet bought.
       const now = fill.confirmedAt ?? this.now();
-      this.solCache.delete(wallet.publicKey.toBase58());
       // The position is live only if the buy really went on-chain (a copy flipped to Live on a test server is paper).
       store.updatePosition(id, { mode: fill.simulated ? 'paper' : 'live', status: 'open', tokensBought: fill.tokens, tokensHeld: fill.tokens, costLamports: fill.lamports, openedAt: now, lastChangeAt: now, refValueLamports: fill.lamports, buySig: fill.signature });
       const fillId = store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
@@ -250,12 +313,16 @@ export class Engine {
       }).catch(() => undefined);
       store.addEvent({
         userId: copy.userId, copyId: copy.id, kind: 'buy',
-        message: `Bought ${fmtSol(fill.lamports)} of ${label} — they bought ${fmtSol(t.solLamports)}${fill.simulated ? ' (test)' : ''}`,
+        message: `Bought ${fmtSol(fill.lamports)} of ${label} — they bought ${fmtSol(t.solLamports)}${copyMs !== null && !fill.simulated ? ` · sent ${copyMs} ms after their trade was seen` : ''}${fill.simulated ? ' (test)' : ''}`,
         mint: t.mint, signature: fill.simulated ? null : fill.signature,
       });
     } catch (err) {
       store.updatePosition(id, { status: 'failed', closedAt: this.now() });
       store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label} failed: ${friendlyError(safeErrorMessage(err))}`, mint: t.mint });
+    } finally {
+      // Whatever became of it (bought, failed after paying its fee, outcome unknown): the wallet is read again now,
+      // in the background; the next buy uses the balance from before less this one's share until that read is in.
+      if (release) this.balanceChanged(owner, release);
     }
   }
 
@@ -441,7 +508,7 @@ export class Engine {
         }
         this.followUpExit(p.id);
         if (fill.ok) {
-          this.solCache.delete(owner); // the wallet's SOL just changed
+          if (!fill.simulated) this.balanceChanged(owner); // the wallet's SOL just changed: read again, in the background
           const now = order.everything ? store.position(p.id) : null;
           if (!now || now.status !== 'open' || now.tokensHeld <= 0n) return;
           await pause(partial ? this.deps.slowRetryMs ?? SLOW_RETRY_MS : pauses[0] ?? 0);
@@ -699,7 +766,7 @@ export class Engine {
         this.followUpExit(p.id);
         return failed;
       }
-      this.solCache.delete(owner); // the wallet's SOL just changed
+      if (!fill.simulated) this.balanceChanged(owner); // the wallet's SOL just changed: read again, in the background
       const booked = fill.lamports;
       void fill.refine?.then((exact) => {
         if (!exact) return;

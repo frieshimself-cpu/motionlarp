@@ -239,7 +239,9 @@ export class Watcher {
     if (this.seen.has(key)) return;
     const truncated = logs?.some((l) => /log truncated/i.test(l));
     const fromSocket = logs !== undefined;
-    const plainBuy = logs && slot !== undefined && !truncated ? fastBuysFromLogs(logs, signature, leader, slot) : null;
+    // The moment the site heard of it: the copy's delay is measured from here.
+    this.noteHeard(signature);
+    const plainBuy = logs && slot !== undefined && !truncated ? fastBuysFromLogs(logs, signature, leader, slot, this.heardAt.get(signature)) : null;
     // The Helius stream brings this transaction in full (no fetch) a moment from now: give it that moment. If it has
     // not delivered by then (a stream that says it is healthy but has quietly stopped), fetch it as usual.
     if (fromSocket && !plainBuy && !afterGrace && this.deps.streamHealthy?.()) {
@@ -265,6 +267,15 @@ export class Watcher {
     void job.finally(() => this.pending.delete(job));
   }
 
+  /** When each transaction was first heard of (signature → time), the newest SEEN_CAP of them. */
+  private readonly heardAt = new Map<string, number>();
+
+  private noteHeard(signature: string): void {
+    if (this.heardAt.has(signature)) return;
+    this.heardAt.set(signature, Date.now());
+    if (this.heardAt.size > SEEN_CAP) this.heardAt.delete(this.heardAt.keys().next().value!);
+  }
+
   private markSeen(key: string): void {
     this.seen.add(key);
     if (this.seen.size > SEEN_CAP) {
@@ -281,6 +292,7 @@ export class Watcher {
     if (this.stopped) return;
     const signature = tx.transaction.signatures[0];
     if (!signature || tx.meta?.err) return;
+    this.noteHeard(signature);
     const keys = new Set(tx.transaction.message.accountKeys.map((k) => (typeof k === 'string' ? k : k.pubkey)));
     for (const leader of this.cursors.keys()) {
       if (!keys.has(leader)) continue;
@@ -333,6 +345,7 @@ export class Watcher {
         return;
       }
       for (const t of parsed ?? parseLeaderTrades(tx, leader)) {
+        t.heardAt ??= this.heardAt.get(signature) ?? Date.now();
         if (t.counter && t.side === 'buy' && this.deps.valueInSol) {
           // Paid in a stablecoin or another coin (perhaps with a little SOL too): its SOL value is what "bought at
           // least X SOL" means. (A sell paid out in another coin needs no price: it is mirrored by its share.)

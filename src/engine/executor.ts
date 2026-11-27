@@ -25,8 +25,11 @@ import { programError } from '../tx/errors.js';
 import { tipAccount, tipInstruction, tipLamports, tipRoute } from '../tx/tip.js';
 import { appendInstruction, Jupiter, MAX_TRANSACTION_BYTES, ROUTE_SMALL } from '../venues/jupiter.js';
 import { PfDispatcher } from '../venues/pf.js';
-import { VenueError, type ResolvedPool } from '../venues/types.js';
+import { VenueError, type CurveHint, type ResolvedPool } from '../venues/types.js';
+import { pumpSdk } from '../venues/sdk.js';
 import { walletChange, WSOL_MINT } from '../watch/parse.js';
+
+const bondingCurvePdaOf = (mint: PublicKey) => pumpSdk.bondingCurvePda(mint);
 
 export type FillResult =
   /** lamports: buy = SOL spent, every fee included; sell = SOL received net of every fee (negative when a small sell did not cover its own costs). */
@@ -62,6 +65,10 @@ export interface TradeRequest {
   /** A sell of everything: when it empties the coin's token account, that account is closed in the same
    *  transaction and its rent (about 0.002 SOL) comes back. Never on a retry. */
   closeIfEmpty?: boolean;
+  /** A buy copied from pump.fun's event of the copied wallet's trade: the curve as it left it (no read needed). */
+  curve?: CurveHint;
+  /** When the copied wallet's trade was heard (for the copy's delay in the logs). */
+  heardAt?: number;
 }
 
 export interface Executor {
@@ -315,6 +322,17 @@ export class ChainExecutor implements Executor {
   // ── buy ────────────────────────────────────────────────────────────────
   async buy(req: TradeRequest & { lamports: bigint }): Promise<FillResult> {
     try {
+      // The copied wallet's pump.fun curve buy, read from pump.fun's own event: the coin is a live SOL curve, its
+      // curve PDA and token program are known, and the curve's state is in the event. Nothing is read from the
+      // network before our buy is signed and sent. (Anything else, or any doubt, takes the usual route.)
+      const c = req.curve;
+      const until = this.viaJupiter.get(req.mint);
+      if (c && c.tokenProgram && !c.cashback && c.realTokenReserves > 0n && !(until && until > Date.now())) {
+        const mint = new PublicKey(req.mint);
+        const pool: ResolvedPool = { kind: 'pumpfun_curve', pool: bondingCurvePdaOf(mint), mint, tokenProgram: new PublicKey(c.tokenProgram) };
+        this.tokenPrograms.set(req.mint, pool.tokenProgram);
+        return await this.nativeBuy(req, pool);
+      }
       return await this.route(req.mint, (pool) => this.nativeBuy(req, pool), () => this.jupiterBuy(req));
     } catch (err) {
       return { ok: false, error: safeErrorMessage(err) };
@@ -361,7 +379,7 @@ export class ChainExecutor implements Executor {
       if ((await this.solBalance(owner)) < req.lamports + fee + cost + this.reserve()) {
         return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens, lamports: req.lamports + fee + cost, feeLamports: fee, simulated: true, note: 'test fill from the live quote (wallet too empty to simulate)' };
       }
-      const built = await venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct });
+      const built = await venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct, ...(req.curve ? { curve: req.curve } : {}) });
       const spend = built.lamportsIn ?? req.lamports;
       const ixs = withFee(built.instructions, req.wallet.publicKey, spend, await this.feeBpsFor(spend, req.feeBps), config.feeWallet);
       const tx = await this.nativeTx(req, ixs.instructions);
@@ -369,10 +387,10 @@ export class ChainExecutor implements Executor {
       if (!sim.ok) return { ok: false, error: sim.error };
       return { ok: true, signature: sim.signature, tokens: built.lamportsIn !== undefined ? built.expectedOut : tokens, lamports: spend + ixs.fee + cost, feeLamports: ixs.fee, simulated: true, note: 'simulated on-chain, not sent (test mode)' };
     }
-    const [built, before] = await Promise.all([
-      venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct }),
-      this.tokenBalance(owner, req.mint).catch(() => null),
-    ]);
+    // The coin balance before the buy (to see the coins arrive) is read alongside, never waited for before sending:
+    // read after our buy has landed it would include our coins, and the exact count then comes from our transaction.
+    const before = this.tokenBalance(owner, req.mint).catch(() => null);
+    const built = await venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct, ...(req.curve ? { curve: req.curve } : {}) });
     // A curve with less left than the budget buys spends only the price of what is left: the fee and the cost are
     // counted on that, not on the full amount.
     const spend = built.lamportsIn ?? req.lamports;
@@ -449,7 +467,8 @@ export class ChainExecutor implements Executor {
       if (!sim.ok) return { ok: false, error: sim.error };
       return { ok: true, signature: sim.signature, tokens: BigInt(built.quote.outAmount), lamports: req.lamports + built.fee + cost, feeLamports: built.fee, simulated: true, note: 'Jupiter route simulated on-chain, not sent (test mode)' };
     }
-    const [built, before] = await Promise.all([this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy, true), this.tokenBalance(owner, req.mint).catch(() => null)]);
+    const before = this.tokenBalance(owner, req.mint).catch(() => null); // alongside, never waited for before sending
+    const built = await this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy, true);
     return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'buy', BigInt(built.quote.outAmount), req.lamports + built.fee + this.txCost(req), before, built.fee, built.tip);
   }
 
@@ -517,7 +536,7 @@ export class ChainExecutor implements Executor {
    * not be reached) does the wallet's balance decide, so a late landing is never left as orphaned coins. With
    * timed steps overlapping, another sell's balance change must not be mistaken for this one's.
    */
-  private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBefore: bigint | null, platformFee: bigint, tipCarried?: bigint): Promise<FillResult> {
+  private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBeforeRead: bigint | null | Promise<bigint | null>, platformFee: bigint, tipCarried?: bigint): Promise<FillResult> {
     // The tip the transaction really carries decides its lanes (a Jupiter route too big for it goes without).
     const tip = tipCarried ?? this.tip(req);
     const sendOpts = { exit: !!req.exit, simulateFirst: !!req.checkFirst };
@@ -525,7 +544,7 @@ export class ChainExecutor implements Executor {
     try { req.onSigned?.(mine); } catch { /* bookkeeping must not stop the trade */ }
     const t0 = Date.now();
     const sent = await sendTransaction(tx, true, tip, sendOpts);
-    log.info('trade sent', { side, mint: req.mint, wallet: req.wallet.publicKey.toBase58(), signature: mine, ok: sent.ok, tip: Number(tip) / 1e9, priorityFee: req.priorityFeeSol, retry: !!req.checkFirst, ...(sent.ok ? {} : { error: sent.error }) });
+    log.info('trade sent', { side, mint: req.mint, wallet: req.wallet.publicKey.toBase58(), signature: mine, ok: sent.ok, tip: Number(tip) / 1e9, priorityFee: req.priorityFeeSol, retry: !!req.checkFirst, ...(req.heardAt ? { msAfterHeard: t0 - req.heardAt } : {}), ...(sent.ok ? {} : { error: sent.error }) });
     if (!sent.ok) return { ok: false, error: sent.error };
     // The owner switched live trading off while this was being built: it was only simulated. Nothing happened.
     if (sent.simulated) return { ok: false, error: 'live trading was switched off before this was sent' };
@@ -576,8 +595,9 @@ export class ChainExecutor implements Executor {
     // transaction itself. Neither may hold the position for more than a moment: then the quote stands in and the
     // exact coins and SOL follow (refine).
     const deadline = Date.now() + BUY_READ_MS;
+    const balanceBefore = await within(Promise.resolve(balanceBeforeRead), BUY_READ_MS).catch(() => null);
     if (balanceBefore !== null) {
-      const after = await within(this.tokenBalance(owner, req.mint), BUY_READ_MS).catch(() => null);
+      const after = await within(this.tokenBalance(owner, req.mint), Math.max(1, deadline - Date.now())).catch(() => null);
       if (after !== null && after > balanceBefore) return { ...base, tokens: after - balanceBefore, lamports: expectedLamports, refine };
     }
     // (the transaction read started at the confirmation: it shares the same moment)

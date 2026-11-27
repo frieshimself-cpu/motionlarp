@@ -5,7 +5,7 @@ import { PublicKey } from '@solana/web3.js';
 import BN from 'bn.js';
 import { getFastConnection } from '../chain/connection.js';
 import { pumpSdk, type FeeConfig, type Global } from './sdk.js';
-import { VenueError, type BuildResult, type ResolvedPool, type Venue } from './types.js';
+import { VenueError, type BuildResult, type CurveHint, type ResolvedPool, type Venue } from './types.js';
 
 const GLOBAL_TTL_MS = 5 * 60_000;
 const { OnlinePumpSdk, PUMP_SDK, getBuySolAmountFromTokenAmount, getBuyTokenAmountFromSolAmount, getSellSolAmountFromTokenAmount, isSolLikeQuoteMint, normalizeQuoteMint } = pumpSdk;
@@ -36,6 +36,27 @@ export function sellableTokens(curve: Curve, tokensIn: bigint): bigint {
   return ((held * vT) / (vQ - held) * 99n) / 100n;
 }
 
+const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
+/** The curve's total supply: 1 billion coins (6 decimals), mayhem coins included (read on mainnet, 27 Nov 2026). */
+const SUPPLY = 1_000_000_000_000_000n;
+
+/**
+ * The buy state from pump.fun's own event of the copied wallet's trade: the curve's reserves right after it, its
+ * creator, mayhem and cashback flags. pump.fun's exact-spend buy needs only these (the accounts come from the mint,
+ * the wallet and the token program; the creator for the fee split is read by the program itself); the reserves price
+ * the minimum, which at 100 % slippage is one coin anyway.
+ */
+function stateFromHint(c: CurveHint) {
+  const bondingCurve = {
+    virtualTokenReserves: bn(c.virtualTokenReserves), virtualQuoteReserves: bn(c.virtualQuoteReserves),
+    realTokenReserves: bn(c.realTokenReserves), realQuoteReserves: bn(c.realQuoteReserves),
+    tokenTotalSupply: bn(SUPPLY), complete: c.realTokenReserves === 0n,
+    creator: new PublicKey(c.creator), isMayhemMode: c.mayhem, isCashbackCoin: c.cashback, quoteMint: WSOL,
+    creatorFeeBps: new BN(0),
+  };
+  return { bondingCurve, quoteMint: WSOL, associatedUserAccountInfo: null, bondingCurveAccountInfo: null } as unknown as Awaited<ReturnType<OnlinePumpSdk['fetchBuyState']>>;
+}
+
 export class PumpFunVenue implements Venue {
   readonly kind = 'pumpfun_curve' as const;
   private online: OnlinePumpSdk | null = null;
@@ -47,10 +68,28 @@ export class PumpFunVenue implements Venue {
     return this.online;
   }
 
-  /** `Global` and `FeeConfig` change rarely; cache them for five minutes. */
+  private refreshing: Promise<unknown> | null = null;
+
+  /**
+   * `Global` and `FeeConfig` change rarely; cached for five minutes. Once read, a trade never waits for them again:
+   * an older copy is used at once while a fresh one is read in the background.
+   */
   private async fetchGlobals(): Promise<{ global: Global; feeConfig: FeeConfig | null }> {
     // Kept only when the fee table was read: without it the SDK prices with a flat fee that is 0.24 % off.
     if (this.globals && this.globals.feeConfig !== null && Date.now() - this.globals.at < GLOBAL_TTL_MS) return this.globals;
+    if (this.globals && this.globals.feeConfig !== null) {
+      if (!this.refreshing) this.refreshing = this.readGlobals().catch(() => undefined).finally(() => { this.refreshing = null; });
+      return this.globals;
+    }
+    return this.readGlobals();
+  }
+
+  /** Reads the tables ahead of the first trade (the server calls it at start). */
+  async warmGlobals(): Promise<void> {
+    await this.fetchGlobals().catch(() => undefined);
+  }
+
+  private async readGlobals(): Promise<{ global: Global; feeConfig: FeeConfig | null }> {
     const sdk = this.sdk();
     const [global, fee] = await Promise.all([
       sdk.fetchGlobal(),
@@ -102,8 +141,9 @@ export class PumpFunVenue implements Venue {
     return big(out);
   }
 
-  async buildBuy({ pool, user, lamportsIn, slippagePct }: { pool: ResolvedPool; user: PublicKey; lamportsIn: bigint; slippagePct: number }): Promise<BuildResult> {
-    const [{ global, feeConfig }, state] = await Promise.all([this.fetchGlobals(), this.sdk().fetchBuyState(pool.mint, user, pool.tokenProgram)]);
+  async buildBuy({ pool, user, lamportsIn, slippagePct, curve }: { pool: ResolvedPool; user: PublicKey; lamportsIn: bigint; slippagePct: number; curve?: CurveHint }): Promise<BuildResult> {
+    // With the copied wallet's own trade event in hand, the curve as their buy left it is known: no read at all.
+    const [{ global, feeConfig }, state] = await Promise.all([this.fetchGlobals(), curve ? Promise.resolve(stateFromHint(curve)) : this.sdk().fetchBuyState(pool.mint, user, pool.tokenProgram)]);
     this.assertSolCurve(state.quoteMint);
     if (state.bondingCurve.complete) throw new VenueError('bonding curve is complete (migrated)', 'migrated');
     // A cashback coin (an older kind) does not take the exact-spend buy, and the older buy can take up to the amount

@@ -19,7 +19,25 @@ export const STABLE_MINTS = new Set([
 /** SOL movements below this (rent, tips, dust) do not make a transfer into a trade. */
 const SOL_DUST = 50_000n;
 
+/** A pump.fun curve right after the copied wallet's buy, read from pump.fun's own event: enough to build our buy
+ *  with no network read (the copy goes out the moment their trade is heard). */
+export interface CurveHint {
+  virtualTokenReserves: bigint;
+  virtualQuoteReserves: bigint;
+  realTokenReserves: bigint;
+  realQuoteReserves: bigint;
+  creator: string;
+  mayhem: boolean;
+  cashback: boolean;
+  /** The coin's token program, as pump.fun called it in that trade (classic SPL or Token-2022). */
+  tokenProgram?: string;
+}
+
 export interface LeaderTrade {
+  /** When the site heard of this trade (the stream's notice, or the poll): the copy's delay counts from here. */
+  heardAt?: number;
+  /** A pump.fun curve buy read from its event: the curve right after it (see CurveHint). */
+  curve?: CurveHint;
   signature: string;
   leader: string;
   mint: string;

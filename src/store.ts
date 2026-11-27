@@ -229,7 +229,10 @@ export class Store {
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+    // WAL with synchronous NORMAL: a write does not wait for the disk (the copy path writes a few rows before its buy
+    // goes out); the database cannot be corrupted, and a crash of the app loses nothing (only a power cut of the
+    // machine can lose the last moment).
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
     // Migrations for databases created by earlier versions.
     const fillCols = this.all('PRAGMA table_info(fills)').map((r) => String(r.name));

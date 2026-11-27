@@ -481,7 +481,8 @@ describe('found by the review of the engine (27 Nov 2026), continued', () => {
     const e = new Engine({ store, executor: fx, walletFor: () => wallet, now: () => clock, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01 });
     addCopy({ buySol: 0.1, sell: { mirror: { enabled: true, mode: 'all' } } });
     await e.onLeaderTrade(trade()); await e.idle();
-    fx.sol = SOL / 20n; // 0.05: too little for the next buy
+    fx.sol = SOL / 20n; // 0.05: too little for the next buy (SOL moved out of the wallet by hand)
+    await e.keepBalancesFresh(); // what the server does every 3 s
     await e.onLeaderTrade(trade({ signature: 'b2', mint: 'Mint5555555555555555555555555555555555555555' })); await e.idle();
     expect(feed()[0]).toMatch(/Skipped/);
     fx.sol = SOL; // the exit below refills the wallet

@@ -138,6 +138,18 @@ const clock = setInterval(() => {
   engine.tick().catch((err) => log.warn('tick failed', { error: safeErrorMessage(err) }));
 }, 200);
 
+// The copy path never waits for a read: pump.fun's fee tables are read now (then renewed in the background), and the
+// SOL balance of every wallet that may buy is renewed every 3 s.
+if (config.rpcUrl) {
+  void executor.pf.curve.warmGlobals();
+  let renewing = false;
+  setInterval(() => {
+    if (renewing) return;
+    renewing = true;
+    void engine.keepBalancesFresh().catch(() => undefined).finally(() => { renewing = false; });
+  }, 3_000).unref();
+}
+
 // Safety nets: settle buys interrupted by a restart, and sell coins whose followed wallet already left.
 let reconciling = false;
 const safety = setInterval(() => {
