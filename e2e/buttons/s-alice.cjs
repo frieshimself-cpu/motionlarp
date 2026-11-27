@@ -53,6 +53,26 @@ const FIT = `((screenWidth) => {
   return { dayLines: dayLines.slice(0, 4), daysOnMoreLines: dayLines.length, hidden: hidden.slice(0, 4), moneyCellsOffScreen: hidden.length };
 })`;
 
+/** History's Copy column: the words drawn on two lines ("Scharo" as "Scha" / "ro" at 641 to 857 px, third review). */
+const SPLIT = `(() => {
+  const card = [...document.querySelectorAll('.page > .stack > .card')][1];
+  const out = [];
+  for (const td of card ? card.querySelectorAll('tbody td:nth-child(2)') : []) {
+    const t = td.firstChild;
+    if (!t || t.nodeType !== 3) continue;
+    const re = /\\S+/g;
+    let m;
+    while ((m = re.exec(t.nodeValue))) {
+      const range = document.createRange();
+      range.setStart(t, m.index);
+      range.setEnd(t, m.index + m[0].length);
+      const lines = new Set([...range.getClientRects()].filter((x) => x.width > 0).map((x) => Math.round(x.top))).size;
+      if (lines > 1) out.push({ word: m[0], drawn: td.innerText.replace(/\\n/g, ' / '), cellWidth: Math.round(td.getBoundingClientRect().width) });
+    }
+  }
+  return out;
+})()`;
+
 /** One printed amount against the exact lamports: the number, its sign, and (when asked) its colour. */
 function amount(text, lamports, d, colour) {
   const exact = solNum(lamports);
@@ -127,7 +147,11 @@ async function checkDashboard(env, page, who, opts = {}) {
     // "1 open · 2 closed · +0.392 SOL" while its one open position was a test one). The other kind's figures follow
     // apart, as on the cards: "· test: 1 open · 1 closed −0.05" (a part only when there is one).
     const otherKind = E.primary === 'live' ? 'test' : 'live';
-    const m = /^(\d+) open · (\d+) closed · ([+−]?[\d.]+) SOL(?: · (test|live): (?:(\d+) open)?(?: · )?(?:(\d+) closed ([+−]?[\d.]+))?)?$/.exec(row.meta[1]) || [];
+    // Each part names its kind (third review: the second part did, the first did not, and next to the server's TEST pill
+    // the first numbers read as test ones while they were real): "live: 2 open · 2 closed · +0.744 SOL · test: …".
+    const kindWord = /^(test|live): /.exec(row.meta[1]);
+    book.eq(`${P}: copy "${s.name}": its line says first which kind its numbers are of`, kindWord && kindWord[1], E.primary);
+    const m = /^(?:test|live): (\d+) open · (\d+) closed · ([+−]?[\d.]+) SOL(?: · (test|live): (?:(\d+) open)?(?: · )?(?:(\d+) closed ([+−]?[\d.]+))?)?$/.exec(row.meta[1]) || [];
     book.eq(`${P}: copy "${s.name}": open and closed counts, both of the ${E.primary} positions`, [m[1], m[2]], [String(c.openOf[E.primary]), String(c.closedOf[E.primary])]);
     if (c.live !== 0n && c.test !== 0n) {
       book.ok(`${P}: copy "${s.name}": its profit keeps real and test apart`, amount(m[3], c[E.primary], 3, row.pnlClass), { shown: row.meta[1], realTradesOnly: solStr(c.live), testTradesOnly: solStr(c.test), bothAdded: solStr(c.live + c.test) });
@@ -227,6 +251,8 @@ async function checkHistory(env, page, who, opts = {}) {
   const fit = await page.evaluate(`${FIT}(${env.vp.viewport.width})`);
   book.ok(`${P}: each day of "Profit by day" on one line`, fit.daysOnMoreLines === 0, fit.dayLines);
   book.ok(`${P}: every day's Profit and every position's P/L on the screen without scrolling sideways`, fit.moneyCellsOffScreen === 0, fit.hidden);
+  const split = await page.evaluate(SPLIT);
+  book.ok(`${P}: no copy's name is broken inside a word`, split.length === 0, split.slice(0, 4));
 
   // ── the heading of the closed positions ──
   // It counts EVERY closed position of the kind the profit cards show (real ones once there are any, test ones until
@@ -389,6 +415,10 @@ async function alice(env) {
       const busy = await page.locator(`[data-sell="${p.id}"]`).evaluate((b) => ({ text: b.textContent, disabled: b.disabled })).catch(() => null);
       const t = await ui.toast(page, 20_000);
       const took = Date.now() - t0;
+      // Where the message is drawn (third review: on a phone it was half the screen wide, a tall narrow column).
+      const tb = await page.evaluate(() => { const r = document.querySelector('#toast').getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width), screen: document.documentElement.clientWidth }; });
+      const phone = tb.screen <= 640;
+      book.ok(`Sell now on ${what}: its message ${phone ? 'takes the screen\'s width, 16 px in from each side' : 'is centred, at most 560 px wide'}`, phone ? tb.left === 16 && tb.right === tb.screen - 16 : tb.width <= 561 && Math.abs(tb.left + tb.right - tb.screen) <= 2, tb);
       book.ok(`Sell now on ${what}: while it works the button says "Selling…" and cannot be pressed twice`, !!busy && busy.text === 'Selling…' && busy.disabled, busy);
       book.note(`Sell now on ${what}, offline: what the page says`, t && t.text);
       book.ok(`Sell now on ${what}, offline: fails with a message a person can read (no setting names, no code)`, !!t && t.bad && t.text.length > 8 && !/RPC_URL|LIVE_TRADING|undefined|null|\bat \w+ \(|Error:/.test(t.text), { toast: t, seconds: (took / 1000).toFixed(1) });
@@ -435,6 +465,57 @@ async function alice(env) {
     book.ok('Delete on a copy: its closed positions stay in History under its name', h.closed.some((r) => r.copy === 'AllOn all'), h.closed.map((r) => r.copy).slice(0, 6));
     await ui.openTab(page, 'dash');
   });
+
+  // The widths between the suite's sizes (third review): the top bar at 641 to 666 px ("Log out" off the screen),
+  // History at 641 to 760 (its table scrolled sideways, the Closed column hidden) and 641 to 857 (the copy names split
+  // inside a word), the copy editor below 340 px (numbers under their units). Once, on the desktop's page, resized.
+  if (env.vp.name === 'desktop') {
+    await env.scenario('alice: the widths between the sizes, 280 to 900 px', async () => {
+      const { LAYOUT_SRC, BOXES_SRC } = require('./lib.cjs');
+      const at = async (width) => { await page.setViewportSize({ width, height: 900 }); await sleep(150); };
+      const look = async () => {
+        const [layout, boxes] = await Promise.all([page.evaluate(LAYOUT_SRC), page.evaluate(BOXES_SRC)]);
+        return { wider: layout.pageScrollWidth > layout.viewport + 1 ? layout.pageScrollWidth : null, offScreen: layout.offenders.filter((o) => !/table-wrap/.test(o.inside || '')).slice(0, 3), boxes: boxes.problems.slice(0, 3), boxCount: boxes.count };
+      };
+      const bad = { dashboard: [], history: [], editors: [] };
+      try {
+        await ui.openTab(page, 'dash');
+        for (const w of [641, 660, 700, 760, 761, 800, 844, 900, 340, 300, 280]) {
+          await at(w);
+          const l = await look();
+          if (l.wider || l.offScreen.length || l.boxCount) bad.dashboard.push({ width: w, ...l });
+        }
+        await ui.openTab(page, 'history');
+        for (const w of [641, 660, 700, 760, 761, 800, 844, 900, 1024, 1100]) {
+          await at(w);
+          const l = await look();
+          const fit = await page.evaluate(`${FIT}(${w})`);
+          const split = await page.evaluate(SPLIT);
+          if (l.wider || l.offScreen.length || l.boxCount || fit.moneyCellsOffScreen || fit.daysOnMoreLines || split.length) bad.history.push({ width: w, ...l, moneyCellsOffScreen: fit.hidden, daysOnMoreLines: fit.dayLines, split: split.slice(0, 3) });
+        }
+        await ui.openTab(page, 'dash');
+        const copies = manifest.copies.filter((c) => c.user === 'alice' && c.key !== 'allAll');
+        for (const w of [340, 330, 300, 280]) {
+          await at(w);
+          for (const c of copies) {
+            if (!(await page.locator(`[data-edit="${c.id}"]`).count())) continue;
+            await page.locator(`[data-edit="${c.id}"]`).dispatchEvent('click');
+            await page.locator('#copy-form').waitFor();
+            await sleep(120);
+            const l = await look();
+            if (l.wider || l.offScreen.length || l.boxCount) bad.editors.push({ width: w, copy: c.settings.name, ...l });
+            await ui.closeEditor(page, 'escape');
+          }
+        }
+      } finally {
+        await page.setViewportSize(env.vp.viewport);
+        await ui.openTab(page, 'dash').catch(() => undefined);
+      }
+      book.ok('the dashboard at 280 to 900 px: nothing past the screen or out of its box (the top bar included)', bad.dashboard.length === 0, bad.dashboard.slice(0, 4));
+      book.ok('History at 641 to 1100 px: nothing past the screen or out of its box, every P/L on the screen, no copy name broken inside a word', bad.history.length === 0, bad.history.slice(0, 4));
+      book.ok('the copy editor at 280 to 340 px: nothing out of its box, no number under its unit or cut', bad.editors.length === 0, bad.editors.slice(0, 4));
+    });
+  }
 
   return S;
 }

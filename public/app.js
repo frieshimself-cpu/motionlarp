@@ -1,6 +1,6 @@
 // WalletMotion front end: no framework, no build step. State comes from /api/state every few seconds.
 import { $, $$, app, modal, esc, short, fmtSol, signed, pct, cls, solscanTx, solscanAcct, coinLink, ago, hue, api, toast, brandHtml, modePill, openModal, closeModal } from '/ui.js';
-import { plain, dayLabel, openPnl, closedHeading } from '/figures.js';
+import { plain, dayLabel, openPnl, closedHeading, copyNumbers } from '/figures.js';
 
 let config = null;
 let state = null;
@@ -95,7 +95,7 @@ function renderDash() {
     <div class="stack">
       ${renderWallet()}
       <div class="card">
-        <div class="card-head"><h2>Copies</h2><div style="display:flex;gap:8px">${(config.presets ?? []).map((p) => `<button class="btn small" data-preset-open="${esc(p.id)}" title="One click: the wallet, fees and sell rules filled in">${esc(p.name)} preset</button>`).join('')}<button class="btn small primary" id="new-copy">New copy</button></div></div>
+        <div class="card-head"><h2>Copies</h2><div class="actions">${(config.presets ?? []).map((p) => `<button class="btn small" data-preset-open="${esc(p.id)}" title="One click: the wallet, fees and sell rules filled in">${esc(p.name)} preset</button>`).join('')}<button class="btn small primary" id="new-copy">New copy</button></div></div>
         <div class="card-body flush">${s.copies.length ? s.copies.map(renderCopy).join('') : '<div class="empty"><b>No copies yet</b>Paste a wallet address, set your buy size, fees and sell rules.</div>'}</div>
       </div>
       <div class="card">
@@ -159,16 +159,6 @@ function sellTags(sell) {
   if (sell.stopLoss.length) t.push(`<span class="tag">Stop ${sell.stopLoss.map((l) => `−${plain(l.lossPct)}% → ${plain(l.percent)}%`).join(', ')}</span>`);
   if (sell.deadCoin.enabled) t.push(`<span class="tag">Dead coin ${plain(sell.deadCoin.idleSec)}s</span>`);
   return t.length ? t.join('') : '<span class="tag off">No automatic sells</span>';
-}
-
-/** A copy's numbers, all of one kind as on the profit cards (real once there are real trades); the other kind's after
- *  them, apart: "2 open · 2 closed · +0.744 SOL · test: 2 closed +0.959". */
-function copyNumbers(st) {
-  const main = `${st.open} open · ${st.closed} closed · <span class="${cls(st.pnlSol)}">${signed(st.pnlSol, 3)} SOL</span>`;
-  const o = st.other;
-  if (!o || (!o.open && !o.closed)) return main;
-  const parts = [o.open ? `${o.open} open` : '', o.closed ? `${o.closed} closed <span class="${cls(o.pnlSol)}">${signed(o.pnlSol, 3)}</span>` : ''].filter(Boolean);
-  return `${main} · ${esc(o.kind)}: ${parts.join(' · ')}`;
 }
 
 function renderCopy(c) {
@@ -371,7 +361,7 @@ function openEditor(copy, preset) {
           `<div id="stop-rows">${(d.sell.stopLoss.length ? d.sell.stopLoss : [{ lossPct: 30, percent: 100 }]).map((l) => stageRow('stop', l.lossPct, l.percent)).join('')}</div>
            <button type="button" class="btn small" data-add="stop">Add level</button>`)}
         ${rule('dead', 'Dead coin', 'Nobody is trading it any more: get out.', d.sell.deadCoin.enabled,
-          `<div class="stage" style="grid-template-columns:auto 120px auto"><span>No trades for</span><div class="unit"><input id="f-idle" type="text" inputmode="decimal" min="5" step="1" value="${box(d.sell.deadCoin.idleSec)}"><span>sec</span></div><span>→ sell everything</span></div>`)}
+          `<div class="stage idle"><span>No trades for</span><div class="unit"><input id="f-idle" type="text" inputmode="decimal" min="5" step="1" value="${box(d.sell.deadCoin.idleSec)}"><span>sec</span></div><span>→ sell everything</span></div>`)}
       </div>
 
       <div class="group" style="margin-bottom:0">

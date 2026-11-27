@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 567 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 581 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -504,6 +504,21 @@ position; each trade is put on the day it closed on the viewer's own calendar, a
 320 px phone the owner's Status tab no longer runs past the screen; Sell now that sells nothing itself says what
 happens instead of "Sold". The browser suite now runs at four sizes (1280, 390, 360 and 320 px): on the live site
 (version 49f9fd5), **586 checks passed at each size, no page errors, nothing wider than the screen**.
+
+**The site, third review** (four reviewers, each finding checked by a separate verifier; three commits after
+685995f). The owner's page no longer wipes a half-typed number in a background redraw, nor sends it ("1e" in the Fee
+box became an empty box that Save sent as a fee of 0 %, and Create key gave a key the default fee); a tap no longer
+acts on a row that a redraw moved between the finger lifting and the click, and each question names its row; the
+keyboard stays on Create key and Save settings; a word cut off while it was being composed no longer stops the redraws
+for good; no old note after a new login; what is typed stays while Status is looked at. On the user's site History
+keeps the copy names whole and uses its phone layout up to 760 px, the top bar keeps one row from 641 px, the editor's
+steps keep room for their unit ("100" read "10%" below 340 px), figures shrink instead of being cut, card heads wrap,
+the toast takes a phone's width, and a copy's line names the kind of both its parts. The server keeps its time-zone
+caches under each zone's own name, bounded (spellings of one zone could add some 150 MB), and reads the closed positions
+once per poll for the copy lines (GET /api/state at 50,000 closed positions: 95–117 ms before, 62–64 ms after). The
+browser suite now runs at seven sizes (1280, 1024, 768, 412, 390, 360 and 320 px), checks on every screen that nothing
+runs out of its own card or box, and resizes Alice's pages from 280 to 1100 px: **652 checks passed at each size (655
+at 1280 px), none failed, no page errors, nothing wider than the screen**. `npm test`: 564 tests.
 
 **The engine.** A second round of reviewers (money, restarts, the user's view, the fuzzer) read the fixes above; each
 finding was checked by a separate verifier, and the eight checked were all confirmed. Fixed, each with a test that

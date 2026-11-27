@@ -216,9 +216,11 @@ export function createApp(deps: AppDeps): Server {
     const rows = users.map((u) => {
       // Database totals over every closed position (it was a sum of the newest 5,000 rows, real and test added
       // together: a user who only ever tested showed a profit). "Profit" is real money; test profit is apart, as the
-      // fees are.
-      const real = store.closedTotals(u.id, 'live');
-      const test = store.closedTotals(u.id, 'paper');
+      // fees are. One pass per user, with no pass over the fills (the fees come from userFees).
+      const closed = store.closedPerCopy(u.id);
+      const total = (mode: 'live' | 'paper') => closed.filter((r) => r.mode === mode).reduce((a, r) => ({ trades: a.trades + r.closed, pnlLamports: a.pnlLamports + r.pnlLamports }), { trades: 0, pnlLamports: 0n });
+      const real = total('live');
+      const test = total('paper');
       const fills = store.userFees(u.id);
       return {
         id: u.id, username: u.username, createdAt: u.createdAt, disabled: u.disabled,
@@ -365,33 +367,30 @@ export function createApp(deps: AppDeps): Server {
     return value;
   }
 
-  /** Real trades once there are any, test trades until then (as the profit cards do): never the two added together. */
-  function shownMode(uid: number): 'live' | 'paper' {
-    return store.closedTotals(uid, 'live').trades > 0 ? 'live' : 'paper';
-  }
-
   /**
    * Each copy's line: its open positions, closed ones and their profit, all of the shown kind (real once the account has
    * any, test until then), and the other kind's apart (the open ones were counted of both kinds: a line read "1 open ·
    * 2 closed · +0.392 SOL" while its one open position was a test one, and the test results were not shown at all).
+   * Every closed position is read once, in one pass that also tells the shown kind (they were read three times, each
+   * with a pass over their fills: 30 to 40 ms more per poll at 50,000 closed positions, on the copying thread).
    */
-  function copyStats(uid: number) {
-    const shown = shownMode(uid);
+  function copyStats(uid: number, active: Position[]) {
+    const closed = store.closedPerCopy(uid);
+    // Real trades once there are any, test trades until then (as the profit cards do): never the two added together.
+    const shown: 'live' | 'paper' = closed.some((r) => r.mode === 'live' && r.closed > 0) ? 'live' : 'paper';
     const kind = (m: 'live' | 'paper') => (m === 'live' ? 'live' as const : 'test' as const);
     const stats = new Map<number, CopyStats>();
     const bump = (id: number) => stats.get(id) ?? stats.set(id, blankStats(shown)).get(id)!;
-    for (const p of store.activePositions(uid)) {
+    for (const p of active) {
       const s = bump(p.copyId);
       (kind(p.mode) === s.kind ? s : s.other).open++;
     }
     // Every closed position (it was the newest 1,000, test and real added together).
-    for (const mode of ['live', 'paper'] as const) {
-      for (const [copyId, t] of store.closedTotals(uid, mode).byCopy) {
-        const s = bump(copyId);
-        const part = kind(mode) === s.kind ? s : s.other;
-        part.closed = t.closed;
-        part.pnlSol = sol(t.pnlLamports);
-      }
+    for (const r of closed) {
+      const s = bump(r.copyId);
+      const part = kind(r.mode) === s.kind ? s : s.other;
+      part.closed = r.closed;
+      part.pnlSol = sol(r.pnlLamports);
     }
     return { shown, stats };
   }
@@ -521,7 +520,8 @@ export function createApp(deps: AppDeps): Server {
       renewSession(req, res);
       const user = store.user(uid);
       const w = store.wallet(uid);
-      const { shown, stats } = copyStats(uid);
+      const active = store.activePositions(uid);
+      const { shown, stats } = copyStats(uid, active);
       return json(res, 200, {
         user: { username: user?.username },
         server: deps.serverInfo(),
@@ -529,7 +529,7 @@ export function createApp(deps: AppDeps): Server {
         pnl: (({ days: _days, ...rest }) => rest)(viewerPnl()),
         wallet: w ? { pubkey: w.pubkey, sol: await walletSol(uid, w.pubkey) } : null,
         copies: store.copies(uid).map((c) => ({ id: c.id, ...c.settings, stats: stats.get(c.id) ?? blankStats(shown) })),
-        positions: store.activePositions(uid).map(positionView),
+        positions: active.map(positionView),
         events: store.events(uid, 80),
       });
     }
@@ -542,10 +542,12 @@ export function createApp(deps: AppDeps): Server {
       });
       // The heading counts every closed position of the shown kind (real once there are any), not the 200 listed, and
       // says which kind (kind). The list holds both kinds: closedAll lets the page say it is cut even when neither kind
-      // alone passes 200, and of how many.
-      const mode = shownMode(uid);
-      const t = store.closedTotals(uid, mode);
-      const closedAll = t.trades + store.closedTotals(uid, mode === 'live' ? 'paper' : 'live').trades;
+      // alone passes 200, and of how many. Each kind's totals are read once (the real ones were read twice).
+      const live = store.closedTotals(uid, 'live');
+      const mode = live.trades > 0 ? 'live' : 'paper';
+      const test = store.closedTotals(uid, 'paper');
+      const t = mode === 'live' ? live : test;
+      const closedAll = live.trades + test.trades;
       return json(res, 200, { positions: views, shown: views.length, closedAll, kind: mode === 'live' ? 'live' : 'test', totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: viewerPnl() });
     }
 

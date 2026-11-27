@@ -99,3 +99,22 @@ describe('B1: the "Open positions" card', () => {
     expect(openPnl([])).toEqual({ sol: 0, test: false, testSol: null });
   });
 });
+
+describe('N3 (third review): a copy\'s line names the kind of each of its parts', () => {
+  // The second part said "test:" or "live:", the first said nothing: next to the server's TEST pill a real profit read as
+  // a test one, and next to LIVE, a test profit ('[LIVE] 0 open · 1 closed · +2 SOL · live: 1 open') as real money.
+  const line = (st: unknown) => (figures as Record<string, any>).copyNumbers?.(st);
+  it('both parts named: real figures with test ones after them, and test figures with a real position open', () => {
+    expect(line({ kind: 'live', open: 2, closed: 2, pnlSol: 0.744, other: { kind: 'test', open: 0, closed: 2, pnlSol: 0.959 } }))
+      .toBe('live: 2 open · 2 closed · <span class="up">+0.744 SOL</span> · test: 2 closed <span class="up">+0.959</span>');
+    expect(line({ kind: 'test', open: 0, closed: 1, pnlSol: 2, other: { kind: 'live', open: 1, closed: 0, pnlSol: 0 } }))
+      .toBe('test: 0 open · 1 closed · <span class="up">+2 SOL</span> · live: 1 open');
+  });
+  it('one kind only: still named, as the profit cards name test figures', () => {
+    expect(line({ kind: 'test', open: 0, closed: 0, pnlSol: 0, other: { kind: 'live', open: 0, closed: 0, pnlSol: 0 } })).toBe('test: 0 open · 0 closed · <span class="">0 SOL</span>');
+    expect(line({ kind: 'live', open: 1, closed: 3, pnlSol: -0.5, other: { kind: 'test', open: 0, closed: 0, pnlSol: 0 } })).toBe('live: 1 open · 3 closed · <span class="down">−0.5 SOL</span>');
+  });
+  it('nothing but the two words and numbers goes into it', () => {
+    expect(line({ kind: '<b>x</b>', open: '<i>', closed: 1, pnlSol: 0, other: null })).toBe('test: 0 open · 1 closed · <span class="">0 SOL</span>');
+  });
+});

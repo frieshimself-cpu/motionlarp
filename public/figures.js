@@ -84,3 +84,20 @@ export function openPnl(positions) {
   if (anyLive) return { sol: sum(true), test: false, testSol: anyTest ? sum(false) : null };
   return { sol: sum(false), test: anyTest, testSol: null };
 }
+
+/**
+ * A copy's numbers on the dashboard: all of one kind, as on the profit cards (real once there are real trades), the
+ * other kind's after them, apart, and each part says which kind it is: "live: 2 open · 2 closed · +0.744 SOL · test: 2
+ * closed +0.959". The first part said nothing (third review): next to the server's TEST pill, real profit read as test
+ * profit, and next to LIVE, test profit as real. Returns HTML (only numbers and the two words go in).
+ * `st`: { kind ('live' | 'test'), open, closed, pnlSol, other: { kind, open, closed, pnlSol } }.
+ */
+export function copyNumbers(st) {
+  const word = (k) => (k === 'live' ? 'live' : 'test');
+  const n = (v) => Number(v) || 0;
+  const main = `${word(st.kind)}: ${n(st.open)} open · ${n(st.closed)} closed · <span class="${cls(st.pnlSol)}">${signed(st.pnlSol, 3)} SOL</span>`;
+  const o = st.other;
+  if (!o || (!o.open && !o.closed)) return main;
+  const parts = [o.open ? `${n(o.open)} open` : '', o.closed ? `${n(o.closed)} closed <span class="${cls(o.pnlSol)}">${signed(o.pnlSol, 3)}</span>` : ''].filter(Boolean);
+  return `${main} · ${word(o.kind)}: ${parts.join(' · ')}`;
+}
