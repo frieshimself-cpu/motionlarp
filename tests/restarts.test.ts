@@ -933,6 +933,23 @@ describe('a trade whose outcome is unknown, on a slow chain or past its last blo
     expect(s.position()).toMatchObject({ status: 'open', tokensHeld: 1_000_000n });
   });
 
+  it('Sell now pressed while a sell of the position\'s queue has an unknown outcome answers at once, and sells right after it (it showed "Selling…" until the chain moved, up to ten minutes)', async () => {
+    const s = server({ ...none, timed: [{ afterSec: 2, percent: 40 }, { afterSec: 900, percent: 100 }] });
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'unknown-lost' : 'ok'); // the +2 s step: nobody can tell whether it landed
+    s.chain.height = 80; // its blockhash (valid up to 100) can still land: its outcome is read until the chain says
+    s.at(2_000); void s.engine.tick(); await sleep(10);
+    const press = s.engine.sellNow(s.uid, 1);
+    const answer = await Promise.race([press, sleep(50).then(() => 'still waiting' as const)]);
+    expect(answer).toMatchObject({ ok: true, note: expect.stringMatching(/outcome is being read/) });
+    expect(s.feed().some((m) => /you pressed Sell now/.test(m) && /goes out right after it/.test(m))).toBe(true);
+    s.chain.height = 132; // well past its last block: it never landed
+    await sleep(40);
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 1_000_000n]); // the press sold everything right after it
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+    s.engine.stop();
+  });
+
   it('the settling pass reads the chain tip once, not once for every buy it settles', async () => {
     const s = server(none);
     const chain = s.chain as unknown as { chainTip: () => Promise<unknown> };
