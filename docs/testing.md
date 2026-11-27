@@ -750,7 +750,8 @@ default mix and of each profile generate byte for byte as before; a frozen tape 
 confirmed 400 ms after it is produced: an up-to-date status node answers from its processed bank, ahead of the tip read
 before it; a node behind on its confirmations has the sale's block unconfirmed, and the fake executor throws "seen in a
 block, not confirmed yet" as the real one does; a status node may be on a 1-3 slot minority fork (it has not seen the
-main fork's last blocks and says "not found" at a slot at least the tip's: what the 10-block margin is for), up to 31
+main fork's last blocks and says "not found" at a slot at least the tip's: the kind of node the 10-block margin is for;
+[corrected later: forks of 1-3 blocks could not test it, any margin of 2 or more passed them; now up to 11, below]), up to 31
 blocks behind (the 30-block rule's exact tolerance; a node further behind is that rule's accepted limit;
 WELL_PAST_BLOCKS cut to 24 in a scratch copy shows in 6 of 2,000 lag seeds on 7b19ee8, and on 964abdd, where it governs
 only a status without a slot, in 1 of 2,000, 2 of 1,000 whose answers never carry a slot, 0 with the rule as it is), or
@@ -758,7 +759,9 @@ answer without a slot; a tip node may be a little behind; the nodes keep their w
 judges the engine's own verdicts by the chain: a sell left behind that it drops, or a sell of unknown outcome it gives
 up, that had landed or lands later is M3; one that could still land (the last block it can land in not yet produced) is
 NL1, new. The self-test plants four more weaker rules, each caught and never without the fault: the status read before
-the tip (handed the tip as it is 15 blocks later) 18 of 400 lag seeds whose "not found" carries no slot (one with a
+the tip (handed the tip as it is 15 blocks later) [corrected later: a stand-in only; a real reordering moves the tip by
+one read's latency, the fuzzer did not catch it, and the unit test added in 2cdd0b4 that pins the order guards it] 18 of
+400 lag seeds whose "not found" carries no slot (one with a
 slot is held to the slot the sell's last block can have at the latest, which a later tip at its own slot still bounds:
 since 63fc09c the slot check is not fooled by it); no margin 10 of 600 (only with every status read from a fork node,
 on a chain at 1.5 s a block); a slotless "not found" believed 24 of 300; a sell of unknown outcome given up at 120 s
@@ -779,7 +782,9 @@ of 2,000, default 2 of 2,000, the first flag of all but one of those seeds a ver
 seed 142: a sell of unknown outcome given up 127 s after it was sent, the chain 44 blocks short of its last block; slow
 seed 5: a sell left behind dropped at 180 s, landed 8 s later and never booked). A change to the drop rules needs a
 `--profile lag` and a `--profile slow` run: in the default mix lag is 6 % of the seeds and slow periods 4 %, so the
-default mix alone catches such a change only at large seed counts.
+default mix alone catches such a change only at large seed counts. [Corrected later: on this model those runs caught
+neither a removed margin nor a wrong last block (1 + 1 and 0 + 0 seeds, measured by a checker); the unit tests guard
+them. What each profile catches on the next model is below.]
 
 **The checkers of that model** (one on its faithfulness, one planting regressions) found gaps, closed as follows. In the
 real code (2cdd0b4, live since 19:42 UTC after a 1.5 s gap): the wait for a trade's confirmation (`src/tx/confirm.ts`)
@@ -799,6 +804,78 @@ forks too shallow (1-3 blocks) to test the 10-block margin, buys never settled b
 after a crash and was booked from its own transaction was never marked done). Until then the margin, the last block
 and the 30-block rule are guarded by the unit tests (`tests/restarts.test.ts`, `tests/send.test.ts`), not by the
 fuzzer's runs. `npm test`: 628 tests.
+
+**The fuzzer's chain model, round two** (c4bb11f, 9be3f12; e2e/fuzz only, nothing in src/). Every gap the two checkers
+found is closed. The fake executor answers a real trade as the real one does (`src/tx/confirm.ts`, then `sendAndRead`):
+landed, or failed on chain, once its own status polls see the block confirmed (where the chain's nodes disagree, later:
+its polls are answered by the same nodes as every other read); "expired before landing" only from one of its own looks
+(every ten polls, every poll once past the margin: the tip, then the trade's status from a node of the model), by the
+shared rule, which the fuzzer imports from `src/chain/landing.ts`, never while the trade is seen at "processed"; and an
+answer that would come more than 150 s after the trade was sent is "sent, outcome unknown" at 150 s, after one last read
+of its own transaction, the chain landing or failing it afterwards with nobody told. A trade the plan reports "outcome
+unknown" still gets that answer L1 + L2 after it is sent (0.1 to 30.5 s), and a ghost sell L2 after it landed (later
+when it lands late), by the cap at the latest: earlier than the real executor can give it (only at its cap), kept as
+harsh stress, the engine settling such a trade while the chain is still deciding it. Every expiry of the executor's own
+wait is judged by the chain like the engine's verdicts. A status node on a minority fork now misses up to 11 of the main
+fork's newest blocks (whole leader windows of four slots weighted: a leader's window lost to the next leader, or two),
+the 10-block margin's exact tolerance; a deeper fork is the margin's accepted limit, as a node more than 31 blocks
+behind is the 30-block rule's. 12 % of the lag and slow seeds are fork-heavy (most status reads from such nodes). Real
+buys are signed with their short blockhash (40 to 59 blocks left) and the engine is told its last valid height, so buys
+are settled by the tip rules (`positions.buy_last_valid`; the model had left it empty, and the engine used its 90 s
+fallback); in lag and slow seeds buys land late too, in the last blocks of that blockhash, they are read back through
+the model's nodes, and the engine's verdicts on buys are judged by the chain: a buy marked failed that landed, its coins
+never sold, is M3 (before, only the end check Q:buy-landed-position-failed caught it), one marked failed while it could
+still land is NL1. Also: the false flag of lag seeds 3014 and 12069 is gone (a "same share" sell left behind by a crash
+and booked from its own transaction now marks their sell done); a verdict is labelled by the shared rule as it stands,
+with any tip the engine had read, or "none of the engine's known rules", never after the rule a change replaced; a node
+may not return a landed transaction yet ("landed, but its transaction cannot be read yet"); a status node whose answer
+carries its slot may be up to 150 blocks behind (the slot check must hold at any distance; only an answer without a slot
+is held to 31); overlapping slow periods are clipped (the chain is the same; the minutes counted were a sum). Two more
+planted faults, each caught with a clean control: the executor's wait with the rule `confirm.ts` had before 2cdd0b4, 11
+of 300 lag seeds, and a buy marked failed without the margin or the slot check, 19 of 300; the margin-free plant is
+caught in 100 of 600 (10 before).
+
+On the final code (main's 8db6bbb with this model): default mix 0 of 2,000; crash, ghost and outage 0 of 1,500 each; the
+22 saved cases pass; every planted fault is caught; frozen tapes replay byte for byte (400 seeds of five kinds); lag 3
+of 3,000 and slow 1 of 2,000, all four the same defect of the engine, found by this model and not fixed here (saved as
+case 22, `e2e/fuzz/cases/22-a-buy-booked-twice-by-the-settling-pass.json`, which shows it until it is fixed). **The
+safety pass books a buy of this process a second time** (`src/engine/engine.ts:1716-1748`, settleOpening): it takes
+every opening position at once (`store.openingPositions()`), then reads the chain's tip and each buy's status, each read
+taking its time (up to 8.5 s: the main link's 4 s limit, then the backup link); its check that a buy is still running in
+this process (`this.queues.has`) is made per position after those reads, and the landed branch books from the row the
+pass holds, which still says "opening". A buy of this process that was in flight when the pass began and is booked while
+the pass waits is booked again: a second buy fill and a second "Bought" line, its coins, cost and opened time written
+again (its timed exit then counts from that moment: "its exit starts now"); had one of its sells been booked in between,
+its coins would be written back into the books. Shrunk to 4 steps: a crash leaves a buy "opening" (it lands in the last
+block of its short blockhash); after the restart another coin's buy goes out; the pass 3 s after the start takes both,
+its tip read takes 6.3 s, the new buy lands and is booked meanwhile, and the pass books it again from its old row. The
+model could not show it before: its settleBuy answered at once and buys carried no last valid height (no tip read in
+front of them). None of the verdicts was contradicted by the chain. In the lag run 3,374 sells were left behind (2,236
+had landed, all booked; 374 dropped by the slotted rule, 144 well past, none by a time limit; 620 had failed on chain),
+520 sells of unknown outcome were settled (338 landed), 1,376 buys were settled from their own transaction (1,222
+landed; 154 marked failed: 100 by the slotted rule, 48 well past, 6 failed on chain), and the executor's own wait called
+406 trades expired and answered 56 "outcome unknown" at its cap (32 of those trades landed afterwards); of 3,728 status
+reads from a node on a fork, 2,383 were four blocks deep or more, and 183 missed a trade already in a block (157 of them
+four or more deep). In the slow run 734 answers came at the cap (426 of those trades landed afterwards), 778 sells of
+unknown outcome were settled (488 landed), and 730 buys (635 landed).
+
+What the runs catch, measured with one regression planted at a time in a copy of `src/` (seeds whose verdicts the chain
+contradicts, lag 1-3,000 / slow 1-2,000 / default 1-2,000; the unmodified code 0 / 0 / 0): the margin removed, 24 / 47 /
+0 (on the model before, measured by a checker, 1 / 1 / 0); the margin cut to 4, 1 / 12 / 0; the last block taken as the
+last valid height, 1 / 0 / 0 (0 / 0 / 0); the 30-block rule cut to 24, 5 / 2 / 0 (2 / 2 / 0); the slot check gone, 206 /
+103 / 8 (145 / 64 / 9); the status read before the tip, 1 / 0 / 0 (1 / 0 / 0). So a lag and a slow run now catch a
+margin that is gone or cut, and the slot check gone; a wrong last block and the reads' order show in one seed of 5,000
+at most; the 30-block rule concerns only an executor whose answers carry no slot (web3.js rejects a status answer
+without a context slot, so the production executor never reaches it). The order of the reads is guarded by the unit test
+that pins it (the self-test's status-first plant is a tip 15 blocks later, a stand-in), and the margin, the last block
+and the 30-block rule by the unit tests too (`tests/restarts.test.ts`, `tests/send.test.ts`). Each profile: lag and slow
+are the chain's nodes disagreeing (behind, on a fork, behind on their confirmations, without a slot), late landings,
+crashes with sells and buys out, sells and buys of unknown outcome, and, in slow, the cap; ghost and crash are sells of
+unknown outcome and crashes with every node up to date (they test the bookkeeping of those paths, not the drop rules'
+tolerance); the default mix carries 6 % lag seeds and 4 % slow periods, so it catches a drop-rule change only at large
+seed counts; outage, partial, slowread, dbfault and diskfull test what their names say and read the chain from
+up-to-date nodes only. The fake executor rebuilds `confirm.ts`'s loop around the shared rule: a change to `confirm.ts`
+itself (its order of reads, its "processed" rule) is guarded by `tests/send.test.ts`, not by the fuzzer.
 
 ## Not yet verified
 

@@ -545,7 +545,14 @@ class Run {
       case 'none': return `not found ${age} s after it was sent, by none of the engine's known rules (neither of the shared rule's branches with any tip it had read, nor a time limit)`;
       case 'failed': return 'it failed on chain';
       case 'planted': return 'by the self-test\'s planted rule';
-      case 'other': return this.exec.reads.get(sig)?.at === this.sim.now ? 'by none of the engine\'s rules, on an answer that was not "not found"' : 'without a read of it at that moment (nothing could be learnt about it)';
+      case 'other': {
+        const read = this.exec.reads.get(sig);
+        if (read?.at === this.sim.now) return 'by none of the engine\'s rules, on an answer that was not "not found"';
+        // (the engine decides at once on the status read it has just made: a verdict after it, with something awaited in
+        // between, is a changed rule, such as the status read before the tip)
+        if (read) return `on a status read that had arrived ${((this.sim.now - read.at) / 1000).toFixed(1)} s before, something awaited in between (the engine decides at once on the read it has just made: a changed rule)`;
+        return 'without a read of it (nothing could be learnt about it)';
+      }
     }
   }
 
@@ -558,7 +565,10 @@ class Run {
     const node = !now ? '' : now.fork ? `a node on a minority fork (the main fork's last ${now.fork} block${now.fork === 1 ? '' : 's'} unseen)` : now.lag ? `a node ${now.lag} blocks behind` : 'an up-to-date node';
     // ("every read failed" only when tip reads were made before it and all failed)
     const noTip = `no tip read before it${now && (now.tipReads ?? 0) > 0 && now.tipFails === now.tipReads ? ` (all ${now.tipReads} tip reads before it failed)` : ''}`;
-    return `${tip ? `the highest tip read before it at height ${tip.height} (slot ${tip.slot ?? '?'})` : noTip}${last !== undefined ? `, its last block ${last}` : ''}${now ? `, status from ${node}${now.slot !== undefined ? ` (slot ${now.slot})` : ' (no slot)'}` : ', no status read at that moment'}; the chain at ${this.market.height()} confirmed, ${this.market.processedHeight()} produced`;
+    // (no status read at that moment: the last one, when there was one, what it said and the tip read before sending it)
+    const head = now ? (tip ? `the highest tip read before it at height ${tip.height} (slot ${tip.slot ?? '?'})` : noTip) : 'no status read at that moment';
+    const before = read && !now ? `; its last status read had arrived ${((this.sim.now - read.at) / 1000).toFixed(1)} s before (${read.state}${read.slot !== undefined ? ` at slot ${read.slot}` : ''}; the highest tip read before that one ${read.tip ? `at height ${read.tip.height}` : 'none'})` : '';
+    return `${head}${last !== undefined ? `, its last block ${last}` : ''}${now ? `, status from ${node}${now.slot !== undefined ? ` (slot ${now.slot})` : ' (no slot)'}` : before}; the engine's highest tip now ${this.exec.highTip ? `at height ${this.exec.highTip.height}` : 'none'}; the chain at ${this.market.height()} confirmed, ${this.market.processedHeight()} produced`;
   }
 
   /** A trade that the chain may still put in a block: sent, neither landed nor failed, and the last block it can land in

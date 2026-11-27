@@ -135,7 +135,7 @@ export const INVARIANTS: Record<string, [string, string]> = {
   F1: ['fees', 'buys and sells carry the copy\'s own fees, slippage and the user\'s platform fee, also after the copy was paused, edited or deleted'],
   R1: ['retries', 'a retried sell is checked (simulated) before it is sent'],
   X1: ['real or test', 'a position is real exactly when its buy was; a real position is sold for real (also with the Live switch off), a test one on paper; a buy of unknown outcome stays "opening", a failed one is marked failed'],
-  E0: ['harness', 'the scenario ran to its end'],
+  E0: ['harness', 'the scenario ran to its end, and every trade of the fake executor was answered (to the engine, or to nobody once its process was gone)'],
   E1: ['engine', 'no exception escapes the engine (unhandled rejection, rejected tick, "timed step failed")'],
   E2: ['engine', 'the engine does not spin without time passing'],
   E3: ['harness', 'every trade belongs to an order'],
