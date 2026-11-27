@@ -12,6 +12,7 @@ import { Store } from './store.js';
 import { parseFeeConfig } from './fee.js';
 import { applyStoredSettings, saveOwnerSettings, settingsView, type OwnerSettingsPatch } from './owner-settings.js';
 import { rpc } from './chain/rpc.js';
+import { chooseSender, GLOBAL_SENDER, pingRegion } from './tx/sender-region.js';
 import { Watcher, websocketSubscriber } from './watch/watcher.js';
 
 if (!/^[0-9a-fA-F]{64}$/.test(config.masterKey)) {
@@ -78,7 +79,7 @@ const app = createApp({
   trustProxy: config.trustProxy,
   feeBpsFor,
   maxCopiesPerUser: config.maxCopiesPerUser,
-  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode() }),
+  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: senderNote }),
 });
 
 // Every second. Ticks may overlap: the engine runs one price check per position at a time, and timed sells fire
@@ -108,6 +109,19 @@ if (config.feeBps > 0 && config.rpcUrl) {
   } catch (err) {
     log.warn('could not check the FEE_WALLET balance', { error: safeErrorMessage(err) });
   }
+}
+
+// Tipped trades go through the Helius Sender region nearest this server; its connection is kept warm.
+let senderNote = config.senderUrl === 'off' ? 'off' : 'global';
+if (config.rpcUrl && config.senderUrl === GLOBAL_SENDER) {
+  const nearest = await chooseSender().catch(() => null);
+  if (nearest) {
+    config.senderUrl = nearest.url;
+    senderNote = `${nearest.region} (${nearest.ms} ms)`;
+    const warm = setInterval(() => void pingRegion(nearest.region).catch(() => undefined), 20_000);
+    warm.unref();
+  }
+  log.info('helius sender', { endpoint: senderNote });
 }
 
 app.listen(config.port, config.host, () => {

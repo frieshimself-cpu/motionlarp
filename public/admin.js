@@ -48,7 +48,7 @@ function render() {
         <div class="card stat"><div class="label">Users</div><div class="value">${s.totals.users}</div><div class="foot">${s.licenses.filter((l) => l.status === 'unused').length} unused keys</div></div>
         <div class="card stat"><div class="label">Open positions</div><div class="value">${s.totals.open}</div><div class="foot">watching ${s.server.watching} wallets</div></div>
         <div class="card stat"><div class="label">Fees earned</div><div class="value">${fmtSol(s.totals.feesLiveSol, 4)} <small>SOL</small></div><div class="foot">real trades · test mode would have: ${fmtSol(s.totals.feesTestSol, 4)}</div></div>
-        <div class="card stat"><div class="label">Trading</div><div class="value">${s.server.mode === 'offline' ? 'Offline' : s.server.live ? 'Live' : 'Test'}</div><div class="foot">${st.rpcSet ? esc(st.rpc) : 'add your Helius link below'}</div></div>
+        <div class="card stat"><div class="label">Trading</div><div class="value">${s.server.mode === 'offline' ? 'Offline' : s.server.live ? 'Live' : 'Test'}</div><div class="foot">${st.rpcSet ? `Helius connected${s.server.sender ? ` · Sender ${esc(s.server.sender)}` : ''}` : 'add your Helius link below'}</div></div>
       </section>
 
       <div class="stack">
@@ -96,10 +96,16 @@ function render() {
         <div class="card">
           <div class="card-head"><h2>Settings</h2></div>
           <form id="settings">
-            <div class="setting"><div class="what"><b>Helius RPC link</b><span>The connection to Solana. Helius → RPC → "RPC URL".</span></div>
-              <div><div class="hint" style="margin:0 0 6px">${st.rpcSet ? `Current: <span class="mono">${esc(st.rpc)}</span>` : 'Not set: nothing is watched or traded yet.'}</div><input id="set-rpc" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="${st.rpcSet ? 'Leave empty to keep the current link' : 'https://mainnet.helius-rpc.com/?api-key=…'}"><div class="hint">Stored encrypted, never shown again. Changing it restarts the site (a few seconds).</div></div></div>
-            <div class="setting"><div class="what"><b>Jupiter API key</b><span>Optional. For coins outside pump.fun: a key from portal.jup.ag lifts the free rate limit.</span></div>
-              <div><input id="set-jup" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="${st.jupiterKeySet ? 'Set — paste a new key to replace it' : 'Optional'}"></div></div>
+            <div class="setting"><div class="what"><b>Helius RPC link</b><span>The connection to Solana. Saved once; it stays until you change it.</span></div>
+              <div>${st.rpcSet
+                ? `<div class="saved"><span class="pill live">Saved</span><span class="mono">${esc(st.rpc)}</span><button type="button" class="btn small ghost" data-change="rpc">Change</button></div>
+                   <div id="change-rpc" hidden style="margin-top:10px"><input id="set-rpc" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="Paste the new RPC URL from Helius"><div class="hint">Stored encrypted. Changing it restarts the site (a few seconds).</div></div>`
+                : `<input id="set-rpc" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="https://mainnet.helius-rpc.com/?api-key=…"><div class="hint">Helius → RPC → "RPC URL". Stored encrypted; nothing is watched or traded until it is set.</div>`}</div></div>
+            <div class="setting"><div class="what"><b>Jupiter API key</b><span>For coins outside pump.fun. Saved once; it stays until you change it.</span></div>
+              <div>${st.jupiterKeySet
+                ? `<div class="saved"><span class="pill live">Saved</span><span class="muted">in use for every Jupiter request</span><button type="button" class="btn small ghost" data-change="jup">Change</button></div>
+                   <div id="change-jup" hidden style="margin-top:10px"><input id="set-jup" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="Paste the new key from portal.jup.ag"></div>`
+                : `<input id="set-jup" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="Optional: a key from portal.jup.ag">`}</div></div>
             <div class="setting"><div class="what"><b>Platform fee</b><span>Your cut of every buy and sell, paid inside the same transaction. A license can have its own.</span></div>
               <div class="row2"><div><label for="set-fee">Fee</label><div class="unit"><input id="set-fee" type="number" min="0" max="10" step="any" value="${esc(st.feePercent)}"><span>%</span></div></div>
               <div><label for="set-wallet">Paid to wallet</label><input id="set-wallet" type="text" autocomplete="off" spellcheck="false" value="${esc(st.feeWallet)}" placeholder="Wallet address (must hold ≥ 0.001 SOL)"></div></div></div>
@@ -155,6 +161,11 @@ function bind() {
   act('[data-disable]', 'disable', async (id) => { if (confirm('Disable this user? They are logged out and get no new copies.')) await api('PUT', `/api/admin/users/${id}`, { disabled: true }); });
   act('[data-enable]', 'enable', (id) => api('PUT', `/api/admin/users/${id}`, { disabled: false }));
 
+  $$('[data-change]', app).forEach((b) => b.addEventListener('click', () => {
+    const box = $(`#change-${b.dataset.change}`);
+    box.hidden = !box.hidden;
+    if (!box.hidden) $('input', box).focus();
+  }));
   $('#set-live').addEventListener('change', (e) => {
     if (e.target.checked && !confirm('Turn live trading ON? Copies set to Live will then buy and sell with real SOL.')) e.target.checked = false;
     $('#live-text').textContent = e.target.checked ? 'Live trading will be ON after saving' : 'Test mode';
