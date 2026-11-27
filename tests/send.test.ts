@@ -208,16 +208,45 @@ describe('waiting for a transaction to land', () => {
     expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 9 });
   });
 
-  it('expired at the first look once the chain is past its last valid height and the status node is that far along (it waited one block more)', async () => {
+  it('expired at the first look once the chain is ten blocks past its last block and the status node is that far along', async () => {
     let looks = 0;
-    chain([null], 1_001, () => { looks++; return 1_000 + 1_001; });
+    chain([null], 1_012, () => { looks++; return 1_000 + 1_012; });
     expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: false, reason: 'expired before landing', certain: true });
     expect(looks).toBe(11); // ten polls, then the one last look
   });
 
+  it('not expired within ten blocks past its last block, though the status node is as far along (a node on a short fork of its own has not seen the last blocks)', async () => {
+    chain([...Array.from({ length: 11 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }], 1_005, () => 1_000 + 1_005 + 2);
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 9 });
+  });
+
+  it('within the ten blocks it reads the chain tip at the usual pace (every ten polls), not at every poll', async () => {
+    let tips = 0;
+    let i = 0;
+    const statuses = [...Array.from({ length: 30 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }];
+    setConnectionForTests({
+      getSignatureStatuses: async () => ({ context: { slot: 2_010 }, value: [statuses[Math.min(i++, statuses.length - 1)]] }),
+      getEpochInfo: async () => { tips++; return { blockHeight: 1_005, absoluteSlot: 2_005 }; },
+    } as unknown as Connection);
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 9 });
+    expect(tips).toBeLessThanOrEqual(3); // at polls 9 and 19 (and 29), not at every poll after the first look
+  });
+
+  it('never expired while it is seen in a block, however far past the chain is (a node behind on its confirmations said "processed")', async () => {
+    chain([null, null, null, null, null, null, null, null, null, null, { confirmationStatus: 'processed', slot: 5 }, { confirmationStatus: 'processed', slot: 5 }, { confirmationStatus: 'processed', slot: 5 }, { confirmationStatus: 'confirmed', slot: 5 }], 2_000);
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 5 });
+  });
+
+  it('not expired on the word of a node whose own slot shows it has not reached its last block, however far past the chain is', async () => {
+    // well past (1,100): the last block (1,001) has a slot no later than 2,100 - 99 = 2,001; the node is at 1,950
+    chain([...Array.from({ length: 12 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }], 1_100, (n) => (n <= 11 ? 1_950 : 2_100));
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 9 });
+  });
+
   it('a last look from a node behind the tip is tried again at the next poll, not ten polls later', async () => {
     let looks = 0;
-    chain([null], 1_001, () => { looks++; return looks === 11 ? 1_000 + 1_001 - 3 : 1_000 + 1_001; });
+    // (the node 30 slots behind has not reached the last block: 2,012 - 11 = 2,001 > 1,982)
+    chain([null], 1_012, () => { looks++; return looks === 11 ? 1_000 + 1_012 - 30 : 1_000 + 1_012; });
     expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: false, reason: 'expired before landing', certain: true });
     expect(looks).toBe(13); // the lagging last look, the next poll, and its last look
   });

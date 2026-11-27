@@ -950,6 +950,30 @@ describe('a trade whose outcome is unknown, on a slow chain or past its last blo
     s.engine.stop();
   });
 
+  it('the chain tip is read before the status, for a sell of unknown outcome and for a sell left by a crash (the rule needs a tip read before the status: one read after could be past the margin while the status node missed the sale)', async () => {
+    const s = server(bag);
+    const order: string[] = [];
+    const chain = s.chain as unknown as { chainTip: () => Promise<unknown>; settleSell: (sig: string) => Promise<Record<string, unknown>> };
+    chain.chainTip = async () => { order.push('tip'); return { height: s.chain.height, slot: 1_000 + s.chain.height }; };
+    const settle = chain.settleSell.bind(s.chain);
+    chain.settleSell = async (sig: string) => { order.push('status'); const r = await settle(sig); return r.state === 'not_found' ? { ...r, slot: 1_000 + s.chain.height } : r; };
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'unknown-lost' : n === 2 ? 'gone' : 'ok');
+    s.chain.height = 50;
+    s.at(2_000); void s.engine.tick(); await sleep(10); // the +2 s step: its outcome is read
+    expect(order.length).toBeGreaterThanOrEqual(2);
+    for (let i = 0; i < order.length; i += 2) expect(order.slice(i, i + 2)).toEqual(i + 1 < order.length ? ['tip', 'status'] : ['tip']);
+    s.chain.height = 112; // it never landed: the step sells again (S2), and the process dies while that one is out
+    await sleep(20);
+    s.crash();
+    order.length = 0;
+    s.at(60_000); await s.engine.restore(); await s.engine.idle();
+    expect(order[0]).toBe('tip');
+    expect(order).toContain('status');
+    expect(order.indexOf('tip')).toBeLessThan(order.indexOf('status'));
+    s.engine.stop();
+  });
+
   it('the settling pass reads the chain tip once, not once for every buy it settles', async () => {
     const s = server(none);
     const chain = s.chain as unknown as { chainTip: () => Promise<unknown> };
