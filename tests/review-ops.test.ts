@@ -60,3 +60,27 @@ describe('price checks', () => {
     expect(s.quotes()).toBeGreaterThanOrEqual(14);
   });
 });
+
+describe('a trade whose confirmation was never told', () => {
+  it('is settled from its own transaction, never credited with the wallet\'s whole balance change (another sell may have moved it)', async () => {
+    const { confirmSignature } = await import('../src/tx/confirm.js');
+    (confirmSignature as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce({ landed: false, reason: 'confirmation unknown (RPC unreachable)', certain: false });
+    const ex = new ChainExecutor();
+    (ex as unknown as { tokenBalance: () => Promise<bigint> }).tokenBalance = async () => 0n; // the wallet moved by 1,000,000: two sells
+    vi.spyOn(ex as unknown as { settled: () => Promise<unknown> }, 'settled').mockResolvedValue({ state: 'landed', tokens: -400_000n, lamports: 399_000_000n });
+    const sendAndRead = (ex as unknown as { sendAndRead: (...a: unknown[]) => Promise<{ ok: boolean; tokens?: bigint; lamports?: bigint }> }).sendAndRead.bind(ex);
+    const req = { wallet: Keypair.generate(), mint: Keypair.generate().publicKey.toBase58(), slippagePct: 25, priorityFeeSol: 0.001, tipSol: 0, live: true, feeBps: 0 };
+    const r = await sendAndRead(req, {}, 100, 'sell', 400_000n, 400_000_000n, 1_000_000n, 0n);
+    expect(r).toMatchObject({ ok: true, tokens: 400_000n, lamports: 399_000_000n });
+  });
+
+  it('when even its transaction cannot be read, the outcome stays unknown (the engine settles it later)', async () => {
+    const { confirmSignature } = await import('../src/tx/confirm.js');
+    (confirmSignature as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce({ landed: false, reason: 'confirmation unknown (RPC unreachable)', certain: false });
+    const ex = new ChainExecutor();
+    vi.spyOn(ex as unknown as { settled: () => Promise<unknown> }, 'settled').mockRejectedValue(new Error('landed, but its transaction cannot be read yet'));
+    const sendAndRead = (ex as unknown as { sendAndRead: (...a: unknown[]) => Promise<{ ok: boolean; uncertain?: boolean }> }).sendAndRead.bind(ex);
+    const req = { wallet: Keypair.generate(), mint: Keypair.generate().publicKey.toBase58(), slippagePct: 25, priorityFeeSol: 0.001, tipSol: 0, live: true, feeBps: 0 };
+    expect(await sendAndRead(req, {}, 100, 'sell', 400_000n, 400_000_000n, 1_000_000n, 0n)).toMatchObject({ ok: false, uncertain: true });
+  });
+});

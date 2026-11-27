@@ -297,7 +297,9 @@ export class ChainExecutor implements Executor {
     if (status.err) return { state: 'failed' };
     if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') return { state: 'not_found' };
     const got = await getTransaction(signature);
-    if (!got) return { state: 'not_found' }; // confirmed, but this node cannot return it yet: asked again
+    // Confirmed, but this node cannot return it yet: not "not found" (that would read as "never landed" and sell
+    // again); the caller asks again.
+    if (!got) throw new Error('landed, but its transaction cannot be read yet');
     const change = walletChange(got, owner, mint);
     if (!change) return { state: 'failed' };
     return { state: 'landed', tokens: change.tokens, lamports: change.lamports };
@@ -535,17 +537,21 @@ export class ChainExecutor implements Executor {
       // Out of compute units: the retry (the engine retries a failed trade) asks for twice as many.
       if (/ComputationalBudgetExceeded|ProgramFailedToComplete|exceeded CUs/i.test(confirmed.reason)) this.heavy.set(req.mint, config.computeUnitLimit * 2);
       if (!confirmed.certain) {
-        // The RPC never told us. By now the blockhash has long expired, so the wallet's balance settles it; if
-        // even that cannot be read the outcome stays unknown ("uncertain"): the caller must not book it as failed.
-        if (balanceBefore === null) return { ok: false, error: `sent, outcome unknown: ${confirmed.reason}`, uncertain: true };
+        // The RPC never told us. Its own transaction settles it (never the wallet's balance change: with another of
+        // our sells overlapping, that would credit both to this one and book its SOL twice). If even that cannot be
+        // read, the outcome stays unknown ("uncertain"): the caller settles it later and must not book it as failed.
+        const unknown = { ok: false as const, error: `sent, outcome unknown: ${confirmed.reason}`, uncertain: true };
+        let s: Awaited<ReturnType<ChainExecutor['settled']>>;
         try {
-          const after = await this.tokenBalance(owner, req.mint);
-          const moved = side === 'buy' ? after - balanceBefore : balanceBefore - after;
-          if (moved > 0n) {
-            return { ok: true, signature: sent.signature, tokens: moved, lamports: side === 'buy' ? expectedLamports : (expectedLamports * moved) / (expectedTokens || 1n), simulated: false, feeLamports: platformFee, confirmedAt: Date.now(), note: 'landed late; fill estimated from the balance change' };
-          }
+          s = await this.settled(sent.signature, owner, req.mint);
         } catch {
-          return { ok: false, error: `sent, outcome unknown: ${confirmed.reason}`, uncertain: true };
+          return unknown;
+        }
+        if (s.state === 'not_found') return unknown;
+        if (s.state === 'landed') {
+          const tokens = side === 'buy' ? s.tokens : -s.tokens;
+          const lamports = side === 'buy' ? -s.lamports : s.lamports;
+          if (tokens > 0n) return { ok: true, signature: sent.signature, tokens, lamports, simulated: false, feeLamports: platformFee, confirmedAt: Date.now(), note: 'landed late; read from its own transaction' };
         }
       }
       // Landed and failed: the program's own words say why (slippage, a finished curve, not enough SOL, …).
