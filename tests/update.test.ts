@@ -120,6 +120,25 @@ describe('the automatic updater restarts the app only at a quiet moment', () => 
     expect(s.steps()).toEqual(['build', 'quiet unknown', 'up']);
   });
 
+  it('a commit that changes only notes and tests (docs, tests, the fuzzer, scripts) is taken without a restart', () => {
+    const s = server();
+    s.run(); // v1 running
+    const files = (names: string[], msg: string) => {
+      for (const n of names) { execFileSync('mkdir', ['-p', join(s.root, 'work', n, '..')]); writeFileSync(join(s.root, 'work', n), msg); }
+      git(join(s.root, 'work'), 'add', '.'); git(join(s.root, 'work'), 'commit', '-qm', msg); git(join(s.root, 'work'), 'push', '-q', 'origin', 'HEAD:main');
+      return git(join(s.root, 'work'), 'rev-parse', 'HEAD');
+    };
+    const docs = files(['docs/testing.md', 'tests/a.test.ts', 'e2e/fuzz/cases/1.json', 'scripts/x.ts', 'README.md'], 'notes');
+    const out = s.run();
+    expect(out).toMatch(/only notes and tests changed/);
+    expect(s.deployed()).toBe(docs);
+    expect(s.steps()).toEqual([]); // nothing built, nothing restarted
+    const code = files(['src/engine.ts'], 'code');
+    s.run();
+    expect(s.deployed()).toBe(code);
+    expect(s.steps()).toEqual(['build', 'quiet unknown', 'up']);
+  });
+
   it('a build that fails stops nothing: no question asked, no restart', () => {
     const s = server();
     const v2 = s.commit('v2');

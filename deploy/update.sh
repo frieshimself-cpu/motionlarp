@@ -83,6 +83,15 @@ if ! git pull --ff-only --quiet; then
   echo "$(date -Is) UPDATE FAILED: could not pull $(git rev-parse --short "$REMOTE") (tried again in 2 minutes)"
   exit 0
 fi
+# Only files the running app does not use changed (the test record, tests, the fuzzer, scripts, notes): nothing to
+# rebuild, so no restart at all.
+CHANGED=$(git diff --name-only "$DEPLOYED" HEAD 2>/dev/null || echo '?')
+if [ -n "$CHANGED" ] && ! printf '%s\n' "$CHANGED" | grep -qvE '^(docs/|tests/|e2e/|scripts/)|\.md$'; then
+  git rev-parse HEAD > .deployed
+  rm -f .failed
+  echo "$(date -Is) $(git rev-parse --short HEAD): only notes and tests changed, the app keeps running"
+  exit 0
+fi
 if ! build; then
   echo "$REMOTE $(date +%s)" > .failed
   git reset --hard --quiet "$PREV"

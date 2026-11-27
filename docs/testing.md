@@ -380,6 +380,24 @@ says "sent N ms after their trade was seen".
 - `tests/review-speed.test.ts`, `tests/watcher.test.ts`: nothing is read from the network before the send (a
   connection that records every call records none); the coin balance is still unanswered when the buy goes out; a
   classic SPL coin gets the classic program; a token program pump.fun did not call itself is never taken.
+- **Real money on walletmotion.app, 06:28 UTC** (b889f12; the same check as at 05:40: a 0.02 SOL copy of our own
+  leader wallet, fees 0.001 + 0.005 tip on the buy and 0.001 + 0.001 on each sell, 40 % / 30 % / the rest at 2 / 4 /
+  6 s). The leader bought 0.006 SOL of a curve coin: **our buy landed in the same block as the leader's** (both slot
+  474449727; at 05:40, before this work, it was 2 blocks behind), sent **88 ms** after their trade was seen (the first
+  copy after a restart, most of it code loading: the server now runs the copy path once at start); sells at +2.1 /
+  +4.1 / +6.1 s; every transaction landed; the four transactions changed the wallet by −0.012514 SOL, the fees the site
+  booked (the dashboard showed a balance from before the sells for a few seconds: it now shows the engine's own
+  figure, read right after each trade). The test copy was deleted.
+- **Again at 06:38 UTC** (d445249, with the warm-up at start; again the first copy after a restart): sent **27 ms**
+  after their trade was seen, landed **1 block** after the leader's (474452516 and 474452517); sells at +2.0 / +4.0 /
+  +6.1 s; the wallet changed by −0.012514 SOL again. Which block a copy lands in depends on where in the leader's block
+  their trade was and on the network; a few ms of our own work do not decide it.
+- The whole path measured here (`handleStreamTx` of the real curve buy, through the watcher, the engine with a file
+  database and the executor, to the signed transaction; sending mocked), 25 copies after the warm-up: median
+  **4.2 ms**, 3.7 to 10.7 ms.
+
+Updates also leave the app alone when a push changes only notes and tests (docs, tests, the fuzzer, scripts): pulled,
+written down as deployed, no restart.
 
 **Updates.** `deploy/update.sh` now builds a new version while the running one keeps trading, and restarts it only at
 a quiet moment: nothing open and nothing under way; after 20 minutes, nothing under way and nothing due in the next
