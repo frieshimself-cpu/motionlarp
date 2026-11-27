@@ -98,10 +98,10 @@ describe('the database\'s errors in plain words', () => {
 });
 
 describe('a status seen only at "processed"', () => {
-  it('is not evidence that a sell never landed: "not found" with no slot (the drop rule cannot use it), not one with the node\'s slot', async () => {
+  it('is not evidence that a sell never landed: asked again, never "not found" (which the drop rule takes once the chain is well past it; tests/settle-status.test.ts)', async () => {
     setConnectionForTests({ getSignatureStatuses: async () => ({ context: { slot: 500 }, value: [{ confirmationStatus: 'processed', err: null, slot: 499, confirmations: 0 }] }) } as never);
     const ex = new ChainExecutor();
-    expect(await ex.settleSell('SIG', Keypair.generate().publicKey.toBase58(), Keypair.generate().publicKey.toBase58())).toEqual({ state: 'not_found' });
+    await expect(ex.settleSell('SIG', Keypair.generate().publicKey.toBase58(), Keypair.generate().publicKey.toBase58())).rejects.toThrow(/not confirmed yet/);
   });
   it('a status not there at all is "not found" with the slot of the node that said so', async () => {
     setConnectionForTests({ getSignatureStatuses: async () => ({ context: { slot: 500 }, value: [null] }) } as never);

@@ -342,10 +342,12 @@ export class ChainExecutor implements Executor {
     const res = await getConnection().getSignatureStatuses([signature], { searchTransactionHistory: true });
     const status = res.value[0];
     if (!status) return { state: 'not_found', ...(res.context?.slot !== undefined ? { slot: res.context.slot } : {}) };
+    // Seen only at "processed": in a block that is not confirmed yet. Not "not found" (it may well have landed: a sell
+    // left by a crash was dropped once the chain was well past it, and its rule sold a second time, when the node that
+    // answered was behind on its confirmations), and an error there is not final either (the block may be dropped and
+    // the same transaction land in another). The caller asks again; a confirmed status, or none at all, settles it.
+    if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') throw new Error('seen in a block, not confirmed yet');
     if (status.err) return { state: 'failed' };
-    // Seen only at "processed": not landed yet, and not proof that it never will be (its block may still be confirmed),
-    // so no slot goes with it: only the chain being well past it then drops it (see Engine.neverLands).
-    if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') return { state: 'not_found' };
     const got = await getTransaction(signature);
     // Confirmed, but this node cannot return it yet: not "not found" (that would read as "never landed" and sell
     // again); the caller asks again.
