@@ -11,7 +11,7 @@ import type { Scenario, Step } from './scenario.js';
 export interface Shrunk { scenario: Scenario; result: RunResult; runs: number; reproduced: boolean }
 
 const clone = <T>(v: T): T => structuredClone(v);
-const isCalm = (p: OpPlan | undefined) => !p || (!p.fail && !p.part && !p.ghost && !p.refineNull && p.L1 === CALM_OP.L1 && p.L2 === CALM_OP.L2 && p.L3 === CALM_OP.L3);
+const isCalm = (p: OpPlan | undefined) => !p || (!p.fail && !p.part && !p.ghost && !p.refineNull && !p.quoted && p.L1 === CALM_OP.L1 && p.L2 === CALM_OP.L2 && p.L3 === CALM_OP.L3);
 
 function opCost(p: OpPlan | undefined): number {
   if (!p) return 0;
@@ -198,6 +198,6 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
 
 export function tapeSummary(t: Tape | undefined): string {
   if (!t) return 'random';
-  const odd = (list: OpPlan[]) => list.map((p, i) => (isCalm(p) ? null : `#${i + 1}: ${p.fail ? `fails (${p.fail})${p.ghost ? ' but lands' : ''}` : `lands after ${p.L1} ms, engine told ${p.L2} ms later${p.part ? `, fills ${p.part * 100}%` : ''}${p.refineNull ? ', exact SOL never read' : `, exact SOL ${p.L3} ms after that`}`}`)).filter(Boolean);
+  const odd = (list: OpPlan[]) => list.map((p, i) => (isCalm(p) ? null : `#${i + 1}: ${p.fail ? `fails (${p.fail})${p.ghost ? ' but lands' : ''}` : `lands after ${p.L1} ms, engine told ${p.L2} ms later${p.part ? `, fills ${p.part * 100}%` : ''}${p.quoted ? `, handed back with the quote's coin count (the wallet got ${p.quoted}x of it)` : ''}${p.refineNull ? ', exact SOL never read' : `, exact SOL ${p.L3} ms after that`}`}`)).filter(Boolean);
   return [`buys: ${odd(t.buy).join('; ') || 'all ordinary'}`, `sells: ${odd(t.sell).join('; ') || 'all ordinary'}`].join(' | ');
 }

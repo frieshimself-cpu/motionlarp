@@ -1,0 +1,174 @@
+{
+ "about": "The user's wallet already holds 3,000,000 of a coin (bought by hand). A copy with a '% of the original bag' ladder (40 % at +2 s, 20 % at +4 s, the rest at +6 s: the Scharo preset's kind) copies a buy of that coin: 1,000,000 tokens for 1 SOL. Until commit 58f4054 the last step sold whatever the wallet held, as the README then said: 3,400,000 tokens, the user's own 3,000,000 with it, and History and the profit card counted them as the copy's profit (4 SOL received for a 1 SOL buy). Since 58f4054 the README says the last step sells what is left of the position and leaves coins held besides the copy's alone (the engine sells the books' coins only when the wallet holds over 2 % more). This case shows the old behaviour if it comes back.",
+ "expect": [
+  "T5:the-user's-own-coins-were-sold"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "ladder",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 100,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": false,
+      "mode": "exit"
+     },
+     "timedOf": "bag",
+     "timed": [
+      {
+       "afterSec": 2,
+       "percent": 40
+      },
+      {
+       "afterSec": 4,
+       "percent": 20
+      },
+      {
+       "afterSec": 6,
+       "percent": 100
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [],
+  "quote": [],
+  "bal": []
+ },
+ "preload": [
+  {
+   "user": 0,
+   "mint": 0,
+   "tokens": 3000000
+  }
+ ]
+}

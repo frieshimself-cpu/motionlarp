@@ -8,7 +8,7 @@
 //   --from N           first seed (default 1)
 //   --jobs N           worker processes (default: CPU cores, at most 8)
 //   --core             leave out the two profiles a healthy server never meets (ghost, crash)
-//   --profile NAME     one profile for every seed: instant | calm | flaky | outage | partial | ghost | crash
+//   --profile NAME     one profile for every seed: instant | calm | flaky | outage | partial | ghost | crash | slowread
 //   --no-shrink        do not shrink the violations found
 //   --shrink-budget N  runs spent shrinking one violation (default 500)
 //   --seed S           run one seed and print its whole transcript (same steps / --core / --profile as the batch)
@@ -28,7 +28,9 @@
 //
 // Profiles: instant (every answer comes at once), calm (no failures, only timing), flaky (failures and short runs
 // of them, unknown buy outcomes), outage (long runs of failures and RPC outages), partial (sells paid only in
-// part), ghost (sells reported "outcome unknown", landed or not), crash (the process killed with trades in flight).
+// part), ghost (sells reported "outcome unknown", landed or not), crash (the process killed with trades in flight),
+// slowread (buys handed back with the quote's coin count because the reads were slow; the exact count follows, or
+// never arrives; only with --profile slowread, so the seeds of the default mix stay what they were).
 //
 // Files: scenario.ts (what happens, from a seed), market.ts (the fake chain), run.ts (drives the real Engine and
 // Store and checks the invariants), shrink.ts (makes a failing scenario small), sim.ts (virtual clock, random
@@ -65,6 +67,7 @@ export const INVARIANTS: Record<string, [string, string]> = {
   M2: ['2 money', 'proceedsLamports equals the sum of the sell fills, at every moment'],
   M3: ['2 money', 'every fill is the trade that happened on the market, tokens and SOL; every sell that happened has a fill'],
   M4: ['2 money', 'profit shown (closed positions, the profit summary) equals the wallet\'s SOL change'],
+  M5: ['2 money', 'a real fill ends up booked at the SOL the chain says, not at its quote (flagged in hand-written cases; random runs count it under "estimate-kept")'],
   DF1: ['3 once', 'a timed step, a stop loss level and the dead-coin rule sell at most once per position, across restarts'],
   Q: ['4 the end', 'at quiescence nothing is left opening or in flight, every step that came due has fired, and every position whose rules call for a full exit is closed'],
   SN1: ['4 the end', 'Sell now that answers ok has closed the position, or timed steps are selling the rest'],
@@ -84,6 +87,7 @@ export const INVARIANTS: Record<string, [string, string]> = {
   FE2: ['7 feed', 'every sell has exactly one feed line, with the booked numbers; no line for a sell that did not happen'],
   FE3: ['7 feed', 'every skipped copy has its feed line with the reason'],
   FE4: ['7 feed', 'every failing sell or buy has a feed line'],
+  FE5: ['7 feed', 'a sell that keeps failing has one feed line (one more when it turns into the slow, endless kind), not one per retry'],
   F1: ['fees', 'buys and sells carry the copy\'s own fees, slippage and the user\'s platform fee, also after the copy was paused, edited or deleted'],
   R1: ['retries', 'a retried sell is checked (simulated) before it is sent'],
   X1: ['real or test', 'a position is real exactly when its buy was; a real position is sold for real (also with the Live switch off), a test one on paper; a buy of unknown outcome stays "opening", a failed one is marked failed'],
@@ -218,7 +222,7 @@ function printTranscript(r: RunResult): void {
   console.log('');
   if (!r.violations.length) console.log('no violation');
   for (const v of r.violations) console.log(`VIOLATION ${v.sig}${v.first ? ' (first)' : ''} at step ${v.step}, +${(v.t / 1000).toFixed(3)}s, seen ${v.count}×: ${v.message}`);
-  if (Object.keys(r.notes).length) console.log(`documented outcomes: ${json(r.notes)}`);
+  if (Object.keys(r.notes).length) console.log(`outcomes counted, not flagged: ${json(r.notes)}`);
   console.log(`stats: ${json(r.stats)}`);
 }
 
@@ -266,9 +270,10 @@ async function main(): Promise<void> {
       const expected = (sig: string) => (sc.expect ?? []).some((e) => sig.startsWith(e));
       const hit = found.filter(expected);
       const shows = hit.length > 0;
-      if (shows) still++;
-      console.log(`\n${shows ? 'STILL BROKEN ' : 'not shown    '} ${file}`);
+      if (shows && !sc.documented) still++;
+      console.log(`\n${shows ? (sc.documented ? 'AS DOCUMENTED' : 'STILL BROKEN ') : 'not shown    '} ${file}`);
       console.log(`    ${sc.about}`);
+      if (sc.documented) console.log(`    documented: ${sc.documented}`);
       for (const v of r.violations) console.log(`    ${expected(v.sig) ? '✗' : '·'} ${v.sig}: ${v.message}`);
       if (!r.violations.length) console.log('    no violation');
       if (o.verbose) for (const l of r.transcript) console.log(`      ${l}`);
@@ -399,11 +404,21 @@ async function main(): Promise<void> {
       say('');
     }
   };
-  show(core, 'VIOLATIONS (profiles: instant, calm, flaky, outage, partial)');
+  show(core, 'VIOLATIONS (profiles: instant, calm, flaky, outage, partial, slowread)');
   show(rare, 'ONLY WITH A SELL OF UNKNOWN OUTCOME THAT HAD LANDED (ghost) OR A CRASH (crash)');
   if (Object.keys(agg.notes).length) {
-    say('documented outcomes (not counted as violations):');
-    for (const [k, n] of Object.entries(agg.notes).sort((a, b) => b[1] - a[1])) say(`    ${n}×  ${k}   (seeds ${agg.noteSeeds[k]!.slice(0, 5).join(', ')})`);
+    const notes = Object.entries(agg.notes).sort((a, b) => b[1] - a[1]);
+    const line = ([k, n]: [string, number]) => say(`    ${n}×  ${k}   (seeds ${agg.noteSeeds[k]!.slice(0, 5).join(', ')})`);
+    const undocumented = notes.filter(([k]) => k.startsWith('estimate-kept:'));
+    const documented = notes.filter(([k]) => !k.startsWith('estimate-kept:'));
+    if (undocumented.length) {
+      say('counted, not flagged (not documented: a real trade stays booked at its quote, History and the profit with it; see cases/14):');
+      undocumented.forEach(line);
+    }
+    if (documented.length) {
+      say('documented outcomes (not counted as violations):');
+      documented.forEach(line);
+    }
     say('');
   }
   const failedCodes = new Set(sigs.map((s) => s.sig.split(':')[0]!));

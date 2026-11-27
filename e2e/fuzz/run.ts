@@ -94,6 +94,13 @@ interface Track {
   failed: Map<string, number>;
   proceedsWriter: string;
   zeroBookedPaper: Set<number>;
+  /** Error lines in the feed per order since this position last sold anything (one per failing sell, not one per retry). */
+  errorLines: Map<string, number>;
+  /** The buy was handed back with the quote's coin count: what the quote said, what the wallet received, and whether
+   *  the exact count has reached the engine since (it may never: the read can fail, the server can restart). */
+  quotedBuy?: { quote: bigint; real: bigint; refined: boolean };
+  /** Closed on a quote's coin count and opened again when the exact count showed more (the engine sells the rest). */
+  reopened?: boolean;
 }
 
 const START = 1_800_000_000_000;
@@ -160,6 +167,7 @@ class Run {
   private cutOff = false;
   private readonly orphanSeen = new Set<string>();
   private readonly proceedsOff = new Set<number>();
+  private readonly quotedFillSeen = new Set<number>();
   /** Coins the user held before the site traded (hand-written scenarios): `${owner}|${mint}` → tokens. */
   private readonly own = new Map<string, bigint>();
   private crashed: string | undefined;
@@ -213,7 +221,12 @@ class Run {
       market.hooks = {
         buyAsk: (c) => this.buyAsk(c), buyDone: (c) => this.buyDone(c), sellAsk: (c) => this.sellAsk(c), sellLanded: (c) => this.sellLanded(c), sellDone: (c) => this.sellDone(c), sellSettled: (c, final) => this.sellSettled(c, final),
         reading: (ctx, d) => { const tr = ctx && ctx.gen === this.gen ? this.pos.get(ctx.positionId) : undefined; if (tr) tr.reading = Math.max(0, tr.reading + d); },
-        refined: (c) => this.line(`market ${c.kind}#${c.id} exact SOL ${c.refined === 'null' ? 'could not be read' : `is ${c.exact}`}${c.refineSeen ? '' : ' (nobody is listening any more)'}`),
+        refined: (c) => {
+          const q = c.kind === 'buy' && c.quotedTokens !== undefined;
+          this.line(`market ${c.kind}#${c.id} exact SOL ${c.refined === 'null' ? 'could not be read' : `is ${c.exact}`}${q && c.refined !== 'null' ? `, exact coins ${c.tokens} (the quote said ${(c as BuyCall).quotedTokens})` : ''}${c.refineSeen ? '' : ' (nobody is listening any more)'}`);
+          const tr = q && c.pid !== undefined ? this.pos.get(c.pid) : undefined;
+          if (tr?.quotedBuy && c.refined === 'exact' && c.refineSeen) tr.quotedBuy.refined = true;
+        },
         problem: (code, kind, message) => this.problem(code, kind, message),
       };
       sc.mints.forEach((perSol, i) => {
@@ -254,6 +267,7 @@ class Run {
         this.step = i;
         const s = sc.steps[i]!;
         await sim.advance(s.dt);
+        await this.keepFresh();
         await this.perform(s.act);
         await this.tick();
         this.checkStep(false);
@@ -288,6 +302,17 @@ class Run {
     };
   }
 
+  /** src/server.ts renews the SOL balance of every wallet that may buy every 3 s, where the engine offers that
+   *  (keepBalancesFresh): done here before a step when 3 s have passed, so a buy sees what the server's would. */
+  private lastFresh = -Infinity;
+  private async keepFresh(): Promise<void> {
+    const e = this.engine as unknown as { keepBalancesFresh?: () => Promise<void> };
+    if (typeof e.keepBalancesFresh !== 'function' || this.sim.now - this.lastFresh < 3_000) return;
+    this.lastFresh = this.sim.now;
+    void e.keepBalancesFresh().catch((err) => this.problem('E1', 'keep-balances-fresh-rejected', String(err)));
+    await this.sim.settle();
+  }
+
   private startEngine(): void {
     const { sc, sim, store } = this;
     this.gen++;
@@ -301,7 +326,7 @@ class Run {
       ...(sc.retry === 'fast' ? { fastRetryMs: [0, 100, 100, 200, 200, 400], slowRetryMs: 2_000 } : {}),
     });
     this.instrument(this.engine, gen);
-    for (const t of this.pos.values()) { t.bagActive.clear(); t.invoked.clear(); t.queueFlying = 0; t.queueActive = 0; t.reading = 0; t.fullExitSold.clear(); t.flying.clear(); t.failed.clear(); t.overAsk.clear(); }
+    for (const t of this.pos.values()) { t.bagActive.clear(); t.invoked.clear(); t.queueFlying = 0; t.queueActive = 0; t.reading = 0; t.fullExitSold.clear(); t.flying.clear(); t.failed.clear(); t.overAsk.clear(); t.errorLines.clear(); }
     // src/server.ts: restore() 3 s after the start, then restore() + reconcile() every 30 s.
     const epoch = ++this.safetyEpoch;
     const engine = this.engine;
@@ -377,7 +402,7 @@ class Run {
       this.pos.set(id, {
         pid: id, userId: p.userId, copyId: p.copyId, mint: p.mint, leader: p.leader, sell: p.sell, leaderSig: p.leaderSig, createdAt: this.sim.now, recovered: false,
         mirrorDue: [], stopDue: new Set(), sellNowOk: false, gaveUp: new Set(), success: new Map(), overAsk: new Map(), bagActive: new Map(), invoked: new Map(), queueFlying: 0, queueActive: 0, reading: 0, fullExitSold: new Map(), manualPartial: false, bagFailedAt: -1,
-        flying: new Map(), failed: new Map(), proceedsWriter: '', zeroBookedPaper: new Set(),
+        flying: new Map(), failed: new Map(), proceedsWriter: '', zeroBookedPaper: new Set(), errorLines: new Map(),
       });
       this.inserted.push(id);
       this.dirty.add(id);
@@ -389,12 +414,15 @@ class Run {
       const ctx = als.getStore();
       const tr = this.pos.get(id);
       const who = this.lastFillUpdate === this.storeOps ? 'refine' : ctx ? `${ctx.kind}:${ctx.order ? ctx.order.reason : 'buy'}` : 'engine';
-      if (before && patch.tokensHeld !== undefined && before.status === 'open' && patch.tokensHeld > before.tokensHeld) {
+      // (the one exception: the exact coin count of a buy that was handed back with its quote's count)
+      const buyCorrection = patch.tokensBought !== undefined && (ctx?.kind === 'buy' || !ctx);
+      if (before && patch.tokensHeld !== undefined && before.status === 'open' && patch.tokensHeld > before.tokensHeld && !buyCorrection) {
         this.problem('T3', `books-grew@${who}`, `p${id}: tokensHeld written up from ${before.tokensHeld} to ${patch.tokensHeld} by ${who} ${orderText(ctx?.order)} (a sell can only lower it)`);
       }
       if (before && patch.status === 'open' && before.status === 'opening' && !ctx && tr) tr.recovered = true; // restore()
       if (tr && patch.proceedsLamports !== undefined && patch.proceedsLamports !== before?.proceedsLamports) tr.proceedsWriter = who;
       if (before && patch.status === 'closed' && before.status !== 'closed') this.closedCount++;
+      if (before && patch.status === 'open' && before.status === 'closed' && tr) { tr.reopened = true; this.note('position-opened-again:the-buy-received-more-than-its-quote-said'); }
       orig.updatePosition(id, patch);
       this.storeOps++;
       this.dirty.add(id);
@@ -420,6 +448,7 @@ class Run {
       this.storeOps++;
       this.lastFill = { op: this.storeOps, pid: f.positionId, userId: f.userId, side: f.side, tokens: f.tokens, lamports: f.lamports };
       this.dirty.add(f.positionId);
+      if (f.side === 'sell' && f.error === null) this.pos.get(f.positionId)?.errorLines.clear(); // a sale: a new failing spell may say so again
       this.line(`store fill p${f.positionId} ${f.side}/${f.reason} tokens ${f.tokens} lamports ${f.lamports}${f.error ? ` ERROR ${f.error}` : ''} sig ${f.signature ?? '-'}`);
       // Self-test: faults planted by the harness (never in a normal run).
       const sab = this.sc.sabotage;
@@ -441,6 +470,17 @@ class Run {
       this.lastFillUpdate = this.storeOps;
       this.line(`store fill #${fillId} lamports → ${lam} (exact)`);
     };
+    // (the same booking under its newer name, where the store has it: the exact figure, or "nothing exact to be had")
+    const st = store as unknown as { setFillExact?: (fillId: number, lam: bigint | null, ...more: unknown[]) => void };
+    if (typeof st.setFillExact === 'function') {
+      const setFillExact = st.setFillExact.bind(store);
+      st.setFillExact = (fillId, lam, ...more) => {
+        setFillExact(fillId, lam, ...more);
+        this.storeOps++;
+        if (lam !== null) this.lastFillUpdate = this.storeOps;
+        this.line(lam === null ? `store fill #${fillId} keeps its figure (nothing exact to be read)` : `store fill #${fillId} lamports → ${lam} (exact)${more[0] !== undefined ? `, tokens → ${String(more[0])}` : ''}`);
+      };
+    }
     store.addEvent = (e) => {
       if ((this.sc.sabotage === 'mute-sells' && e.kind === 'sell') || (this.sc.sabotage === 'mute-skips' && e.kind === 'skip')) return;
       orig.addEvent(e);
@@ -450,6 +490,17 @@ class Run {
       this.line(`feed ${e.kind}: ${e.message}`);
       if (e.kind === 'sell' || e.kind === 'buy') this.checkTradeLine(rec);
       if (e.kind === 'error' && /^Gave up/.test(e.message) && rec.ctx?.order) this.pos.get(rec.ctx.positionId)?.gaveUp.add(okey(rec.ctx.order));
+      // The engine's own rule: "one feed line per failing sell, not one per retry; one more when it turns into the
+      // slow, endless kind". (Sell now pressed by the user answers every press: those lines are the user's own.)
+      if (e.kind === 'error' && rec.ctx?.order && rec.ctx.gen === this.gen) {
+        const o = rec.ctx.order;
+        const tr = this.pos.get(rec.ctx.positionId);
+        if (tr && !(o.reason === 'manual' && !o.rest)) {
+          const n = (tr.errorLines.get(okey(o)) ?? 0) + 1;
+          tr.errorLines.set(okey(o), n);
+          if (n === 4) this.problem('FE5', `failure-line-repeated:${orderKind(rec.ctx, o)}${o.rest ? '-rest' : ''}`, `p${tr.pid}: ${orderText(o)} has written ${n} failure lines with no sale in between (it is retried without anyone pressing anything): "${e.message}"`);
+        }
+      }
     };
   }
 
@@ -487,8 +538,9 @@ class Run {
     if (!tr.invoked.has(okey(order))) tr.invoked.set(okey(order), this.feed.length);
     // (a ":rest" order is the follow-up of a full exit that left coins to other sells on their way, an ":owed" one a
     // full exit written down in the database and taken up again after a restart: both documented in the engine)
+    // (":exact": what a buy turned out to have received beyond its quote's count, sold after the position was closed)
     const tag = (order.tag ?? '').replace(/(:rest|:owed)+$/, '');
-    if (order.reason === 'mirror' && tag !== 'reconcile') {
+    if (order.reason === 'mirror' && tag !== 'reconcile' && !/:exact(:rest|:owed)*$/.test(order.tag ?? '')) {
       const due = tr.mirrorDue.find((d) => d.sig === tag);
       if (!due) this.problem('MI1', 'mirror-order-nobody-asked-for', `p${pid}: ${orderText(order)}`);
       else if (tag !== order.tag) { if (due.percent < 100) this.problem('MI1', 'rest-order-after-a-partial-rule', `p${pid}: ${orderText(order)} follows a rule that called for ${due.percent}%`); }
@@ -542,8 +594,9 @@ class Run {
 
   private buyDone(c: BuyCall): void {
     const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
-    this.line(`exec buy#${c.id} p${c.pid ?? '?'} ${c.severed ? `answer lost (the engine is gone)${c.landedAt !== undefined ? ' — it DID land' : c.sentAt === undefined ? ' — never sent' : ''}` : c.ok ? `ok: ${c.tokens} tokens, est ${c.est}${c.live ? `, exact ${c.exact}` : ''}` : `${c.uncertain ? 'OUTCOME UNKNOWN' : 'FAILED'} ${c.error}${c.uncertain && c.landedAt !== undefined ? '  [it DID land]' : ''}`}`);
+    this.line(`exec buy#${c.id} p${c.pid ?? '?'} ${c.severed ? `answer lost (the engine is gone)${c.landedAt !== undefined ? ' — it DID land' : c.sentAt === undefined ? ' — never sent' : ''}` : c.ok ? `ok: ${c.quotedTokens ?? c.tokens} tokens${c.quotedTokens !== undefined ? ` (the QUOTE's count: the reads were slow; the wallet received ${c.tokens})` : ''}, est ${c.est}${c.live ? `, exact ${c.exact}` : ''}` : `${c.uncertain ? 'OUTCOME UNKNOWN' : 'FAILED'} ${c.error}${c.uncertain && c.landedAt !== undefined ? '  [it DID land]' : ''}`}`);
     if (!tr) return;
+    if (c.ok && !c.severed && c.quotedTokens !== undefined && c.tokens !== undefined) tr.quotedBuy = { quote: c.quotedTokens, real: c.tokens, refined: false };
     // (in the next microtask: the engine's own bookkeeping ends when its await returns, not before)
     if (c.gen === this.gen) queueMicrotask(() => { tr.queueFlying = Math.max(0, tr.queueFlying - 1); });
     if (c.severed) return;
@@ -599,13 +652,18 @@ class Run {
       // Where the engine cannot know what a sell that is out has really done (the market paid only part of it, its
       // outcome is unknown, a crash) the documented rule is the reference: the position's coins less everything
       // that is out, the wallet only as a cap.
-      if (live && (this.sc.faults.partial > 0 || this.sc.faults.ghost > 0 || this.blind)) {
+      // The same where the books carry a quote's coin count (a buy handed back before its exact count could be read).
+      if (live && (this.sc.faults.partial > 0 || this.sc.faults.ghost > 0 || this.blind || tr.quotedBuy)) {
         const own = p.tokensHeld > others ? p.tokensHeld - others : 0n;
         free = read.value < own ? read.value : own;
       }
       expect = portion(free, order.percent);
       rule = `${Number(order.percent.toFixed(4))}% of what is held (${held}${live ? `: wallet ${read.value}, books ${p.tokensHeld}` : ''}) less what other sells still have on their way (${onTheWay}${others !== onTheWay ? `; another ${others - onTheWay} had already left the wallet when it was read, the engine has not been told yet` : ''})`;
     }
+    // The last step of a "% of the bag" ladder: the README says "whatever is left in the wallet"; the engine may
+    // instead leave coins that are clearly not this position's (the wallet holds over 2 % more than the books) and
+    // sell the books' coins only. Either is taken here; what it means for coins left behind is judged by T5 and Q.
+    if (ctx.kind === 'bag' && order.everything && live && c.asked !== expect && read.value > p.tokensHeld + p.tokensHeld / 50n && c.asked === p.tokensHeld) expect = c.asked;
     if (c.asked !== expect) {
       // A sell whose outcome is unknown must be settled before anything else is sold (its coins stay reserved): an
       // ask that only fits when that sell is ignored has its own name.
@@ -623,7 +681,10 @@ class Run {
     if (current) {
       // LIVE: never more than the wallet holds for long.
       const k = `${ctx.kind}:${okey(order)}`;
-      if (c.overAsk) {
+      if (c.overAsk && tr.quotedBuy && !tr.quotedBuy.refined) {
+        // (the books carry more coins than the buy received until its exact count arrives: documented)
+        this.note('asked-for-more-than-the-wallet-holds:the-books-carry-the-quote\'s-coin-count');
+      } else if (c.overAsk) {
         const n = (tr.overAsk.get(k) ?? 0) + 1;
         tr.overAsk.set(k, n);
         if (n >= 3) this.problem('OA1', `over-ask-not-corrected:${kind}`, `p${p.id} ${orderText(order)} asked ${c.asked} with ${c.walletAtAsk} in the wallet, ${n} times in a row`);
@@ -657,6 +718,8 @@ class Run {
     const ctx = c.ctx;
     const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
     this.line(`exec sell#${c.id} p${c.pid ?? '?'} read again from its own transaction: ${c.landedAt !== undefined ? `it landed (sold ${c.sold} for ${c.exact})` : c.chainFailed ? 'it failed' : final ? 'never found: it did not land' : 'not found yet'}`);
+    // (a sell the engine was already told about is read again only for its exact figures: nothing is settled)
+    if (!c.uncertain) return;
     if (!tr || !ctx || c.gen !== this.gen || !final) return;
     const mine = tr.flying.get(ctx.inv);
     // Landed: the engine books it now, its coins reserved until then. Not landed: the reservation ends with the answer.
@@ -760,7 +823,10 @@ class Run {
     if (p.tokensHeld < 0n) this.problem('T1', 'held-negative', `p${pid} tokensHeld ${p.tokensHeld}`);
     if (p.tokensHeld > p.tokensBought) this.problem('T1', 'held-above-bought', `p${pid} holds ${p.tokensHeld} of ${p.tokensBought} bought`);
     if ((p.status === 'closed' || p.status === 'failed') && p.tokensHeld !== 0n) this.problem('T2', `${p.status}-holding-tokens`, `p${pid} is ${p.status} with tokensHeld ${p.tokensHeld}`);
-    if (p.status === 'open' && p.tokensHeld === 0n) this.problem('T2', 'open-holding-nothing', `p${pid} is open with tokensHeld 0 (no rule will ever close it, and the coin cannot be bought again)`);
+    // (while one of its sells is still out, that sell's booking, or the last step that is on duty, closes it)
+    let under = tr.queueActive + tr.reading + tr.flying.size;
+    for (const n of tr.bagActive.values()) under += n;
+    if (p.status === 'open' && p.tokensHeld === 0n && under === 0) this.problem('T2', 'open-holding-nothing', `p${pid} is open with tokensHeld 0 and nothing of it is under way (no rule will ever close it, and the coin cannot be bought again)`);
     if (p.status === 'opening' || p.status === 'failed') return;
     const fills = this.store.fills(pid).filter((f) => f.error === null);
     const buys = fills.filter((f) => f.side === 'buy');
@@ -768,7 +834,12 @@ class Run {
     if (buys.length > 1) this.problem('M1', 'two-buy-fills', `p${pid} has ${buys.length} buy fills`);
     if (buys.length === 1) {
       if (p.costLamports !== buys[0]!.lamports) this.problem('M1', 'cost!=buy-fill', `p${pid} costLamports ${p.costLamports}, its buy fill says ${buys[0]!.lamports}`);
-      if (p.tokensBought !== buys[0]!.tokens) this.problem('M1', 'bought!=buy-fill', `p${pid} tokensBought ${p.tokensBought}, its buy fill says ${buys[0]!.tokens}`);
+      if (p.tokensBought !== buys[0]!.tokens) {
+        // After the exact count of a quoted buy arrived, the position says the exact count and the buy's own row
+        // (History) still the quote's: counted, not flagged (see the report's notes).
+        if (tr.quotedBuy && buys[0]!.tokens === tr.quotedBuy.quote) { if (!this.quotedFillSeen.has(pid)) { this.quotedFillSeen.add(pid); this.note('buy-row-keeps-the-quote\'s-coin-count-after-the-exact-count-arrived'); } }
+        else this.problem('M1', 'bought!=buy-fill', `p${pid} tokensBought ${p.tokensBought}, its buy fill says ${buys[0]!.tokens}`);
+      }
     } else if (!tr.recovered) this.problem('M1', 'open-without-a-buy-fill', `p${pid} is ${p.status} and has no buy fill`);
     const sum = sells.reduce((a, f) => a + f.lamports, 0n);
     // (reported once per position, with the booking that broke it: the gap stays for good)
@@ -785,7 +856,12 @@ class Run {
     const seen = new Map<string, number>();
     for (const p of active) {
       const k = `${p.userId}|${p.mint}`;
-      if (seen.has(k)) this.problem('O1', 'two-positions-one-coin', `user ${p.userId} has p${seen.get(k)} and p${p.id} active in ${short(p.mint)}`);
+      if (seen.has(k)) {
+        // A position opened again for the coins beyond its quote's count, beside a newer one of the same coin: the
+        // engine's own doing, for the moment it takes to sell them. Counted, not flagged.
+        if (this.pos.get(p.id)?.reopened || this.pos.get(seen.get(k)!)?.reopened) this.note('two-positions-in-one-coin-for-a-moment:one-was-opened-again-for-its-exact-count');
+        else this.problem('O1', 'two-positions-one-coin', `user ${p.userId} has p${seen.get(k)} and p${p.id} active in ${short(p.mint)}`);
+      }
       seen.set(k, p.id);
       // Stop loss levels the last price check passed (the engine works from the same stored numbers).
       if (p.status === 'open' && p.refValueLamports !== null && p.costLamports > 0n) {
@@ -810,15 +886,28 @@ class Run {
         const tr = p ? this.pos.get(p.id) : undefined;
         if (tr && (tr.reading > 0 || tr.queueActive > 0 || tr.flying.size > 0) && !final) continue;
         if (!p || p.mode !== 'live') {
+          // (coins beyond a quote's count: the engine learns of them when the buy's exact count arrives, and sells them
+          // then; whether it did is judged at the end)
+          if (!final && [...this.pos.values()].some((t) => t.userId === uid && t.mint === mint && t.quotedBuy && !t.quotedBuy.refined)) continue;
           if (wallet > 0n && !this.orphanSeen.has(`${owner}|${mint}|${wallet}`)) {
             this.orphanSeen.add(`${owner}|${mint}|${wallet}`);
-            this.problem('T5', 'coins-in-wallet-no-position', `u${this.userIds.indexOf(uid) + 1}'s wallet holds ${wallet} of ${short(mint)} and no real position is open for it`);
+            this.problem('T5', `coins-in-wallet-no-position${this.quotedBefore(uid, mint)}`, `u${this.userIds.indexOf(uid) + 1}'s wallet holds ${wallet} of ${short(mint)} and no real position is open for it`);
           }
+        } else if ([...this.pos.values()].some((t) => t.userId === uid && t.mint === mint && t.quotedBuy && !t.quotedBuy.refined)) {
+          // The books carry the quote's coin count until the exact one arrives (the executor says so): no comparison
+          // yet. (Also for a newer position of the coin: the wallet may still hold an earlier one's uncounted coins.)
         } else if (p.status === 'open' && p.tokensHeld !== wallet) {
           this.problem('T5', p.tokensHeld > wallet ? 'books-above-wallet' : 'books-below-wallet', `p${p.id} books ${p.tokensHeld}, wallet ${wallet} (nothing in flight)`);
         }
       }
     }
+  }
+
+  /** "(quoted-buy)" when the last position of this user in this coin was bought with the quote's coin count. */
+  private quotedBefore(uid: number, mint: string): string {
+    let last: Track | undefined;
+    for (const tr of this.pos.values()) if (tr.userId === uid && tr.mint === mint) last = tr;
+    return last?.quotedBuy ? '(quoted-buy)' : '';
   }
 
   // ── the clock ─────────────────────────────────────────────────────────
@@ -985,13 +1074,17 @@ class Run {
         this.note('sell-now-sold-only-part:the-user-is-told-to-press-again');
       } else if (r.ok) {
         if (tr) tr.sellNowOk = true;
-        // "ok" with the position still open is right only while timed steps have the rest out (their tokens are
-        // reserved: Sell now takes what is free).
-        let out = 0n;
-        for (const f of tr?.flying.values() ?? []) out += f.tokens;
-        let running = 0;
-        for (const n of tr?.bagActive.values() ?? []) running += n;
-        if (now && now.status !== 'closed' && now.tokensHeld > out && running === 0 && this.sc.faults.partial === 0 && !this.blind && (tr?.bagFailedAt ?? -1) < pressedAt) this.problem('SN1', 'sell-now-said-ok-position-still-open', `p${p.id}: Sell now answered ok and the position is ${now.status} holding ${now.tokensHeld} (other sells have ${out} out, no timed step is running)`);
+        // "ok" with the position still open is right only while other sells have the rest out (their tokens are
+        // reserved: Sell now takes what is free) or the sell of what is left is under way. Judged once the engine has
+        // had its turn: that follow-up may be starting right now.
+        this.post.push(() => {
+          const now = this.store.position(p.id);
+          let out = 0n;
+          for (const f of tr?.flying.values() ?? []) out += f.tokens;
+          let running = 0;
+          for (const n of tr?.bagActive.values() ?? []) running += n;
+          if (now && now.status !== 'closed' && now.tokensHeld > out && running === 0 && (tr?.queueActive ?? 0) === 0 && (tr?.reading ?? 0) === 0 && this.sc.faults.partial === 0 && !this.blind && (tr?.bagFailedAt ?? -1) < pressedAt) this.problem('SN1', 'sell-now-said-ok-position-still-open', `p${p.id}: Sell now answered ok and the position is ${now.status} holding ${now.tokensHeld} (other sells have ${out} out, no timed step is running, nothing else is under way)`);
+        });
       } else if (p.status !== 'open') {
         if (r.error !== 'no open position with that id') this.problem('SN1', 'sell-now-on-a-non-open-position', `p${p.id} was ${p.status}; Sell now answered "${r.error}"`);
       } else if (r.error !== 'position is not open' && now?.status === 'open') {
@@ -1104,6 +1197,19 @@ class Run {
       this.cutOff = true;
       this.note('restart-cut-off-after-100s');
     }
+    // src/server.ts: the exact SOL of the last trades is read for up to 5 s more (where the engine has refined()).
+    const withRefined = old as unknown as { refined?: () => Promise<void> };
+    if (typeof withRefined.refined === 'function') {
+      let read = false;
+      void withRefined.refined().then(() => { read = true; }, () => { read = true; });
+      await sim.settle();
+      const until = sim.now + 5_000;
+      while (!read) {
+        const at = sim.nextAt();
+        if (at === null || at > until) { await sim.advance(Math.max(0, until - sim.now)); break; }
+        await sim.advance(at - sim.now);
+      }
+    }
     // The old process is gone: whatever it was still waiting for (the exact SOL of a fresh fill) never arrives.
     this.exec.alive = false;
     await sim.advance(downMs);
@@ -1192,9 +1298,15 @@ class Run {
         // read from the buy's own transaction afterwards), the estimate otherwise (the real executor documents both).
         const exactKnown = !op.live || (op.refined === 'exact' && op.refineSeen === true) || op.settled === true;
         const known = exactKnown ? op.exact! : op.est!;
-        if (op.live && !exactKnown && op.exact !== op.est) this.note(op.refined === 'null' ? 'estimate-kept:the-exact-figure-could-not-be-read' : 'estimate-kept:the-server-restarted-before-the-exact-figure-arrived');
+        if (op.live && !exactKnown && op.exact !== op.est) {
+          // History and the profit then keep the quote for this trade for good: nothing reads the transaction again.
+          const why = op.refined === 'null' ? 'the-exact-figure-could-not-be-read' : 'the-server-restarted-before-the-exact-figure-arrived';
+          this.note(`estimate-kept:${why}`);
+          if (this.sc.strictExact) this.problem('M5', `estimate-kept:${why}`, `p${p.id}: the ${op.kind} ${f.signature} stays booked at its quote, ${f.lamports} lamports; the chain says ${op.exact} (${op.exact! - f.lamports >= 0n ? '+' : ''}${op.exact! - f.lamports}). Nothing reads the transaction again: History and the profit keep the quote`);
+        }
         if (op.kind === 'buy') {
-          if (f.tokens !== op.tokens) this.problem('M3', 'buy-fill-tokens', `p${p.id}: buy fill says ${f.tokens} tokens, the wallet received ${op.tokens}`);
+          // (a buy handed back with the quote's coin count keeps it in its own row: counted in checkBooks)
+          if (f.tokens !== op.tokens && !(op.quotedTokens !== undefined && f.tokens === op.quotedTokens)) this.problem('M3', 'buy-fill-tokens', `p${p.id}: buy fill says ${f.tokens} tokens, the wallet received ${op.tokens}`);
           if (f.lamports !== known) this.problem('M3', 'buy-fill-sol', `p${p.id}: buy booked at ${f.lamports} lamports, the wallet paid ${known}${exactKnown ? '' : ' (the estimate: the exact figure never reached the engine)'}`);
         } else {
           if (f.tokens !== op.sold) this.problem('M3', 'sell-fill-tokens', `p${p.id}: sell fill says ${f.tokens} tokens, the market sold ${op.sold}`);
@@ -1214,7 +1326,11 @@ class Run {
       }
       if (p.mode === 'live') {
         const soldTokens = fills.filter((f) => f.side === 'sell').reduce((a, f) => a + f.tokens, 0n);
-        if (p.tokensBought - p.tokensHeld !== soldTokens) this.problem('T4', p.tokensBought - p.tokensHeld > soldTokens ? 'books-say-more-sold-than-the-fills' : 'books-say-less-sold-than-the-fills', `p${p.id}: bought ${p.tokensBought}, holds ${p.tokensHeld}, its sell fills add up to ${soldTokens}`);
+        if (p.tokensBought - p.tokensHeld !== soldTokens) {
+          // A buy whose exact coin count never reached the engine keeps the quote's as "bought": counted, not flagged.
+          if (tr.quotedBuy && !tr.quotedBuy.refined) this.note('bought-stays-the-quote\'s-coin-count:the-exact-count-never-arrived');
+          else this.problem('T4', p.tokensBought - p.tokensHeld > soldTokens ? 'books-say-more-sold-than-the-fills' : 'books-say-less-sold-than-the-fills', `p${p.id}: bought ${p.tokensBought}, holds ${p.tokensHeld}, its sell fills add up to ${soldTokens}`);
+        }
       }
       if (p.status !== 'open') continue;
 
@@ -1261,7 +1377,7 @@ class Run {
         const mine = this.own.get(`${owner}|${mint}`) ?? 0n;
         const wallet = market.tokens(owner, mint) > mine ? market.tokens(owner, mint) - mine : 0n;
         const p = store.activePositionOfUser(uid, mint);
-        if (wallet > 0n && (!p || p.mode !== 'live')) this.problem('Q', 'coins-left-in-the-wallet-no-position', `u${this.userIds.indexOf(uid) + 1}'s wallet still holds ${wallet} of ${short(mint)} (worth ${fmtSol(market.value(mint, wallet))} now) and no position is open for it`);
+        if (wallet > 0n && (!p || p.mode !== 'live')) this.problem('Q', `coins-left-in-the-wallet-no-position${this.quotedBefore(uid, mint)}`, `u${this.userIds.indexOf(uid) + 1}'s wallet still holds ${wallet} of ${short(mint)} (worth ${fmtSol(market.value(mint, wallet))} now) and no position is open for it`);
       }
     }
 

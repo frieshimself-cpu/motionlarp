@@ -48,6 +48,9 @@ export interface Faults {
   /** Balance reads take up to this long (0: they answer at once), and may show the wallet as it was when asked. */
   balLag: number;
   refineNull: number;
+  /** Chance that a real buy is handed back with the quote's coin count (the wallet and the transaction could not be
+   *  read within a second of the confirmation); the exact count follows later with the exact SOL (`refine`). */
+  quoted?: number;
 }
 
 export interface OpPlan {
@@ -56,6 +59,9 @@ export interface OpPlan {
   L2: number;
   L3: number;
   part?: number;
+  /** A real buy handed back with the quote's coin count: the wallet really received this many times the quote
+   *  (0.9: a tenth fewer coins than quoted). The exact count follows with the exact SOL, L3 after the answer. */
+  quoted?: number;
   /** Sell: reported "sent, outcome unknown" although it landed. */
   ghost?: boolean;
   /** Reported "sent, outcome unknown"; in truth it landed, or it never did. (A sell: `ghost` means 'landed'.) */
@@ -91,6 +97,8 @@ export interface BuyCall {
   refineSeen?: boolean;
   /** The engine read this buy's own transaction afterwards (settleBuy) and got its exact numbers. */
   settled?: boolean;
+  /** The buy was handed back with this, the quote's coin count, while the wallet received `tokens`. */
+  quotedTokens?: bigint;
 }
 export interface SellCall {
   id: number; kind: 'sell'; gen: number; t0: number; owner: string; mint: string; pid?: number; ctx?: Ctx;
@@ -243,6 +251,7 @@ export class Market {
     if (kind === 'buy') {
       if (r.chance(f.buyFail)) plan.fail = r.pick(['429 Too Many Requests', 'sent but did not land: transaction errored: {"InstructionError":[3,{"Custom":6002}]} (TooMuchSolRequired)', 'sent but did not land: expired before landing']);
       else if (f.buyUnsure > 0 && r.chance(f.buyUnsure)) plan.unsure = r.chance(0.6) ? 'landed' : 'lost';
+      else if ((f.quoted ?? 0) > 0 && r.chance(f.quoted!)) plan.quoted = r.pick([0.7, 0.9, 0.97, 1.03, 1.1, 1.3]);
     } else {
       const left = this.streaks.get(key) ?? 0;
       if (left > 0) {
@@ -339,7 +348,9 @@ export class Market {
         this.after(plan.L1 - signAt, () => {
           if (plan.unsure === 'lost') return this.after(plan.L2, () => deliver({ ok: false, error: UNKNOWN, uncertain: true }));
           if (plan.fail) { call.chainFailed = /errored/.test(plan.fail); return deliver({ ok: false, error: plan.fail }); }
-          const tokens = this.tokensFor(mint, req.lamports);
+          // What the quote said, and what the wallet really receives (the price moved before the buy landed).
+          const quote = this.tokensFor(mint, req.lamports);
+          const tokens = plan.quoted ? (quote * BigInt(Math.round(plan.quoted * 1000))) / 1000n : quote;
           if (tokens <= 0n) { call.chainFailed = true; return deliver({ ok: false, error: 'sent but did not land: transaction errored: zero tokens out' }); }
           const acct = `${owner}|${mint}`;
           const exact = est + (this.hasAccount.has(acct) ? 0n : ATA_RENT);
@@ -352,15 +363,18 @@ export class Market {
           this.bySig.set(call.signature!, call);
           const landedAt = this.sim.now;
           if (plan.unsure === 'landed') return this.after(plan.L2, () => deliver({ ok: false, error: UNKNOWN, uncertain: true }));
-          const refine = new Promise<{ lamports: bigint } | null>((res) => {
+          // As the real executor: when neither the wallet nor the transaction could be read within a second, the buy
+          // is handed back with the quote's coin count and the exact count follows with the exact SOL.
+          if (plan.quoted) call.quotedTokens = quote;
+          const refine = new Promise<{ lamports: bigint; tokens?: bigint } | null>((res) => {
             this.after(plan.L2 + plan.L3 + 1, () => {
               call.refined = plan.refineNull ? 'null' : 'exact';
               call.refineSeen = exec.alive;
               this.hooks.refined(call);
-              if (exec.alive) res(plan.refineNull ? null : { lamports: exact });
+              if (exec.alive) res(plan.refineNull ? null : { lamports: exact, ...(plan.quoted ? { tokens } : {}) });
             });
           });
-          this.after(plan.L2, () => deliver({ ok: true, signature: call.signature!, tokens, lamports: est, simulated: false, feeLamports: fee, confirmedAt: landedAt, refine }));
+          this.after(plan.L2, () => deliver({ ok: true, signature: call.signature!, tokens: plan.quoted ? quote : tokens, lamports: est, simulated: false, feeLamports: fee, confirmedAt: landedAt, refine }));
         });
       });
     });
@@ -373,6 +387,8 @@ export class Market {
     const c = this.signed.get(signature);
     if (!c) return Promise.resolve({ state: 'not_found' });
     if (c.landedAt !== undefined) {
+      // (the exact figures, coins included, have reached the engine from here on)
+      if (!c.settled && c.delivered && c.ok && exec.alive) { c.refined = 'exact'; c.refineSeen = true; this.hooks.refined(c); }
       c.settled = true;
       return Promise.resolve({ state: 'landed', tokens: c.tokens!, lamports: c.exact! });
     }

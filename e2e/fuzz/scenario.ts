@@ -79,6 +79,12 @@ export interface Scenario {
   about?: string;
   /** Hand-written scenario: the violations it shows while the defect exists (e2e/fuzz/cases). */
   expect?: string[];
+  /** Hand-written scenarios: where the product documents this behaviour as intended (the case then shows a
+   *  consequence of a documented rule, not a defect; `--cases` lists it apart). */
+  documented?: string;
+  /** Hand-written scenarios: a real fill that stays booked at its quote (the exact SOL never reached the engine) is
+   *  a violation (M5). Random runs only count these (they would turn every eighth seed red). */
+  strictExact?: boolean;
   /** Self-test only (--selftest): a fault the HARNESS plants around the engine, to prove a check can fail. */
   sabotage?: Sabotage;
 }
@@ -132,7 +138,8 @@ export function genSettings(r: Rng, leader: string, name: string): Record<string
   };
 }
 
-export const PROFILES = ['instant', 'calm', 'flaky', 'outage', 'partial', 'ghost', 'crash'] as const;
+// 'slowread' is not in the default mix (so every earlier seed stays what it was): --profile slowread.
+export const PROFILES = ['instant', 'calm', 'flaky', 'outage', 'partial', 'ghost', 'crash', 'slowread'] as const;
 export type Profile = (typeof PROFILES)[number];
 
 export function faultsFor(profile: Profile, r: Rng): Faults {
@@ -147,6 +154,9 @@ export function faultsFor(profile: Profile, r: Rng): Faults {
     case 'partial': return { ...none, sellFail: 0.1, streak: 0.2, streakMax: 3, slow: 0.05, partial: 0.25, balLag };
     case 'ghost': return { ...none, sellFail: 0.25, streak: 0.2, streakMax: 3, slow: 0.05, ghost: 0.5, balLag };
     case 'crash': return { ...none, buyUnsure: 0.05, sellFail: 0.1, streak: 0.2, streakMax: 3, slow: 0.1, balLag };
+    // Reads are slow right after a buy: it is handed back with the quote's coin count and the exact one follows
+    // (or never arrives). Otherwise a mild market, so what shows is this path's own.
+    case 'slowread': return { ...none, sellFail: 0.08, streak: 0.2, streakMax: 3, slow: 0.05, balLag, refineNull: 0.15, quoted: 0.6 };
   }
 }
 
@@ -239,7 +249,7 @@ export function generate(seed: number, steps: number, opt: GenOptions = {}): Sce
     out.push({ dt: dtOf(), act });
   }
   return {
-    seed, profile, live, overAsk: r.chance(0.5) ? 'strict' : 'clamp', priceMs: r.pick([0, 200, 2_000, 2_000]), retry: r.chance(0.5) ? 'prod' : 'fast',
+    seed, profile, live, overAsk: ((strict: boolean) => (strict && profile !== 'slowread' ? 'strict' : 'clamp'))(r.chance(0.5)) /* (the real executor clamps: with a quote's coin count in the books a strict market would only show its own harshness) */, priceMs: r.pick([0, 200, 2_000, 2_000]), retry: r.chance(0.5) ? 'prod' : 'fast',
     maxSolPerBuy, users, mints, copies, faults: faultsFor(profile, r), steps: out, finale: { dump: r.chance(0.3), leadersExit: r.chance(0.35) },
   };
 }

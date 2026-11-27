@@ -1,0 +1,179 @@
+{
+ "seed": 2927,
+ "profile": "slowread",
+ "live": true,
+ "overAsk": "strict",
+ "priceMs": 0,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "c1",
+    "leader": "2526KSACRprzAPEGYFvrDLP1EFQddZ5m6j4kDPwaNXYB",
+    "enabled": true,
+    "mode": "live",
+    "buySol": 7,
+    "minLeaderBuySol": 0,
+    "slippagePct": 50,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "same"
+     },
+     "timedOf": "left",
+     "timed": [
+      {
+       "afterSec": 1.2,
+       "percent": 100
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 30
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0.08,
+  "streak": 0.2,
+  "streakMax": 3,
+  "slow": 0.05,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 80,
+  "refineNull": 0.15,
+  "quoted": 0.6
+ },
+ "steps": [
+  {
+   "dt": 14000,
+   "act": {
+    "a": "buy",
+    "leader": 1,
+    "mint": 1,
+    "sol": 0.98,
+    "approx": true
+   }
+  },
+  {
+   "dt": 41000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 3000,
+   "act": {
+    "a": "buy",
+    "leader": 1,
+    "mint": 1,
+    "sol": 1.5
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "restart",
+    "kind": "graceful",
+    "downMs": 70000
+   }
+  },
+  {
+   "dt": 160000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 2651,
+    "quoted": 1.3
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "quote": [
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   }
+  ],
+  "bal": []
+ },
+ "about": "Found at commit d445249 by the random runs (slow reads after a buy, shrunk; the first position in it plays no part). A copy whose timed sell sells everything. The second buy comes back with the quote's coin count (7,000,000); the wallet received 9,100,000. An update restarts the server: it waits for the exit in progress, the timed sell sells the 7,000,000 the books know and the position is closed; the engine is stopped and nothing is under way. While the server waits for the last exact figures, the buy's exact count arrives: the position is opened again for the 2,100,000 coins beyond the quote and their sale is started by the stopped engine. The process exits with that sale out. It lands and nobody books it: after the restart the position is open with 2,100,000 coins in the books and none in the wallet, its only rule has fired, so it stays open for good (the coin cannot be copied again until Sell now is pressed), and the 2.1 SOL of that sale (on a 7 SOL buy) are missing from the profit. Same root as case 20: a stopped engine still starts sells, and the shutdown does not wait for them.",
+ "expect": [
+  "M3:sold-but-not-booked:engine-gone",
+  "T5:books-above-wallet",
+  "Q:still-open"
+ ]
+}

@@ -1,0 +1,153 @@
+{
+ "about": "Real trades, nothing fails. A copy that sells the same share when they sell, plus a timed sell of what is left (50 % at +30 s). The buy comes back with the quote's coin count, 1,000,000; the wallet really received 700,000 (the price had moved before our buy landed). They sell 75 % of theirs 0.8 s later: we sell 75 % of the 700,000 in the wallet and the booking corrects the books to what the wallet holds, 175,000. One second later the buy's exact count arrives and the difference (300,000) is taken off the books a second time: the position is OPEN with 0 coins in the books and 175,000 in the wallet. Nothing can close it: timed sells, their sells, the safety net and Sell now all skip a position that holds nothing ('position is not open'). It stays open for good, its +30 s step never fires, the 175,000 coins are never sold, and this user can never copy that coin again ('already holding this coin'). How a buy comes back with the quote's coin count: the real executor waits one second after the confirmation for the wallet's balance or the transaction; when neither can be read in time (a slow or rate-limited RPC, a node one block behind) the position opens with the coins the quote promised, and the exact count follows with the exact SOL up to about four seconds later (src/engine/executor.ts, BUY_READ_MS; engine.ts buy(): 'The buy was handed back with the quote's coin count ... corrected'). ",
+ "expect": [
+  "T2:open-holding-nothing",
+  "Q:timed-step-never-fired"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "ladder",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 100,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "same"
+     },
+     "timedOf": "left",
+     "timed": [
+      {
+       "afterSec": 30,
+       "percent": 50
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 1200,
+   "act": {
+    "a": "sell",
+    "leader": 0,
+    "mint": 0,
+    "share": 0.75
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 30000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "sellNow",
+    "pick": 0
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 1500,
+    "quoted": 0.7
+   }
+  ],
+  "sell": [],
+  "quote": [],
+  "bal": []
+ }
+}

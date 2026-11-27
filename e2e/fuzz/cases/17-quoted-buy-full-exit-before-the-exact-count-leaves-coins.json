@@ -1,0 +1,166 @@
+{
+ "about": "The Scharo preset's exit (40 % of the bag at +2 s, 30 % at +4 s, the rest at +6 s; everything at once when they sell their whole bag). Real trades, nothing fails. The buy comes back with the quote's coin count, 1,000,000; the wallet received 1,100,000 (the price had dropped before our buy landed). They sell out 1 s after our buy: our exit sells the 1,000,000 the books know and closes the position; the exact count arrives 2.5 s later and is ignored (the position is closed). 100,000 coins (9 % of the bag; at 7 SOL a buy, about 0.6 SOL) stay in the wallet with no position: nothing ever sells them. The same with Sell now, a 100 % stop loss, the dead-coin rule or a 100 % timed sell of what is left instead of their exit, and at any time later when the exact count never arrives (the transaction could not be read in six tries, or the server restarted first). Only the last step of a '% of the bag' ladder is immune: it sells whatever the wallet holds. How a buy comes back with the quote's coin count: the real executor waits one second after the confirmation for the wallet's balance or the transaction; when neither can be read in time (a slow or rate-limited RPC, a node one block behind) the position opens with the coins the quote promised, and the exact count follows with the exact SOL up to about four seconds later (src/engine/executor.ts, BUY_READ_MS; engine.ts buy(): 'The buy was handed back with the quote's coin count ... corrected'). ",
+ "expect": [
+  "T5:coins-in-wallet-no-position",
+  "Q:coins-left-in-the-wallet-no-position"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "ladder",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 100,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "exit"
+     },
+     "timedOf": "bag",
+     "timed": [
+      {
+       "afterSec": 2,
+       "percent": 40
+      },
+      {
+       "afterSec": 4,
+       "percent": 30
+      },
+      {
+       "afterSec": 6,
+       "percent": 100
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 1400,
+   "act": {
+    "a": "sell",
+    "leader": 0,
+    "mint": 0,
+    "share": 1
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 3500,
+    "quoted": 1.1
+   }
+  ],
+  "sell": [],
+  "quote": [],
+  "bal": []
+ }
+}

@@ -1,0 +1,310 @@
+{
+ "seed": 1789,
+ "profile": "slowread",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 0,
+ "retry": "fast",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "c1",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "enabled": true,
+    "mode": "live",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 25,
+    "priorityFeeSol": 0.0005,
+    "tipSol": 0.001,
+    "oncePerCoin": true,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "same"
+     },
+     "timedOf": "bag",
+     "timed": [],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 20
+     }
+    }
+   }
+  },
+  {
+   "user": 0,
+   "input": {
+    "name": "c2",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "enabled": true,
+    "mode": "paper",
+    "buySol": 1,
+    "minLeaderBuySol": 1,
+    "slippagePct": 0.5,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": true,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "all"
+     },
+     "timedOf": "bag",
+     "timed": [
+      {
+       "afterSec": 6,
+       "percent": 100
+      },
+      {
+       "afterSec": 0,
+       "percent": 100
+      },
+      {
+       "afterSec": 2,
+       "percent": 40
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 15
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0.08,
+  "streak": 0.2,
+  "streakMax": 3,
+  "slow": 0.05,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 80,
+  "refineNull": 0.15,
+  "quoted": 0.6
+ },
+ "steps": [
+  {
+   "dt": 3000,
+   "act": {
+    "a": "pause",
+    "copy": 0
+   }
+  },
+  {
+   "dt": 39000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 1
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 200,
+    "L2": 379,
+    "L3": 2339,
+    "quoted": 0.97
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "quote": [
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   }
+  ],
+  "bal": []
+ },
+ "about": "Found at commit 58f4054 (after the fix for cases 15-17). Real trades; the market sells what the wallet holds when asked for more, as the real executor does. A '% of the original bag' ladder whose first step is the whole bag: 100 % at +0 s, 40 % at +2 s, the rest at +6 s. The buy comes back with the quote's coin count, 1,000,000; the wallet received 970,000. The first step sells the 970,000 there are; the books still say 30,000. The +2 s step asks for those 30,000 and fails (the wallet is empty). While one of its tries is out, the buy's exact count arrives: the books go to 0, and because a sell is out at that moment the position is not closed. The step then finds nothing left and marks itself done. From here the position is OPEN with 0 coins and nothing under way, and nothing will ever close it: the last step never starts (rules are not looked at for a position that holds nothing), Sell now answers 'position is not open', the safety net skips it. It stays open for good and the user can never copy that coin again ('already holding this coin').",
+ "expect": [
+  "T2:open-holding-nothing",
+  "Q:timed-step-never-fired"
+ ]
+}

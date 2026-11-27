@@ -1,0 +1,124 @@
+{
+ "about": "Listed in docs/testing.md under 'Known, not changed yet'. A copy that sells the same share when they sell, no other exit. Real trades. They sell 75 % of theirs; our sell of 75 % fails once (the RPC is rate limiting) and waits for its retry. An update restarts the server one second later: the retry lives only in memory and is gone (full exits are written down since 0f419c4, partial sells are not). The position keeps its whole bag although their sell was seen; it is sold only when they sell again or sell out.",
+ "expect": [
+  "Q:mirror-partial-sell-never-done"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "strict",
+ "priceMs": 2000,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "ladder",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 100,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "same"
+     },
+     "timedOf": "left",
+     "timed": [],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 49000,
+   "act": {
+    "a": "sell",
+    "leader": 0,
+    "mint": 0,
+    "share": 0.75
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "restart",
+    "kind": "graceful",
+    "downMs": 20000
+   }
+  },
+  {
+   "dt": 39000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 0,
+    "fail": "429 Too Many Requests"
+   }
+  ],
+  "quote": [],
+  "bal": []
+ }
+}

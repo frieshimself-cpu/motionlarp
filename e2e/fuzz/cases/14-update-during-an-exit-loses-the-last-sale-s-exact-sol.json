@@ -1,0 +1,144 @@
+{
+ "about": "A '% of the original bag' ladder 40 % +2 s, 30 % +4 s, the rest +6 s (the Scharo preset's steps). Real trades, nothing fails. An update arrives 2.6 s after the buy. The server does what src/server.ts says: it waits for the exit in progress, the last step sells and is booked with the SOL of its quote, and the process exits at once. The exact SOL of that last sale (read from the transaction: here 1.5 s later; the real executor tries for up to 4 s) arrives when nobody is listening, and nothing reads it again after the restart. The closed position keeps the quote for good: History and the profit show the quote, not what the wallet received (here 0.002 SOL of account rent is missing; on a moving coin it is the whole difference between the quote and the fill). An update during an exit always ends this way, because the server restarts the moment the last sale is confirmed. The same happens to any trade whose exact figure could not be read in its six tries.",
+ "expect": [
+  "M5:estimate-kept"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "ladder",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 100,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": false,
+      "mode": "exit"
+     },
+     "timedOf": "bag",
+     "timed": [
+      {
+       "afterSec": 2,
+       "percent": 40
+      },
+      {
+       "afterSec": 4,
+       "percent": 30
+      },
+      {
+       "afterSec": 6,
+       "percent": 100
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 2400,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 600,
+   "act": {
+    "a": "restart",
+    "kind": "graceful",
+    "downMs": 20000
+   }
+  },
+  {
+   "dt": 5000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 1500
+   },
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 1500
+   },
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 1500
+   }
+  ],
+  "quote": [],
+  "bal": []
+ },
+ "strictExact": true
+}

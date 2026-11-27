@@ -1,0 +1,2759 @@
+{
+ "about": "A coin that cannot be sold (every sell fails on chain: a honeypot, a curve that is finished, no route). A copy with one timed sell: everything at +2 s. Real trades. The +2 s sell is out, with the whole bag reserved, when the user presses Sell now: the button answers ok having sold nothing (documented: the step has the coins out) and the exit is written down as owed. The step fails; the rest of Sell now is tried and fails; from then on the settling pass tries it again every 30 s, and every try writes the same line into the feed: \"Sell of X (you pressed Sell now) failed: ...\". 21 identical lines in 10 minutes here, 2,880 a day, while the step's own endless retry writes two lines in all (the engine's rule: one feed line per failing sell, not one per retry). The feed keeps the newest 5,000 lines per user: in under two days nothing else is left in it.",
+ "expect": [
+  "FE5:failure-line-repeated"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "ladder",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 100,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": false,
+      "mode": "exit"
+     },
+     "timedOf": "bag",
+     "timed": [
+      {
+       "afterSec": 2,
+       "percent": 100
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 2400,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 500,
+   "act": {
+    "a": "sellNow",
+    "pick": 0
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 15000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [
+   {
+    "L1": 2000,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   },
+   {
+    "L1": 300,
+    "L2": 0,
+    "L3": 0,
+    "fail": "custom program error: 0x1772"
+   }
+  ],
+  "quote": [],
+  "bal": []
+ }
+}

@@ -1,0 +1,474 @@
+{
+ "seed": 237,
+ "profile": "outage",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "fast",
+ "maxSolPerBuy": 1,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  },
+  {
+   "feeBps": 250,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000,
+  100000000
+ ],
+ "copies": [
+  {
+   "user": 1,
+   "input": {
+    "name": "Scharo",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 0.5,
+    "minLeaderBuySol": 1,
+    "slippagePct": 100,
+    "priorityFeeSol": 0.001,
+    "tipSol": 0.005,
+    "sellPriorityFeeSol": 0.001,
+    "sellTipSol": 0.001,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "exit"
+     },
+     "timedOf": "bag",
+     "timed": [
+      {
+       "afterSec": 2,
+       "percent": 40
+      },
+      {
+       "afterSec": 4,
+       "percent": 30
+      },
+      {
+       "afterSec": 6,
+       "percent": 100
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  },
+  {
+   "user": 0,
+   "input": {
+    "name": "c2",
+    "leader": "2526KSACRprzAPEGYFvrDLP1EFQddZ5m6j4kDPwaNXYB",
+    "enabled": true,
+    "mode": "paper",
+    "buySol": 1,
+    "minLeaderBuySol": 0.5,
+    "slippagePct": 50,
+    "priorityFeeSol": 0,
+    "tipSol": 0.001,
+    "sellPriorityFeeSol": 0.0001,
+    "sellTipSol": 0.002,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "exit"
+     },
+     "timedOf": "left",
+     "timed": [
+      {
+       "afterSec": 13,
+       "percent": 100
+      },
+      {
+       "afterSec": 8,
+       "percent": 25
+      },
+      {
+       "afterSec": 0.5,
+       "percent": 33.3
+      }
+     ],
+     "stopLoss": [
+      {
+       "lossPct": 10,
+       "percent": 10
+      },
+      {
+       "lossPct": 5,
+       "percent": 5
+      }
+     ],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 20
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0.05,
+  "buyUnsure": 0.08,
+  "sellFail": 0.3,
+  "streak": 0.5,
+  "streakMax": 14,
+  "slow": 0.1,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0.15,
+  "balFail": 0.05,
+  "balLag": 80,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1707,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 1
+   }
+  },
+  {
+   "dt": 2739,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 32500,
+   "act": {
+    "a": "edit",
+    "copy": 1,
+    "input": {
+     "name": "c2e",
+     "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+     "enabled": true,
+     "mode": "live",
+     "buySol": 0.1,
+     "minLeaderBuySol": 2,
+     "slippagePct": 50,
+     "priorityFeeSol": 0.005,
+     "tipSol": 0.001,
+     "oncePerCoin": false,
+     "sell": {
+      "mirror": {
+       "enabled": true,
+       "mode": "exit"
+      },
+      "timedOf": "left",
+      "timed": [
+       {
+        "afterSec": 15,
+        "percent": 33.3
+       },
+       {
+        "afterSec": 1.3,
+        "percent": 60
+       }
+      ],
+      "stopLoss": [],
+      "deadCoin": {
+       "enabled": true,
+       "idleSec": 20
+      }
+     }
+    }
+   }
+  },
+  {
+   "dt": 92302,
+   "act": {
+    "a": "outage",
+    "ms": 120000
+   }
+  },
+  {
+   "dt": 47000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 1
+   }
+  },
+  {
+   "dt": 62500,
+   "act": {
+    "a": "delete",
+    "copy": 0
+   }
+  },
+  {
+   "dt": 164456,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 3
+   }
+  },
+  {
+   "dt": 1323,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 5000,
+   "act": {
+    "a": "outage",
+    "ms": 10000
+   }
+  },
+  {
+   "dt": 45000,
+   "act": {
+    "a": "restart",
+    "kind": "graceful",
+    "downMs": 5000
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "fail": "boom (again)"
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 1300,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 560,
+    "L2": 0,
+    "L3": 1571
+   },
+   {
+    "L1": 1322,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "quote": [
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 31,
+    "fail": true
+   },
+   {
+    "L": 502
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   }
+  ],
+  "bal": []
+ },
+ "about": "Found at commit d445249 by the random runs (outage profile, seed 237, shrunk). An update restarts the server while a position with a dead-coin rule is open. The server waits for the exit in progress, stops the clock and the engine, sees nothing under way and goes on to exit. A price check that the last tick had started comes back a moment later, finds the coin dead and starts the dead-coin sell: the stopped engine still sends it. The process exits with that sell out. It lands (the rest of the bag is sold) and nobody books it: after the restart the books still hold the coins, the rule fires again, finds the wallet empty and closes the position as 'sold elsewhere?'. The sale's SOL is missing from the position's profit and from History. The same can happen with a stop loss level (any sell a price check starts). Shutdown waits for buys and sells under way (engine.idle) but not for a price check under way, and a stopped engine does not refuse to start a sell.",
+ "expect": [
+  "M3:sold-but-not-booked:engine-gone",
+  "T5:books-above-wallet"
+ ]
+}
