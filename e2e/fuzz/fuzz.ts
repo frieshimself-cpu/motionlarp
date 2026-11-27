@@ -34,24 +34,36 @@
 // slowread (buys handed back with the quote's coin count because the reads were slow; the exact count follows, or
 // never arrives; only with --profile slowread, so the seeds of the default mix stay what they were).
 // The chain (market.ts): the clock is the 400 ms slot; a slot has a block or is skipped (about one in ten), and the height
-// grows only with blocks, so a blockhash's 151 blocks last as long as the chain takes to make them. The engine reads the
-// tip with its slot (chainTip) and a sell's status (settleSell) as the real executor does; each read takes time (mostly
-// tens of ms, sometimes up to 8.5 s: the main link's 4 s limit, then the backup link), recorded on the tape, and is
-// answered from the chain as it is when the answer arrives. A block is confirmed 400 ms after it is produced; an
-// up-to-date status node answers from its processed bank (its slot ahead of a confirmed tip read before), and a sale in
-// a block it has not confirmed makes settleSell throw ("seen in a block, not confirmed yet"). The harness judges every
-// verdict "it never landed" the engine gives (a sell left behind dropped, a sell of unknown outcome given up) by the
-// chain: a sale that landed is M3, one that can still land is NL1; E4 checks the chain model itself.
+// grows only with blocks, so a blockhash's 151 blocks last as long as the chain takes to make them (a buy's short one, 40
+// to 59). The engine reads the tip with its slot (chainTip), and a sell's or a buy's status (settleSell, settleBuy), as the
+// real executor does; each read takes time (mostly tens of ms, sometimes up to 8.5 s: the main link's 4 s limit, then the
+// backup link), recorded on the tape, and is answered from the chain as it is when the answer arrives. A block is
+// confirmed 400 ms after it is produced; an up-to-date status node answers from its processed bank (its slot ahead of a
+// confirmed tip read before), and a trade in a block it has not confirmed makes the read throw ("seen in a block, not
+// confirmed yet"). The fake executor answers a real trade as the real one does (src/tx/confirm.ts, sendAndRead): landed
+// or failed once its polls see the block confirmed; "expired before landing" when a look of its own (the tip, then a
+// status read by a node of the model) finds the chain past the trade's last valid height and the shared rule
+// (src/chain/landing.ts) believes the "not found", never while the trade is seen at "processed"; "sent, outcome
+// unknown" at its 150 s cap when neither has happened and one last read cannot tell (the trade lands or fails afterwards
+// with nobody told). Real buys are signed with their short blockhash (the engine is told its last valid height) and may
+// land late too. The harness judges every verdict "it never landed" (a sell left behind dropped, a sell of unknown
+// outcome given up, a buy of unknown outcome marked failed, a trade the executor's own wait called expired) by the
+// chain: a trade that landed, before or after, is M3; one that can still land is NL1; E4 checks the chain model itself.
 // lag (about 6 % of the default mix, from its own random stream, so every other seed stays what it was): status reads
-// of a sell answered by a node up to 31 blocks behind the tip (it has not seen a sale that landed after the block it has
-// reached; its "not found" carries that block's slot), on a minority fork of 1 to 3 slots (the main fork's last blocks
-// unseen, its slot at least the tip's), behind on its confirmations, or without a slot; a tip node a little behind;
-// sales that land in the last blocks their blockhash allows (its last valid height −3 to +1), sells that never land
-// told "expired" only once their blockhash has run out, more crashes with sells on their way, sells of unknown outcome.
+// answered by a node behind the tip (up to 31 blocks; one read in eight up to 150 when its answer carries its slot: it has
+// not seen a trade that landed after the block it has reached, and its "not found" carries that block's slot), on a
+// minority fork of 1 to 11 blocks (whole leader windows of four slots weighted: the main fork's last blocks unseen, its
+// slot at least the tip's; deeper is the 10-block margin's accepted limit, as 31 is the 30-block rule's), behind on its
+// confirmations, or without a slot; a tip node a little behind; the executor's own polls answered by the same nodes (it
+// sees a trade's block later); sales and buys that land in the last blocks their blockhash allows (its last valid height
+// −3 to +1); more crashes with sells on their way, sells of unknown outcome. A share of the lag and slow seeds (12 %, from
+// their own stream) is fork-heavy: most status reads from nodes on a minority fork.
 // slow (only with --profile): lag on a slow chain (slow periods, a block every 0.8 to 1.5 s for minutes, over much of
-// the run), with half the restarts. Slow periods also come in a fifth of the lag seeds and 4 % of the rest of the
-// default mix (their own stream again). The report counts how every sell left behind and every sell of unknown outcome
-// ended: booked as landed, or taken for one that never landed by which rule (the slotted one, well past, a time limit).
+// the run), with half the restarts: a sell's blockhash outlives the executor's 150 s cap, so many sells are answered
+// "outcome unknown" and settled by the engine itself. Slow periods also come in a fifth of the lag seeds and 4 % of the
+// rest of the default mix (their own stream again). The report counts how every sell left behind, every sell and buy of
+// unknown outcome, and every trade the executor's own wait ended, ended: booked as landed, or taken for one that never
+// landed by which rule (the slotted one, well past, a time limit, none of them).
 // Database faults, also only with --profile (the default mix stays what it was): dbfault (single store writes fail at
 // random, once each: positions, fills, feed lines, the rows of sells written down before they go out, exact figures,
 // "seen" marks, and the COMMIT of a transaction), diskfull (a few windows of 0.5 to 20 s in which every write fails,
@@ -96,8 +108,8 @@ export const INVARIANTS: Record<string, [string, string]> = {
   OA1: ['1 tokens', 'LIVE: an ask for more than the wallet holds is corrected, not repeated'],
   M1: ['2 money', 'costLamports and tokensBought equal the buy fill'],
   M2: ['2 money', 'proceedsLamports equals the sum of the sell fills, at every moment'],
-  M3: ['2 money', 'every fill is the trade that happened on the market, tokens and SOL; every sale that landed is booked exactly once, on its own position (by the end, also after failed database writes); a sale that landed is never taken for one that did not (a sell left behind dropped, a sell of unknown outcome given up)'],
-  NL1: ['2 money', 'a sell is taken for one that never landed (a sell left behind dropped, a sell of unknown outcome given up) only once it cannot land any more: it failed on chain, or the chain has produced the last block it could land in'],
+  M3: ['2 money', 'every fill is the trade that happened on the market, tokens and SOL; every sale that landed is booked exactly once, on its own position (by the end, also after failed database writes); a trade that landed is never taken for one that did not (a sell left behind dropped, a sell of unknown outcome given up, a buy of unknown outcome marked failed, a sell or a buy the executor\'s own wait called expired)'],
+  NL1: ['2 money', 'a trade is taken for one that never landed (a sell left behind dropped, a sell of unknown outcome given up, a buy of unknown outcome marked failed, a trade the executor\'s own wait called expired) only once it cannot land any more: it failed on chain, or the chain has produced the last block it could land in'],
   M4: ['2 money', 'profit shown (closed positions, the profit summary) equals the wallet\'s SOL change'],
   M5: ['2 money', 'a real fill ends up booked at the SOL the chain says, not at its quote (flagged in hand-written cases; random runs count it under "estimate-kept")'],
   DF1: ['3 once', 'a timed step, a stop loss level and the dead-coin rule sell at most once per position, across restarts'],
@@ -127,7 +139,7 @@ export const INVARIANTS: Record<string, [string, string]> = {
   E1: ['engine', 'no exception escapes the engine (unhandled rejection, rejected tick, "timed step failed")'],
   E2: ['engine', 'the engine does not spin without time passing'],
   E3: ['harness', 'every trade belongs to an order'],
-  E4: ['harness', 'the fake chain keeps to its own model: no sale lands after one past its last valid height, and a node that is not on a minority fork never says "not found" at a slot at or past the block the sale is in'],
+  E4: ['harness', 'the fake chain keeps to its own model: no sale or buy lands after one past its last valid height, and a node that is not on a minority fork never says "not found" at a slot at or past the block the trade is in'],
 };
 
 interface SigAgg {
@@ -442,13 +454,18 @@ async function main(): Promise<void> {
   const n = (k: string, of: Record<string, number> = c) => of[k] ?? 0;
   say(`chain: ${n('tipReads')} tips read (${n('tipBehind')} from a node behind); ${n('statusReads')} status reads of sells: ${n('laggedReads')} from a node behind the tip (${n('laggedMisses')} of them missing a sale or failure already in a block), ${n('forkReads')} from a node on a minority fork (${n('forkMisses')} missing one), ${n('confBehindReads')} from a node behind on its confirmations, ${n('processedReads')} answered "seen in a block, not confirmed yet", ${n('slotlessReads')} "not found" without a slot; ${n('slowReads')} reads took 4 s or more; ${n('lateLandings')} sales landed in the last blocks of their blockhash`);
   say(`slow chain: ${n('slowPeriods')} slow periods (${Math.round(n('slowSeconds') / 60)} min in all), ${n('readsInSlow')} reads answered during one`);
-  const orphanLine = (of: Record<string, number>) => `${n('orphans', of)} (${n('orphansLanded', of)} had landed): booked as landed ${n('booked', of)}; dropped as never landed by the slotted rule ${n('slotted', of)}, well past ${n('wellPast', of)}, a time limit ${n('fallback', of)}; failed on chain ${n('failed', of)}; other ${n('other', of)}; unsettled at the end ${n('unsettled', of)}`;
-  const unknownLine = (of: Record<string, number>) => `${n('unknownSettled', of)}: landed ${n('unkLanded', of)}; never landed: failed on chain ${n('unkFailed', of)}, by the slotted rule ${n('unkSlotted', of)}, well past ${n('unkWellPast', of)}, a time limit ${n('unkTime', of)}, other ${n('unkOther', of)}`;
+  say(`forks: status reads from a node on a minority fork by depth: 1-3 blocks ${n('forkReads1to3')}, 4 (a leader's window) ${n('forkReads4')}, 5-7 ${n('forkReads5to7')}, 8 (two windows) ${n('forkReads8')}, 9-11 ${n('forkReads9to11')}; ${n('forkMisses')} of them missed a trade already in a block (${n('forkMissesDeep')} with a fork of 4 or more); ${n('farLagReads')} status reads from a node more than 31 blocks behind (its answer with its slot); ${n('unreadReads')} reads of a landed trade whose transaction the node could not return yet`);
+  say(`the executor's own wait: ${n('execLooks')} looks read a status; ${n('execExpired')} trades called expired by them (${n('execExpiredSlotted')} by the slotted rule, ${n('execExpiredWellPast')} well past; ${n('execExpiredBuys')} of them buys); ${n('capped')} answered "outcome unknown" at its 150 s cap (${n('cappedBuys')} buys), ${n('cappedThenLanded')} of them landed afterwards; ${n('capReadLanded')} found landed by the last read at the cap; ${n('seenLate')} answers seen late by its polls (answered by nodes behind)`);
+  const orphanLine = (of: Record<string, number>) => `${n('orphans', of)} (${n('orphansLanded', of)} had landed): booked as landed ${n('booked', of)}; dropped as never landed by the slotted rule ${n('slotted', of)}, well past ${n('wellPast', of)}, a time limit ${n('fallback', of)}, none of the engine's rules ${n('none', of)}; failed on chain ${n('failed', of)}; other ${n('other', of)}; unsettled at the end ${n('unsettled', of)}`;
+  const unknownLine = (of: Record<string, number>) => `${n('unknownSettled', of)}: landed ${n('unkLanded', of)}; never landed: failed on chain ${n('unkFailed', of)}, by the slotted rule ${n('unkSlotted', of)}, well past ${n('unkWellPast', of)}, a time limit ${n('unkTime', of)}, none of the engine's rules ${n('unkNone', of)}, other ${n('unkOther', of)}`;
+  const buyLine = (of: Record<string, number>) => `${n('buysSettled', of)}: booked as landed ${n('buyLanded', of)}; marked failed: failed on chain ${n('buyFailed', of)}, by the slotted rule ${n('buySlotted', of)}, well past ${n('buyWellPast', of)}, a time limit ${n('buyTime', of)}, none of the engine's rules ${n('buyNone', of)}, other ${n('buyOther', of)}`;
   say(`sells left behind (taken up by a new engine, or after a failed booking): ${orphanLine(c)}`);
   for (const [p, of] of Object.entries(agg.chainByProfile).sort()) if (n('orphans', of)) say(`    ${p}: ${orphanLine(of)}`);
   say(`sells of unknown outcome settled by the engine: ${unknownLine(c)}`);
   for (const [p, of] of Object.entries(agg.chainByProfile).sort()) if (n('unknownSettled', of)) say(`    ${p}: ${unknownLine(of)}`);
-  say(`verdicts "it never landed" the chain contradicts: ${n('landedDropped')} on a sale that landed (M3), ${n('premature')} while it could still land (NL1)`);
+  say(`buys of unknown outcome or cut off by a restart, settled by the engine from their own transaction (${n('buyStatusReads')} status reads; ${n('lateBuys')} buys landed in the last blocks of their short blockhash): ${buyLine(c)}`);
+  for (const [p, of] of Object.entries(agg.chainByProfile).sort()) if (n('buysSettled', of)) say(`    ${p}: ${buyLine(of)}`);
+  say(`verdicts "it never landed" the chain contradicts: sells ${n('landedDropped')} on a sale that landed (M3), ${n('premature')} while it could still land (NL1); buys ${n('landedBuyFailed')} that landed (M3), ${n('prematureBuy')} while it could still land (NL1); ${n('execContradicted')} of all these by the executor's own wait`);
   say(`seeds with a violation: ${agg.failingSeeds} of ${agg.seeds}`);
   say('');
   if (!sigs.length) say('NO VIOLATION FOUND');
