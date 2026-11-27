@@ -267,7 +267,7 @@ function bindDash() {
     if (!confirm('Sell the whole position now?')) return;
     b.disabled = true;
     b.textContent = 'Selling…';
-    try { await api('POST', `/api/positions/${b.dataset.sell}/sell`); toast('Sold'); } catch (err) { toast(err.message, true); }
+    try { const r = await api('POST', `/api/positions/${b.dataset.sell}/sell`); toast(r?.note ?? 'Sold'); } catch (err) { toast(err.message, true); }
     await loadState();
   }));
   $('#wallet-form')?.addEventListener('submit', async (e) => {
