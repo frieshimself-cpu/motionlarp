@@ -539,12 +539,13 @@ export function createApp(deps: AppDeps): Server {
         const fees = fills.reduce((a, f) => a + f.feeLamports, 0n);
         return { ...positionView(p), feesSol: sol(fees), fills: fills.map((f) => ({ side: f.side, reason: f.reason, sol: sol(f.lamports), feeSol: sol(f.feeLamports), signature: f.simulated ? null : f.signature, simulated: f.simulated, at: f.createdAt })) };
       });
-      // The heading counts every closed position of the shown kind (real once there are any), not the 200 listed.
-      // The list holds both kinds: closedAll lets the page say it is cut even when neither kind alone passes 200.
+      // The heading counts every closed position of the shown kind (real once there are any), not the 200 listed, and
+      // says which kind (kind). The list holds both kinds: closedAll lets the page say it is cut even when neither kind
+      // alone passes 200, and of how many.
       const mode = shownMode(uid);
       const t = store.closedTotals(uid, mode);
       const closedAll = t.trades + store.closedTotals(uid, mode === 'live' ? 'paper' : 'live').trades;
-      return json(res, 200, { positions: views, shown: views.length, closedAll, totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: viewerPnl() });
+      return json(res, 200, { positions: views, shown: views.length, closedAll, kind: mode === 'live' ? 'live' : 'test', totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: viewerPnl() });
     }
 
     throw new HttpError(404, 'not found');

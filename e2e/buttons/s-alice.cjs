@@ -171,7 +171,9 @@ async function checkHistory(env, page, who, opts = {}) {
   // ── the heading of the closed positions ──
   // It counts EVERY closed position of the kind the profit cards show (real ones once there are any, test ones until
   // then), not just the rows listed under it, and says so when the list holds only the latest 200 (findings B1, B2).
-  const m = /^Closed positions\s*(\d+) · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)?( · the latest (\d+) are listed)?$/.exec(h.closedHead) || [];
+  // Each number names what it covers (second review): with test rows in the list the count says "real"; a test-only
+  // account's says "test"; a cut list says of how many, and of which kinds when there are both.
+  const m = /^Closed positions\s*(\d+)( real| test)? · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)?( · the latest (\d+) of (\d+)( closed positions \(real and test\))? are listed)?$/.exec(h.closedHead) || [];
   const live = E.modes.live, test = E.modes.test;
   const all = { trades: live.trades + test.trades, pnl: live.all + test.all, wins: live.wins + test.wins, fees: live.fees + test.fees };
   const shownKind = E.primary === 'live' ? live : test;
@@ -180,16 +182,20 @@ async function checkHistory(env, page, who, opts = {}) {
     // judged once, in the viewer's main time zone
   } else if (both) {
     book.ok(`${P}: the heading's total keeps real and test apart (${live.trades} real trades, ${solStr(live.all)} SOL; ${test.trades} test trades, ${solStr(test.all)} SOL)`,
-      m[1] === String(live.trades) && amount(m[2], live.all, 4) && m[3] === String(winners(live)) && (live.fees === 0n ? m[4] === undefined : matches(m[4], solNum(live.fees))), { shown: h.closedHead, realOnly: { trades: live.trades, total: solStr(live.all), winners: `${winners(live)}%`, platformFees: solStr(live.fees) }, testOnly: { trades: test.trades, total: solStr(test.all), winners: `${winners(test)}%`, platformFees: solStr(test.fees) }, bothAdded: { trades: all.trades, total: solStr(all.pnl), winners: `${winners(all)}%`, platformFees: solStr(all.fees) } });
+      m[1] === String(live.trades) && amount(m[3], live.all, 4) && m[4] === String(winners(live)) && (live.fees === 0n ? m[5] === undefined : matches(m[5], solNum(live.fees))), { shown: h.closedHead, realOnly: { trades: live.trades, total: solStr(live.all), winners: `${winners(live)}%`, platformFees: solStr(live.fees) }, testOnly: { trades: test.trades, total: solStr(test.all), winners: `${winners(test)}%`, platformFees: solStr(test.fees) }, bothAdded: { trades: all.trades, total: solStr(all.pnl), winners: `${winners(all)}%`, platformFees: solStr(all.fees) } });
+    book.ok(`${P}: test rows are listed under it, so the heading's count says it is of the real ones ("${live.trades} real")`, m[2] === ' real' && h.closed.some((r) => r.test), { shown: h.closedHead, testRowsListed: h.closed.filter((r) => r.test).length });
   } else {
     book.ok(`${P}: the heading counts every closed position (${all.trades}) and totals them (${solStr(all.pnl)} SOL, ${winners(all)}% winners, platform fees ${solStr(all.fees)} SOL)`,
-      m[1] === String(all.trades) && amount(m[2], all.pnl, 4) && m[3] === String(winners(all)) && (all.fees === 0n ? m[4] === undefined : matches(m[4], solNum(all.fees))),
+      m[1] === String(all.trades) && amount(m[3], all.pnl, 4) && m[4] === String(winners(all)) && (all.fees === 0n ? m[5] === undefined : matches(m[5], solNum(all.fees))),
       { shown: h.closedHead, expected: { trades: all.trades, total: solStr(all.pnl), winners: `${winners(all)}%`, platformFees: solStr(all.fees) } });
+    const word = !all.trades ? undefined : E.primary === 'test' ? ' test' : undefined;
+    book.ok(`${P}: the heading's count names its kind when it needs to (${word ? `"${word.trim()}"` : 'no word: one kind, nothing else listed'})`, m[1] !== undefined && m[2] === word, h.closedHead);
   }
 
   if (!opts.skipHeading) {
     const listed = Math.min(200, E.closed.length);
-    book.ok(`${P}: the heading says when the list under it holds only the latest ${listed} of the ${E.closed.length} closed positions (and only then)`, E.closed.length > 200 ? m[6] === String(listed) : m[5] === undefined, { shown: h.closedHead, closed: E.closed.length, listed, headingCounts: shownKind.trades });
+    const mixed = both ? ' closed positions (real and test)' : undefined;
+    book.ok(`${P}: the heading says when the list under it holds only the latest ${listed} of the ${E.closed.length} closed positions, of which kinds (and only then)`, E.closed.length > 200 ? m[7] === String(listed) && m[8] === String(E.closed.length) && m[9] === mixed : m[6] === undefined, { shown: h.closedHead, closed: E.closed.length, listed, headingCounts: shownKind.trades });
   }
 
   // ── each closed position ──

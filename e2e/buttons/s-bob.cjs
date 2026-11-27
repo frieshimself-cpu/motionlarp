@@ -26,17 +26,18 @@ async function bob(env) {
     const { E, h } = await checkHistory(env, page, 'bob');
     await screenCheck(page, book, 'bob-history', { ignoreInside: [/table-wrap/] });
     // The same account, two pages, one question: how much did all closed trades make?
-    const m = /^Closed positions\s*(\d+) · total ([+−]?[\d.]+) SOL/.exec(h.closedHead) || [];
+    const m = /^Closed positions\s*(\d+)(?: test)? · total ([+−]?[\d.]+) SOL/.exec(h.closedHead) || [];
     const dayTrades = h.days.reduce((a, r) => a + Number(r[r.length - 3].text), 0);
     const daySum = h.days.reduce((a, r) => a + shown(r[r.length - 1].text), 0);
     book.ok('bob: History\'s heading, its own day table and the Dashboard agree on how many trades closed and what they made', Number(m[1]) === dayTrades && Math.abs(shown(m[2]) - st.pnl.test.allSol) < 0.0002,
       { historyHeading: h.closedHead, dayTableTrades: dayTrades, dayTableProfitSum: Number(daySum.toFixed(4)), dashboardAllTime: st.pnl.test.allSol, dashboardTrades: st.pnl.test.trades, seededTrades: E.modes.test.trades, seededProfit: solStr(E.modes.test.all) });
     book.ok('bob: when more positions closed than the table lists, the page says the list is cut', h.closed.length >= E.closed.length || /newest|latest|last 200|of 205|more/i.test(h.closedHead), { rowsListed: h.closed.length, closedInAll: E.closed.length, heading: h.closedHead });
     // The heading covers every closed position, not only the 200 rows listed under it (finding B2): all 205 of them,
-    // their total, their winners and the platform fees they carried.
+    // their total, their winners and the platform fees they carried; they are test ones and it says so, and it says
+    // the list holds the latest 200 of the 205 (second review).
     const all = E.modes.test;
-    const hm = /^Closed positions\s*(\d+) · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)? · the latest 200 are listed$/.exec(h.closedHead) || [];
-    book.ok('bob: the History heading adds up all 205 closed positions, not only the 200 listed (count, total, winners %, platform fees)', hm[1] === String(all.trades) && matches(hm[2], solNum(all.all)) && hm[3] === String(Math.round((all.wins / all.trades) * 100)) && matches(hm[4], solNum(all.fees)), { shown: h.closedHead, closedInAll: all.trades, total: solStr(all.all), winners: `${Math.round((all.wins / all.trades) * 100)}%`, fees: solStr(all.fees) });
+    const hm = /^Closed positions\s*(\d+) test · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)? · the latest 200 of (\d+) are listed$/.exec(h.closedHead) || [];
+    book.ok('bob: the History heading adds up all 205 closed positions, not only the 200 listed (count, total, winners %, platform fees), calls them test, and says the list holds the latest 200 of 205', hm[1] === String(all.trades) && matches(hm[2], solNum(all.all)) && hm[3] === String(Math.round((all.wins / all.trades) * 100)) && matches(hm[4], solNum(all.fees)) && hm[5] === String(all.trades), { shown: h.closedHead, closedInAll: all.trades, total: solStr(all.all), winners: `${Math.round((all.wins / all.trades) * 100)}%`, fees: solStr(all.fees) });
     await ui.openTab(page, 'dash');
   });
 

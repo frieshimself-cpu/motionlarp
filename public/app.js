@@ -1,6 +1,6 @@
 // WalletMotion front end: no framework, no build step. State comes from /api/state every few seconds.
 import { $, $$, app, modal, esc, short, fmtSol, signed, pct, cls, solscanTx, solscanAcct, coinLink, ago, hue, api, toast, brandHtml, modePill, openModal, closeModal } from '/ui.js';
-import { plain, dayLabel, openPnl } from '/figures.js';
+import { plain, dayLabel, openPnl, closedHeading } from '/figures.js';
 
 let config = null;
 let state = null;
@@ -224,6 +224,9 @@ function renderHistory() {
   const winRate = h.trades ? Math.round((h.wins / h.trades) * 100) : 0;
   const days = h.pnl.days;
   const both = days.some((d) => d.mode === 'live') && days.some((d) => d.mode === 'test');
+  // Each number of the heading names what it covers: "150 real · … · the latest 200 of 250 closed positions (real and
+  // test) are listed" (an older server sends no kind: its pnl.primary is the same thing).
+  const head = closedHeading({ trades: h.trades, kind: h.kind ?? h.pnl.primary, shown: h.shown, closedAll: h.closedAll ?? h.trades });
   return `<div class="stack">
   <div class="card">
     <div class="card-head"><h2>Profit by day<span class="sub">closed positions, fees included</span></h2></div>
@@ -235,7 +238,7 @@ function renderHistory() {
         <td class="num ${cls(d.pnlSol)}">${signed(d.pnlSol)} SOL</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed trades yet</b>Each day you trade gets a row here.</div>'}</div>
   </div>
   <div class="card">
-    <div class="card-head"><h2>Closed positions<span class="sub">${h.trades} · total <span class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</span> · ${winRate}% winners${h.totalFeesSol ? ` · platform fees ${fmtSol(h.totalFeesSol)} SOL` : ''}${h.shown < (h.closedAll ?? h.trades) ? ` · the latest ${h.shown} are listed` : ''}</span></h2></div>
+    <div class="card-head"><h2>Closed positions<span class="sub">${esc(head.count)} · total <span class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</span> · ${winRate}% winners${h.totalFeesSol ? ` · platform fees ${fmtSol(h.totalFeesSol)} SOL` : ''}${head.listed ? ` · ${esc(head.listed)}` : ''}</span></h2></div>
     <div class="card-body flush">${h.positions.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Coin</th><th>Copy</th><th>Sells</th><th class="num">Cost</th><th class="num">Returned</th><th class="num">P/L</th><th>Closed</th></tr></thead>
       <tbody>${h.positions.map((p) => `<tr>
