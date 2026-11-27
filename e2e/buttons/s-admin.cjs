@@ -217,7 +217,7 @@ async function adminEverything(env, parts) {
       return { fee: licRow(await A(), 'Yan').fee, sent: apiCalls(page, /^\/api\/admin\/licenses\/\d+$/).length - n0, toast: tEl, messageBox: box ? box.message : null, asked: book.dialogs[d0] };
     };
     let r = await setFee('0.75');
-    book.eq('Set fee asks in a box; 0.75 gives the key 0.75 %', [r.asked.type, r.asked.message, r.fee], ['prompt', 'Fee for this license in % (leave empty to use the default fee):', '0.75%']);
+    book.eq('Set fee asks in a box that names the key; 0.75 gives the key 0.75 %', [r.asked.type, r.asked.message, r.fee], ['prompt', 'Fee of the key for Yan, in % (leave empty to use the default fee):', '0.75%']);
     r = await setFee(null);
     book.eq('Set fee, "Cancel": nothing sent, nothing changed', [r.sent, r.fee], [0, '0.75%']);
     book.allow(400, /^\/api\/admin\/licenses\/\d+$/);
@@ -265,7 +265,7 @@ async function adminEverything(env, parts) {
     planDialog(page, { accept: false });
     await page.locator(`[data-reissue="${id}"]`).click();
     await sleep(400);
-    book.eq('New key asks first; "Cancel" changes nothing', [page.__lastDialog.message, apiCalls(page, /\/reissue$/).length - n0, licRow(await A(), 'Alice').key], ['Make a new key for this account? The old key stops working.', 0, oldHint]);
+    book.eq('New key asks first, naming the key; "Cancel" changes nothing', [page.__lastDialog.message, apiCalls(page, /\/reissue$/).length - n0, licRow(await A(), 'Alice').key], ['Make a new key for Alice? The old key stops working.', 0, oldHint]);
     planDialog(page, { accept: true });
     await page.locator(`[data-reissue="${id}"]`).click();
     a = await after((x) => x.newKey && /Key for Alice/.test(x.newKey.text));
@@ -297,7 +297,7 @@ async function adminEverything(env, parts) {
     planDialog(page, { accept: false });
     await page.locator(`[data-revoke="${id}"]`).click();
     await sleep(400);
-    book.eq('Revoke asks first; "Cancel" changes nothing', [page.__lastDialog.message, apiCalls(page, /^\/api\/admin\/licenses\/\d+$/).length - n0], ['Revoke this key? Its user is locked out and gets no new copies; open positions still sell by their rules.', 0]);
+    book.eq('Revoke asks first, naming the key; "Cancel" changes nothing', [page.__lastDialog.message, apiCalls(page, /^\/api\/admin\/licenses\/\d+$/).length - n0], ['Revoke the key for Bob? Its user is locked out and gets no new copies; open positions still sell by their rules.', 0]);
     planDialog(page, { accept: true });
     await page.locator(`[data-revoke="${id}"]`).click();
     a = await after((x) => licRow(x, 'Bob').status === 'Revoked');
@@ -334,7 +334,7 @@ async function adminEverything(env, parts) {
     planDialog(page, { accept: false });
     await page.locator(`[data-disable="${id}"]`).click();
     await sleep(400);
-    book.eq('Disable asks first; "Cancel" changes nothing', [page.__lastDialog.message, apiCalls(page, /^\/api\/admin\/users\/\d+$/).length - n0], ['Disable this user? They are logged out and get no new copies.', 0]);
+    book.eq('Disable asks first, naming the user; "Cancel" changes nothing', [page.__lastDialog.message, apiCalls(page, /^\/api\/admin\/users\/\d+$/).length - n0], ['Disable Alice? They are logged out and get no new copies.', 0]);
     planDialog(page, { accept: true });
     await page.locator(`[data-disable="${id}"]`).click();
     a = await after((x) => userRow(x, 'Alice').disabled);
@@ -399,7 +399,7 @@ async function adminEverything(env, parts) {
     planDialog(page, { accept: false });
     await page.locator(`[data-delete="${id}"]`).click();
     await sleep(400);
-    book.eq('Delete (unused key) asks first; "Cancel" keeps it', [page.__lastDialog.message, apiCalls(page, /^\/api\/admin\/licenses\/\d+$/).length - n0, !!licRow(await A(), 'Spare one')], ['Delete this unused key?', 0, true]);
+    book.eq('Delete (unused key) asks first, naming the key; "Cancel" keeps it', [page.__lastDialog.message, apiCalls(page, /^\/api\/admin\/licenses\/\d+$/).length - n0, !!licRow(await A(), 'Spare one')], ['Delete the unused key for Spare one?', 0, true]);
     planDialog(page, { accept: true });
     await page.locator(`[data-delete="${id}"]`).click();
     a = await after((x) => !licRow(x, 'Spare one'));

@@ -10,8 +10,12 @@ let connTimer = null; // the connection check, every 2 minutes
 let tab = 'admin';
 let conn = null; // the last connection report (null: not checked yet)
 let connBusy = false;
-/** What the last Save of the settings said: a refusal stays on through the background redraws until the next Save. */
+/** What the last Save of the settings said: a refusal stays on through the background redraws until the next Save, and
+ *  goes when the session does (after a new login it said "admin login needed", or refused a wallet nobody had typed). */
 let settingsNote = { text: '', cls: 'muted' };
+/** What was typed on the Admin tab and not sent, kept while the Status tab is shown (a look at Status emptied the boxes,
+ *  and a Save then sent the old values). */
+let typedAway = null;
 
 /**
  * The page's two clocks: started when the owner's page is shown (opened logged in, or after a login through the form,
@@ -44,6 +48,10 @@ function loggedOut() {
 
 function renderLogin(error = '') {
   stopTimers();
+  // The session is over: so is what its page said and held (a word being composed is lost with its box).
+  settingsNote = { text: '', cls: 'muted' };
+  typedAway = null;
+  composing = false;
   app.innerHTML = `
     <section class="auth"><div class="auth-in">
       ${brandHtml(config.brand)}
@@ -62,6 +70,8 @@ function renderLogin(error = '') {
     try {
       await api('POST', '/api/admin/login', { password: $('#ap').value });
       state = await api('GET', '/api/admin/state');
+      // A Save sent before the session ended may have answered "admin login needed" after this form came up.
+      settingsNote = { text: '', cls: 'muted' };
       render();
       startTimers();
       checkConnections();
@@ -82,8 +92,12 @@ const topbar = (s) => `
 function bindTop() {
   $('#admin-logout').addEventListener('click', async () => { stopTimers(); await api('POST', '/api/admin/logout').catch(() => {}); newKey = null; settingsNote = { text: '', cls: 'muted' }; renderLogin(); });
   $$('[data-tab]', app).forEach((b) => b.addEventListener('click', () => {
+    // What is typed on the Admin tab goes with the owner to Status and comes back with them.
+    const kept = tab === 'admin' ? { ...keepTyped(), where: null } : typedAway;
     tab = b.dataset.tab;
+    typedAway = tab === 'admin' ? null : kept;
     render();
+    if (tab === 'admin' && kept) putBack(kept);
     if (tab === 'connections') checkConnections();
   }));
 }
@@ -153,34 +167,44 @@ function spot(el) {
   return d ? `${el.tagName.toLowerCase()}[${d.name}="${CSS.escape(d.value)}"]` : null;
 }
 
-/** What is typed and not sent (not in `sent`, the form just sent, whose boxes come back empty), and where the cursor is. */
+/**
+ * What the server's figures put in a box when it was last drawn. A box that goes into a new page keeps the default it
+ * was first drawn with, and that is never written: in Chromium writing it resets a number box to what it can read, so a
+ * half-typed "0." became "0" and the next "5" made "05" (Save sent 5 for 0.5), and "1e" became an empty box that Save
+ * sent as a fee of 0 %. The server's latest is kept here instead.
+ */
+const drawnWith = new WeakMap();
+const startValue = (el) => (drawnWith.has(el) ? drawnWith.get(el) : el.type === 'checkbox' ? el.defaultChecked : el.defaultValue);
+/** A box the owner changed, or that holds text a number box cannot read ("1e", "-", "."): its value reads "", as an
+ *  empty box does, and is not what it shows. */
+const changed = (el) => (el.type === 'checkbox' ? el.checked !== startValue(el) : el.value !== startValue(el) || el.validity.badInput);
+
+/**
+ * What is typed and not sent (not in `sent`, the form just sent, whose boxes come back empty): the boxes themselves, so
+ * that what is typed in them goes into the new page as it is, unreadable text and the cursor included; where the cursor
+ * is; how far each table is scrolled.
+ */
 function keepTyped(sent) {
   const sentForm = sent ? $(sent, app) : null;
   const inSent = (el) => !!sentForm && sentForm.contains(el);
   const a = document.activeElement;
   const focus = a && a !== document.body && app.contains(a) ? a : null;
-  const typed = $$('input, textarea', app)
-    .filter((el) => el.id && el !== focus && !inSent(el) && (el.type === 'checkbox' ? el.checked !== el.defaultChecked : el.value !== el.defaultValue))
-    .map((el) => ({ id: el.id, value: el.value, checked: el.checked }));
-  return { focus, keepBox: !!focus && /^(INPUT|TEXTAREA)$/.test(focus.tagName) && !inSent(focus), where: focus ? spot(focus) : null, typed, scroll: $$('.table-wrap', app).map((el) => el.scrollLeft) };
+  const boxes = $$('input, textarea', app).filter((el) => el.id && !inSent(el) && (el === focus || changed(el)));
+  return { where: focus ? spot(focus) : null, boxes, scroll: $$('.table-wrap', app).map((el) => el.scrollLeft) };
 }
 
 function putBack(k) {
-  for (const t of k.typed) {
-    const el = document.getElementById(t.id);
-    if (!el || !app.contains(el)) continue;
-    if (el.type === 'checkbox') el.checked = t.checked;
-    else el.value = t.value;
-  }
-  const fresh = k.where ? $(k.where, app) : null;
-  if (fresh && k.keepBox && fresh.tagName === k.focus.tagName && fresh.type === k.focus.type) {
+  for (const box of k.boxes) {
+    const fresh = document.getElementById(box.id);
+    if (!fresh || fresh === box || !app.contains(fresh) || fresh.tagName !== box.tagName || fresh.type !== box.type) continue;
     // The box itself goes back (what is typed in it, and its cursor, even in a number box, which does not say where its
-    // cursor is); what it would start from is the server's latest.
-    if (fresh.type === 'checkbox') k.focus.defaultChecked = fresh.defaultChecked;
-    else k.focus.defaultValue = fresh.defaultValue;
-    fresh.replaceWith(k.focus);
-    k.focus.focus({ preventScroll: true });
-  } else if (fresh) fresh.focus({ preventScroll: true });
+    // cursor is); what it would start from is the server's latest, and its hint too ("default 2.5").
+    drawnWith.set(box, startValue(fresh));
+    if (box.placeholder !== fresh.placeholder) box.placeholder = fresh.placeholder;
+    fresh.replaceWith(box);
+  }
+  const target = k.where ? $(k.where, app) : null;
+  if (target) target.focus({ preventScroll: true });
   $$('.table-wrap', app).forEach((el, i) => { if (k.scroll[i]) el.scrollLeft = k.scroll[i]; });
   // The live switch's words follow the switch, as when it is clicked.
   const live = $('#set-live', app);
@@ -188,18 +212,34 @@ function putBack(k) {
 }
 
 // A background redraw waits while a button is held down (it would be replaced before it is let go, and the click lost)
-// or a word is being composed with an input method, and comes right after.
+// or a word is being composed with an input method, and comes right after. After a finger (or a pen) lifts it also
+// waits for the tap's click, which comes as an event of its own after the lift: the redraw ran first, and the click
+// landed on whatever row the redraw had moved under the finger (a key made in another tab went on top, and the tap on
+// one key's Revoke revoked another). A tap that makes no click (a long press) frees it after half a second.
 let pressedAt = 0;
-let composing = false;
+let composing = false; // reset wherever the box being typed in is taken away or moved: no compositionend comes then
 let drawLater = false;
-const busyHand = () => composing || (pressedAt > 0 && Date.now() - pressedAt < 2000);
+let tapPending = null;
+const busyHand = () => composing || tapPending !== null || (pressedAt > 0 && Date.now() - pressedAt < 2000);
 function drawNow() {
   if (!drawLater) return;
   drawLater = false;
   setTimeout(() => { if (!onLogin() && state) redraw({ background: true }); }, 0);
 }
+function tapDone() {
+  clearTimeout(tapPending);
+  tapPending = null;
+  drawNow();
+}
 document.addEventListener('pointerdown', () => { pressedAt = Date.now(); }, true);
-for (const t of ['pointerup', 'pointercancel']) document.addEventListener(t, () => { pressedAt = 0; drawNow(); }, true);
+document.addEventListener('pointerup', (e) => {
+  pressedAt = 0;
+  if (e.pointerType === 'mouse') return drawNow(); // a mouse's click comes with the release
+  clearTimeout(tapPending);
+  tapPending = setTimeout(tapDone, 500);
+}, true);
+document.addEventListener('pointercancel', () => { pressedAt = 0; tapDone(); }, true); // a scroll took the finger: no click
+document.addEventListener('click', () => { if (tapPending !== null) tapDone(); }, true); // before the click's own handlers
 document.addEventListener('compositionstart', () => { composing = true; }, true);
 document.addEventListener('compositionend', () => { composing = false; drawNow(); }, true);
 
@@ -212,6 +252,9 @@ function redraw({ sent = null, background = false } = {}) {
 }
 
 function render() {
+  // Every box goes (the one being typed in is moved into the new page at best), and a word being composed in it goes
+  // without a compositionend: it was counted as composed for good, and the page never redrew in the background again.
+  composing = false;
   if (tab === 'connections') return renderConnections();
   const s = state;
   const st = s.settings;
@@ -232,7 +275,7 @@ function render() {
             <form id="new-license" class="inline-form">
               <div class="field"><label for="lic-label">Who is it for</label><input id="lic-label" type="text" maxlength="40" placeholder="e.g. Tom" required></div>
               <div class="field" style="flex:0 1 190px"><label for="lic-fee">Their fee</label><div class="unit"><input id="lic-fee" type="number" min="0" max="10" step="any" placeholder="default ${st.feePercent}"><span>%</span></div></div>
-              <button class="btn primary" type="submit">Create key</button>
+              <button class="btn primary" type="submit" id="create-key">Create key</button>
             </form>
             ${newKey ? `<div class="ok-note" style="margin-top:14px">Key for <b>${esc(newKey.label)}</b> — copy it now, it is not shown again:<div class="keybox" id="key-text">${esc(newKey.key)}</div><button class="btn small" id="copy-key">Copy key</button></div>` : ''}
           </div>
@@ -271,13 +314,13 @@ function render() {
           <div class="card-head"><h2>Settings</h2></div>
           <form id="settings">
             <div class="setting"><div class="what"><b>Platform fee</b><span>Your cut of every buy and sell, paid inside the same transaction. A license can have its own.</span></div>
-              <div class="row2"><div><label for="set-fee">Fee</label><div class="unit"><input id="set-fee" type="number" min="0" max="10" step="any" value="${esc(plain(st.feePercent))}"><span>%</span></div></div>
+              <div class="row2"><div><label for="set-fee">Fee</label><div class="unit"><input id="set-fee" type="number" min="0" max="10" step="any" required value="${esc(plain(st.feePercent))}"><span>%</span></div></div>
               <div><label for="set-wallet">Paid to wallet</label><input id="set-wallet" type="text" autocomplete="off" spellcheck="false" value="${esc(st.feeWallet)}" placeholder="Wallet address (must hold ≥ 0.001 SOL)"></div></div></div>
             <div class="setting"><div class="what"><b>Max per buy</b><span>No single copy buy may spend more than this.</span></div>
               <div style="max-width:220px"><div class="unit"><input id="set-max" type="number" min="0.001" step="any" value="${esc(plain(st.maxSolPerBuy))}"><span>SOL</span></div></div></div>
             <div class="setting"><div class="what"><b>Live trading</b><span>On: every enabled copy on the site buys with real SOL. Off: no new real buys (copies are simulated); coins already bought with real SOL are still sold by their rules and with Sell now.</span></div>
               <div style="display:flex;align-items:center;gap:12px"><label class="switch"><input type="checkbox" id="set-live" ${st.liveTrading ? 'checked' : ''} aria-label="Live trading"><span></span></label><span id="live-text" class="${st.liveTrading ? 'up' : 'muted'}">${st.liveTrading ? 'Live trading is ON' : 'Test mode'}</span></div></div>
-            <div class="card-body" style="border-top:1px solid var(--border);display:flex;gap:12px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="submit">Save settings</button><span id="settings-msg" class="${settingsNote.cls}">${esc(settingsNote.text)}</span></div>
+            <div class="card-body" style="border-top:1px solid var(--border);display:flex;gap:12px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="submit" id="save-settings">Save settings</button><span id="settings-msg" class="${settingsNote.cls}">${esc(settingsNote.text)}</span></div>
           </form>
         </div>
       </div>
@@ -290,7 +333,10 @@ function bind() {
   $('#new-license').addEventListener('submit', async (e) => {
     e.preventDefault();
     const label = $('#lic-label').value.trim();
-    const fee = $('#lic-fee').value;
+    const feeBox = $('#lic-fee');
+    const fee = feeBox.value;
+    // Text a number box cannot read ("-", "1e") reads as an empty box: the key got the default fee without a word.
+    if (feeBox.validity.badInput) { toast('"Their fee" is not a number: type one, or leave the box empty for the default fee. No key was made.', true); return; }
     try {
       const r = await api('POST', '/api/admin/licenses', { label, feePercent: fee === '' ? null : Number(fee) });
       newKey = { key: r.key, label };
@@ -303,10 +349,15 @@ function bind() {
   const act = (sel, attr, fn) => $$(sel, app).forEach((b) => b.addEventListener('click', async () => {
     try { await fn(Number(b.dataset[attr])); await load(); } catch (err) { toast(err.message, true); }
   }));
-  act('[data-revoke]', 'revoke', async (id) => { if (confirm('Revoke this key? Its user is locked out and gets no new copies; open positions still sell by their rules.')) await api('PUT', `/api/admin/licenses/${id}`, { revoked: true }); });
+  // Each question names the row it is about: a tap that lands on another row than the one meant shows it, and can be
+  // answered "Cancel" ("Revoke this key?" said nothing of which key).
+  const licOf = (id) => state.licenses.find((x) => x.id === id);
+  const keyFor = (id) => (licOf(id) ? `the key for ${licOf(id).label}` : 'this key');
+  const userCalled = (id) => state.users.find((x) => x.id === id)?.username ?? 'this user';
+  act('[data-revoke]', 'revoke', async (id) => { if (confirm(`Revoke ${keyFor(id)}? Its user is locked out and gets no new copies; open positions still sell by their rules.`)) await api('PUT', `/api/admin/licenses/${id}`, { revoked: true }); });
   act('[data-reissue]', 'reissue', async (id) => {
-    if (!confirm('Make a new key for this account? The old key stops working.')) return;
     const l = state.licenses.find((x) => x.id === id);
+    if (!confirm(`Make a new key for ${l ? l.label : 'this account'}? The old key stops working.`)) return;
     const r = await api('POST', `/api/admin/licenses/${id}/reissue`);
     newKey = { key: r.key, label: l?.label ?? '' };
   });
@@ -316,16 +367,16 @@ function bind() {
     newKey = { key: r.key, label: u?.username ?? '' };
   });
   act('[data-restore]', 'restore', (id) => api('PUT', `/api/admin/licenses/${id}`, { revoked: false }));
-  act('[data-delete]', 'delete', async (id) => { if (confirm('Delete this unused key?')) await api('DELETE', `/api/admin/licenses/${id}`); });
+  act('[data-delete]', 'delete', async (id) => { if (confirm(licOf(id) ? `Delete the unused key for ${licOf(id).label}?` : 'Delete this unused key?')) await api('DELETE', `/api/admin/licenses/${id}`); });
   act('[data-fee]', 'fee', async (id) => {
-    const v = prompt('Fee for this license in % (leave empty to use the default fee):', '');
+    const v = prompt(`Fee of ${keyFor(id)}, in % (leave empty to use the default fee):`, '');
     if (v === null) return;
     // "0%", "0,5" and " 1 " are read as the numbers they mean; anything else is refused, never taken as "default".
     const t = v.trim().replace(',', '.').replace(/%$/, '').trim();
     if (t !== '' && !/^\d*\.?\d+$/.test(t)) { alert(`"${v}" is not a number: nothing was changed.`); return; }
     await api('PUT', `/api/admin/licenses/${id}`, { feePercent: t === '' ? null : Number(t) });
   });
-  act('[data-disable]', 'disable', async (id) => { if (confirm('Disable this user? They are logged out and get no new copies.')) await api('PUT', `/api/admin/users/${id}`, { disabled: true }); });
+  act('[data-disable]', 'disable', async (id) => { if (confirm(`Disable ${userCalled(id)}? They are logged out and get no new copies.`)) await api('PUT', `/api/admin/users/${id}`, { disabled: true }); });
   act('[data-enable]', 'enable', (id) => api('PUT', `/api/admin/users/${id}`, { disabled: false }));
 
   $('#set-live').addEventListener('change', (e) => {
@@ -339,10 +390,16 @@ function bind() {
       const msg = $('#settings-msg');
       if (msg) { msg.className = c; msg.textContent = text; }
     };
+    const fee = $('#set-fee');
+    const max = $('#set-max');
+    // An empty Fee box, or one holding text it cannot read ("1e", "-", ".", which reads as empty), is refused: it was
+    // sent as 0, and the fee every user pays became 0 %. The same text in "Max per buy" is refused too (empty keeps it).
+    if (fee.validity.badInput || fee.value.trim() === '') { note('Fee: type a number (0 for no fee). Nothing was saved.', 'down'); return; }
+    if (max.validity.badInput) { note('Max per buy: type a number, or leave it empty to keep the current one. Nothing was saved.', 'down'); return; }
     note('Saving…', 'muted');
-    const body = { feePercent: Number($('#set-fee').value || 0), feeWallet: $('#set-wallet').value.trim(), liveTrading: $('#set-live').checked };
+    const body = { feePercent: Number(fee.value), feeWallet: $('#set-wallet').value.trim(), liveTrading: $('#set-live').checked };
     // An empty "max per buy" keeps the current value.
-    if ($('#set-max').value.trim()) body.maxSolPerBuy = Number($('#set-max').value);
+    if (max.value.trim()) body.maxSolPerBuy = Number(max.value);
     try {
       await api('POST', '/api/admin/settings', body);
       settingsNote = { text: '', cls: 'muted' };

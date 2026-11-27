@@ -10,6 +10,7 @@ async function runAll(env) {
     ['alice', './s-alice.cjs', 'alice'],
     ['bob', './s-bob.cjs', 'bob'],
     ['admin', './s-admin.cjs', 'adminEverything'],
+    ['admin-typing', './s-admin-typing.cjs', 'adminTyping'],
     ['extra', './s-extra.cjs', 'extras'],
   ]) {
     let mod;
