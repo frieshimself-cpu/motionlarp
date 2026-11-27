@@ -54,6 +54,9 @@ export const SABOTAGES = {
   // (the two below check "every sale that landed is booked exactly once": the code may name the kind too)
   'drop-booking': ['M3:sold-but-not-booked', 'the first real sale\'s booking fails and its row in sells_out is deleted: nobody ever books it'],
   'book-twice': ['M3:sale-booked-twice', 'the first real sale\'s fill is written a second time'],
+  // (a third entry: the profile its seeds are drawn from, when calm seeds never meet the fault)
+  'early-drop': ['M3:landed-sale-dropped-as-never-landed', 'the engine is handed a chain tip 10 blocks high at a slot no node is behind: a sell left behind that is not found is dropped once the chain is past its last block, without the margin or the slot check', 'lag'],
+  'slot-blind': ['M3:landed-sale-dropped-as-never-landed', 'the engine is handed the chain tip at a slot no node is behind: "not found" from a node behind the tip is believed 10 blocks past a sell\'s last block (the margin stays, the slot check is gone)', 'lag'],
 } as const;
 export type Sabotage = keyof typeof SABOTAGES;
 
@@ -155,8 +158,8 @@ export function genSettings(r: Rng, leader: string, name: string): Record<string
 }
 
 // 'slowread', 'dbfault' and 'diskfull' are not in the default mix (so every earlier seed stays what it was): only
-// with --profile.
-export const PROFILES = ['instant', 'calm', 'flaky', 'outage', 'partial', 'ghost', 'crash', 'slowread', 'dbfault', 'diskfull'] as const;
+// with --profile. 'lag' is in it, drawn from its own random stream (see generate): every other seed stays what it was.
+export const PROFILES = ['instant', 'calm', 'flaky', 'outage', 'partial', 'ghost', 'crash', 'slowread', 'dbfault', 'diskfull', 'lag'] as const;
 export type Profile = (typeof PROFILES)[number];
 /** Profiles whose buys may be handed back with the quote's coin count (market.ts `quoted`). */
 const QUOTED: readonly string[] = ['slowread', 'dbfault', 'diskfull'];
@@ -181,6 +184,11 @@ export function faultsFor(profile: Profile, r: Rng): Faults {
     // a few buys of unknown outcome.
     case 'dbfault':
     case 'diskfull': return { ...none, buyUnsure: 0.03, sellFail: 0.08, streak: 0.2, streakMax: 3, slow: 0.05, balLag, refineNull: 0.1, quoted: 0.3 };
+    // The engine's rule for a sell left behind by a crash (src/engine/engine.ts, neverLands): status reads that come
+    // from a node up to 25 blocks behind the tip, sales that land in the last blocks their blockhash allows, crashes
+    // (more of them, and shorter) with sells on their way, sells of unknown outcome (landed or not), failures that never
+    // land, and now and then a read that fails (the tip's, or a status read).
+    case 'lag': return { ...none, buyUnsure: 0.03, sellFail: 0.2, streak: 0.2, streakMax: 3, slow: 0.1, ghost: 0.35, balFail: 0.03, balLag, statusLag: r.pick([0.3, 0.8, 0.9]), statusLagMax: 25, lateLand: 0.6 };
   }
 }
 
@@ -203,16 +211,24 @@ export function dbFaultsFor(profile: Profile, seed: number, spanMs: number): DbF
 export interface GenOptions {
   /** Force one profile for every seed. */
   profile?: Profile;
-  /** Leave out the two profiles a healthy server never meets: sells whose outcome stays unknown, and crashes. */
+  /** Leave out the profiles a healthy server never meets: sells whose outcome stays unknown, and crashes (ghost, crash,
+   *  lag). */
   core?: boolean;
 }
 
+/** Share of the default mix's seeds that get the 'lag' profile (from their own random stream). */
+const LAG_SHARE = 0.06;
+
 export function generate(seed: number, steps: number, opt: GenOptions = {}): Scenario {
   const r = Rng.derive(seed, 'plan');
-  const profile: Profile = opt.profile ?? r.weighted(opt.core
+  // 'lag' takes about 6 % of the default mix, decided by a stream of its own: the plan's draws are the same for every
+  // seed, so a seed that does not get it is exactly what it was before.
+  const profile: Profile = opt.profile ?? ((mixed: Profile) => (!opt.core && Rng.derive(seed, 'lag').chance(LAG_SHARE) ? 'lag' : mixed))(r.weighted(opt.core
     ? [[11, 'instant'], [27, 'calm'], [40, 'flaky'], [14, 'outage'], [8, 'partial']] as const
-    : [[10, 'instant'], [24, 'calm'], [36, 'flaky'], [12, 'outage'], [7, 'partial'], [5, 'ghost'], [6, 'crash']] as const);
-  const live = r.chance(0.62);
+    : [[10, 'instant'], [24, 'calm'], [36, 'flaky'], [12, 'outage'], [7, 'partial'], [5, 'ghost'], [6, 'crash']] as const));
+  const lag = profile === 'lag';
+  // ('lag' is mostly real: only a real sell is written down, and left behind by a crash)
+  const live = r.chance(lag ? 0.9 : 0.62);
   const nUsers = r.chance(0.35) ? 2 : 1;
   const nLeaders = r.chance(0.4) ? 2 : 1;
   const nMints = r.pick([1, 1, 2, 2, 3]);
@@ -251,7 +267,8 @@ export function generate(seed: number, steps: number, opt: GenOptions = {}): Sce
     const key = `${leader}:${mint}`;
     const kind = r.weighted([
       [30, 'tick'], [holds.size ? 12 : 30, 'buy'], [holds.size ? 9 : 0, 'sellPart'], [holds.size ? 7 : 0, 'sellAll'], [12, 'price'], [5, 'sellNow'],
-      [2, 'pause'], [1.5, 'resume'], [2, 'edit'], [1.2, 'delete'], [restarts < 2 ? 3 : 0, 'restart'], [profile === 'outage' ? 3 : 0, 'outage'], [0.7, 'maxBuy'], [0.7, 'userOff'],
+      // ('lag' restarts more: a crash with sells on their way is what leaves them behind)
+      [2, 'pause'], [1.5, 'resume'], [2, 'edit'], [1.2, 'delete'], [restarts < (lag ? 4 : 2) ? (lag ? 8 : 3) : 0, 'restart'], [profile === 'outage' ? 3 : 0, 'outage'], [0.7, 'maxBuy'], [0.7, 'userOff'],
       [switches ? 1.2 : 0, 'liveSwitch'],
     ] as const);
     let act: Action = { a: 'tick' };
@@ -278,7 +295,8 @@ export function generate(seed: number, steps: number, opt: GenOptions = {}): Sce
     } else if (kind === 'delete') act = { a: 'delete', copy: r.int(0, nCopies - 1) };
     else if (kind === 'restart') {
       restarts++;
-      act = { a: 'restart', kind: profile === 'crash' && r.chance(0.7) ? 'crash' : 'graceful', downMs: r.pick([1_000, 5_000, 20_000, 70_000]) };
+      // ('lag' is back sooner, mostly: a sell left behind is then read while it can still land, and just after)
+      act = { a: 'restart', kind: (profile === 'crash' || lag) && r.chance(lag ? 0.8 : 0.7) ? 'crash' : 'graceful', downMs: r.pick(lag ? [1_000, 5_000, 10_000, 20_000, 70_000] : [1_000, 5_000, 20_000, 70_000]) };
     } else if (kind === 'outage') {
       const ms = r.pick([3_000, 10_000, 30_000, 120_000, 300_000]);
       act = { a: 'outage', ms };

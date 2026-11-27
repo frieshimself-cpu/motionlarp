@@ -7,9 +7,9 @@
 //
 //   --from N           first seed (default 1)
 //   --jobs N           worker processes (default: CPU cores, at most 8)
-//   --core             leave out the two profiles a healthy server never meets (ghost, crash)
+//   --core             leave out the profiles a healthy server never meets (ghost, crash, lag)
 //   --profile NAME     one profile for every seed: instant | calm | flaky | outage | partial | ghost | crash | slowread
-//                      | dbfault | diskfull
+//                      | dbfault | diskfull | lag
 //   --no-shrink        do not shrink the violations found
 //   --shrink-budget N  runs spent shrinking one violation (default 500)
 //   --seed S           run one seed and print its whole transcript (same steps / --core / --profile as the batch)
@@ -32,6 +32,15 @@
 // part), ghost (sells reported "outcome unknown", landed or not), crash (the process killed with trades in flight),
 // slowread (buys handed back with the quote's coin count because the reads were slow; the exact count follows, or
 // never arrives; only with --profile slowread, so the seeds of the default mix stay what they were).
+// The chain has slots (strictly increasing with the height, about one in ten skipped) and its tip is read with its slot,
+// as the real executor does (chainTip): a sell left behind by a crash is dropped by the engine's production rule
+// (src/engine/engine.ts, neverLands). lag (about 6 % of the default mix, from its own random stream, so every other seed
+// stays what it was): status reads of a sell answered by a node up to 25 blocks behind the tip (it has not seen a sale
+// that landed after the block it has reached; its "not found" carries that block's slot), sales that land in the last
+// blocks their blockhash allows (its last valid height −3 to +1, about a minute after they are signed), sells that never
+// land told "expired" only once their blockhash has run out, more crashes with sells on their way, sells of unknown
+// outcome. The report counts how every sell left behind ended: booked as landed, or dropped by which rule (the slotted
+// one, well past, the 180 s fallback).
 // Database faults, also only with --profile (the default mix stays what it was): dbfault (single store writes fail at
 // random, once each: positions, fills, feed lines, the rows of sells written down before they go out, exact figures,
 // "seen" marks, and the COMMIT of a transaction), diskfull (a few windows of 0.5 to 20 s in which every write fails,
@@ -106,6 +115,7 @@ export const INVARIANTS: Record<string, [string, string]> = {
   E1: ['engine', 'no exception escapes the engine (unhandled rejection, rejected tick, "timed step failed")'],
   E2: ['engine', 'the engine does not spin without time passing'],
   E3: ['harness', 'every trade belongs to an order'],
+  E4: ['harness', 'the fake chain keeps to its own model: no sale lands after one past its last valid height, and a "not found" the engine takes as final comes when the sell can no longer land, from a node that has seen every block it could land in'],
 };
 
 interface SigAgg {
@@ -139,15 +149,22 @@ interface Agg {
   notes: Record<string, number>;
   noteSeeds: Record<string, number[]>;
   harnessErrors: { seed: number; error: string }[];
+  /** The chain model's counts (RunResult.chain), in all and per profile: sells left behind and how each ended. */
+  chain: Record<string, number>;
+  chainByProfile: Record<string, Record<string, number>>;
 }
 
-const emptyAgg = (): Agg => ({ seeds: 0, failingSeeds: 0, steps: 0, positions: 0, opened: 0, closed: 0, buys: 0, sells: 0, sellFails: 0, restarts: 0, events: 0, simSeconds: 0, byProfile: {}, live: 0, sigs: {}, notes: {}, noteSeeds: {}, harnessErrors: [] });
+const emptyAgg = (): Agg => ({ seeds: 0, failingSeeds: 0, steps: 0, positions: 0, opened: 0, closed: 0, buys: 0, sells: 0, sellFails: 0, restarts: 0, events: 0, simSeconds: 0, byProfile: {}, live: 0, sigs: {}, notes: {}, noteSeeds: {}, harnessErrors: [], chain: {}, chainByProfile: {} });
+
+const addCounts = (to: Record<string, number>, from: Record<string, number> | undefined) => { for (const [k, n] of Object.entries(from ?? {})) to[k] = (to[k] ?? 0) + n; };
 
 function addResult(agg: Agg, r: RunResult, steps: number): void {
   agg.seeds++;
   if (r.violations.length) agg.failingSeeds++;
   for (const k of ['steps', 'positions', 'opened', 'closed', 'buys', 'sells', 'sellFails', 'restarts', 'events', 'simSeconds'] as const) agg[k] += r.stats[k];
   agg.byProfile[r.profile] = (agg.byProfile[r.profile] ?? 0) + 1;
+  addCounts(agg.chain, r.chain);
+  addCounts((agg.chainByProfile[r.profile] ??= {}), r.chain);
   if (r.live) agg.live++;
   for (const [k, n] of Object.entries(r.notes)) {
     agg.notes[k] = (agg.notes[k] ?? 0) + n;
@@ -174,6 +191,8 @@ function mergeAgg(a: Agg, b: Agg): void {
   for (const [k, n] of Object.entries(b.notes)) a.notes[k] = (a.notes[k] ?? 0) + n;
   for (const [k, list] of Object.entries(b.noteSeeds)) a.noteSeeds[k] = [...(a.noteSeeds[k] ?? []), ...list].sort((x, y) => x - y).slice(0, 8);
   a.harnessErrors.push(...b.harnessErrors);
+  addCounts(a.chain, b.chain);
+  for (const [p, counts] of Object.entries(b.chainByProfile ?? {})) addCounts((a.chainByProfile[p] ??= {}), counts);
   for (const s of Object.values(b.sigs)) {
     const t = (a.sigs[s.sig] ??= { sig: s.sig, seeds: 0, asFirst: 0, byProfile: {}, live: 0, test: 0, after: {}, samples: [] });
     for (const [k, n] of Object.entries(s.after ?? {})) t.after[k] = (t.after[k] ?? 0) + n;
@@ -235,6 +254,7 @@ function printTranscript(r: RunResult): void {
   for (const v of r.violations) console.log(`VIOLATION ${v.sig}${v.first ? ' (first)' : ''} at step ${v.step}, +${(v.t / 1000).toFixed(3)}s, seen ${v.count}×: ${v.message}`);
   if (Object.keys(r.notes).length) console.log(`outcomes counted, not flagged: ${json(r.notes)}`);
   console.log(`stats: ${json(r.stats)}`);
+  console.log(`chain: ${JSON.stringify(r.chain)}`);
 }
 
 async function main(): Promise<void> {
@@ -250,15 +270,19 @@ async function main(): Promise<void> {
     // Each planted fault must make its invariant fail in at least one of the first seeds; clean seeds are the control.
     // (a code may name the kind too, "M3:sale-booked-twice": the violation's signature starts with it)
     let bad = 0;
-    const seeds = Array.from({ length: 60 }, (_, i) => i + 1);
     const hit = (v: { code: string; sig: string }, code: string) => (code.includes(':') ? v.sig.startsWith(code) : v.code === code);
     console.log('self-test: a fault is planted around the engine (in the harness, never in src/); its invariant must fail');
-    for (const [name, [code, what]] of Object.entries(SABOTAGES)) {
+    for (const [name, entry] of Object.entries(SABOTAGES)) {
+      // (the first 60 seeds of the calm profile; or, for a fault met only in the profile a third entry names, its first
+      // 150: a sell left behind by a crash that lands in the last blocks it can, read just after by a node behind the tip
+      // that has not seen it, comes only in some lag seeds, one in six to one in sixteen)
+      const [code, what, profile = 'calm'] = entry as readonly [string, string, Profile?];
+      const seeds = Array.from({ length: profile === 'calm' ? 60 : 150 }, (_, i) => i + 1);
       let hits = 0;
       let control = 0;
       let example = '';
       for (const seed of seeds) {
-        const sc = generate(seed, 60, { profile: 'calm' });
+        const sc = generate(seed, 60, { profile });
         const clean = await runScenario(sc);
         const planted = await runScenario({ ...sc, sabotage: name as keyof typeof SABOTAGES });
         if (clean.violations.some((v) => hit(v, code))) control++;
@@ -268,7 +292,7 @@ async function main(): Promise<void> {
       const ok = hits > control;
       if (!ok) bad++;
       console.log(`  ${ok ? 'caught ' : 'MISSED '} ${code.padEnd(4)} ${name.padEnd(14)} ${what}`);
-      console.log(`           fails in ${hits} of ${seeds.length} seeds with the fault (${control} without)${example ? `; e.g. ${example}` : ''}`);
+      console.log(`           fails in ${hits} of ${seeds.length}${profile !== 'calm' ? ` ${profile}` : ''} seeds with the fault (${control} without)${example ? `; e.g. ${example}` : ''}`);
     }
     console.log(bad ? `${bad} planted fault(s) were NOT caught` : 'every planted fault was caught');
     process.exitCode = bad ? 1 : 0;
@@ -394,12 +418,19 @@ async function main(): Promise<void> {
   say(`${agg.seeds} seeds, ${agg.steps} steps (${(agg.steps / agg.seeds).toFixed(0)} per seed), ${agg.live} LIVE / ${agg.seeds - agg.live} TEST, ${ranIn.toFixed(0)}s, ${jobs} worker${jobs === 1 ? '' : 's'}`);
   say(`profiles: ${Object.entries(agg.byProfile).sort().map(([k, n]) => `${k} ${n}`).join(', ')}`);
   say(`exercised: ${agg.positions} positions (${agg.opened} opened, ${agg.closed} closed), ${agg.buys} buys, ${agg.sells} sells answered (${agg.sellFails} failed), ${agg.restarts} restarts, ${Math.round(agg.simSeconds / 3600)} h of simulated time, ${agg.events} events`);
+  const c = agg.chain;
+  const n = (k: string, of: Record<string, number> = c) => of[k] ?? 0;
+  say(`chain: ${n('tipReads')} tips read, ${n('statusReads')} status reads of sells (${n('laggedReads')} from a node behind the tip, ${n('laggedMisses')} of them missing a sale or failure already in a block), ${n('lateLandings')} sales landed in the last blocks of their blockhash`);
+  const orphanLine = (of: Record<string, number>) => `${n('orphans', of)} (${n('orphansLanded', of)} had landed): booked as landed ${n('booked', of)}; dropped as never landed by the slotted rule ${n('slotted', of)}, well past ${n('wellPast', of)}, the 180 s fallback ${n('fallback', of)}; failed on chain ${n('failed', of)}; other ${n('other', of)}; unsettled at the end ${n('unsettled', of)}; landed but dropped ${n('landedDropped', of)}`;
+  say(`sells left behind (taken up by a new engine, or after a failed booking): ${orphanLine(c)}`);
+  for (const [p, of] of Object.entries(agg.chainByProfile).sort()) if (n('orphans', of)) say(`    ${p}: ${orphanLine(of)}`);
   say(`seeds with a violation: ${agg.failingSeeds} of ${agg.seeds}`);
   say('');
   if (!sigs.length) say('NO VIOLATION FOUND');
-  // 'ghost' (a sell reported "outcome unknown" that had landed) and 'crash' (the process killed with trades in
-  // flight) are situations a healthy server does not meet: what only shows there is listed apart.
-  const RARE = new Set(['ghost', 'crash']);
+  // 'ghost' (a sell reported "outcome unknown" that had landed), 'crash' (the process killed with trades in flight)
+  // and 'lag' (crashes and unknown outcomes again, with status nodes behind the tip and late landings) are situations a
+  // healthy server does not meet: what only shows there is listed apart.
+  const RARE = new Set(['ghost', 'crash', 'lag']);
   const core = sigs.filter((x) => Object.keys(x.byProfile).some((k) => !RARE.has(k)));
   const rare = sigs.filter((x) => !core.includes(x));
   const show = (list: SigAgg[], title: string) => {
@@ -421,7 +452,7 @@ async function main(): Promise<void> {
     }
   };
   show(core, 'VIOLATIONS (profiles: instant, calm, flaky, outage, partial, slowread, dbfault, diskfull)');
-  show(rare, 'ONLY WITH A SELL OF UNKNOWN OUTCOME THAT HAD LANDED (ghost) OR A CRASH (crash)');
+  show(rare, 'ONLY WITH A SELL OF UNKNOWN OUTCOME THAT HAD LANDED (ghost), A CRASH (crash), OR BOTH WITH A LAGGING STATUS NODE (lag)');
   if (Object.keys(agg.notes).length) {
     const notes = Object.entries(agg.notes).sort((a, b) => b[1] - a[1]);
     const line = ([k, n]: [string, number]) => say(`    ${n}×  ${k}   (seeds ${agg.noteSeeds[k]!.slice(0, 5).join(', ')})`);

@@ -11,18 +11,18 @@ import type { Scenario, Step } from './scenario.js';
 export interface Shrunk { scenario: Scenario; result: RunResult; runs: number; reproduced: boolean }
 
 const clone = <T>(v: T): T => structuredClone(v);
-const isCalm = (p: OpPlan | undefined) => !p || (!p.fail && !p.part && !p.ghost && !p.refineNull && !p.quoted && p.L1 === CALM_OP.L1 && p.L2 === CALM_OP.L2 && p.L3 === CALM_OP.L3);
+const isCalm = (p: OpPlan | undefined) => !p || (!p.fail && !p.part && !p.ghost && !p.refineNull && !p.quoted && p.late === undefined && p.L1 === CALM_OP.L1 && p.L2 === CALM_OP.L2 && p.L3 === CALM_OP.L3);
 
 function opCost(p: OpPlan | undefined): number {
   if (!p) return 0;
-  return (p.fail ? 300 : 0) + (p.part ? 200 : 0) + (p.ghost ? 200 : 0) + (p.refineNull ? 100 : 0) + (p.L1 !== CALM_OP.L1 ? 100 : 0) + (p.L2 !== CALM_OP.L2 ? 100 : 0) + (p.L3 !== CALM_OP.L3 ? 50 : 0);
+  return (p.fail ? 300 : 0) + (p.part ? 200 : 0) + (p.ghost ? 200 : 0) + (p.late !== undefined ? 200 : 0) + (p.refineNull ? 100 : 0) + (p.L1 !== CALM_OP.L1 ? 100 : 0) + (p.L2 !== CALM_OP.L2 ? 100 : 0) + (p.L3 !== CALM_OP.L3 ? 50 : 0);
 }
 const dtCost = (dt: number) => (dt % 1_000 === 0 ? 0 : dt % 500 === 0 ? 1 : dt % 100 === 0 ? 2 : 3);
 
 /** Smaller is simpler to read: fewer things happening, fewer odd market outcomes, fewer and plainer rules. */
 function size(sc: Scenario): number {
   const tape = sc.tape;
-  const odd = tape ? tape.buy.reduce((a, p) => a + opCost(p), 0) + tape.sell.reduce((a, p) => a + opCost(p), 0) + tape.quote.filter((q) => q && (q.fail || q.L !== 50)).length * 100 + tape.bal.filter((b) => b && (b.fail || b.L)).length * 100 + (tape.db ?? []).filter(Boolean).length * 150 : 0;
+  const odd = tape ? tape.buy.reduce((a, p) => a + opCost(p), 0) + tape.sell.reduce((a, p) => a + opCost(p), 0) + tape.quote.filter((q) => q && (q.fail || q.L !== 50)).length * 100 + tape.bal.filter((b) => b && (b.fail || b.L)).length * 100 + (tape.db ?? []).filter(Boolean).length * 150 + (tape.status ?? []).filter(Boolean).length * 50 : 0;
   // (a window of a full disk costs more the longer it lasts)
   const full = (sc.db?.full ?? []).reduce((a, w) => a + 300 + Math.round(w.ms / 100), 0);
   const rules = sc.copies.reduce((a, c) => a + JSON.stringify(c.input).length, 0);
@@ -106,6 +106,20 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
       for (let i = from; i < to; i++) { const b = sc.tape!.bal[i]; if (b && (b.fail || b.L)) { sc.tape!.bal[i] = null; changed = true; } }
       return changed;
     });
+    // Status reads from a node behind the tip (lag): as few as still show it, then each as little behind as it can be.
+    await chunks(() => best.tape!.status?.length ?? 0, (sc, from, to) => {
+      let changed = false;
+      for (let i = from; i < to; i++) if (sc.tape!.status![i]) { sc.tape!.status![i] = null; changed = true; }
+      return changed;
+    });
+    for (let i = 0; i < (best.tape!.status?.length ?? 0) && runs < budget; i++) {
+      for (let lag = best.tape!.status![i] ?? 0; lag > 1 && runs < budget; ) {
+        const cand = clone(best);
+        cand.tape!.status![i] = Math.ceil(lag / 2);
+        if (!(await attempt(cand))) break;
+        lag = best.tape!.status![i] ?? 0;
+      }
+    }
     // Database writes that fail (dbfault): as few as still show it.
     await chunks(() => best.tape!.db?.length ?? 0, (sc, from, to) => {
       let changed = false;
@@ -136,7 +150,7 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
       for (let i = 0; i < best.tape![kind].length && runs < budget; i++) {
         const p = best.tape![kind][i];
         if (isCalm(p)) continue;
-        for (const patch of [{ L2: 0 }, { L3: CALM_OP.L3 }, { L1: CALM_OP.L1 }, { refineNull: undefined }, { part: undefined }, { ghost: undefined }] as Partial<OpPlan>[]) {
+        for (const patch of [{ L2: 0 }, { L3: CALM_OP.L3 }, { L1: CALM_OP.L1 }, { refineNull: undefined }, { part: undefined }, { ghost: undefined }, { late: undefined }] as Partial<OpPlan>[]) {
           const cur = best.tape![kind][i]!;
           const key = Object.keys(patch)[0] as keyof OpPlan;
           if (cur[key] === patch[key]) continue;
@@ -225,8 +239,12 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
 
 export function tapeSummary(t: Tape | undefined, db?: Scenario['db']): string {
   if (!t) return 'random';
-  const odd = (list: OpPlan[]) => list.map((p, i) => (isCalm(p) ? null : `#${i + 1}: ${p.fail ? `fails (${p.fail})${p.ghost ? ' but lands' : ''}` : `lands after ${p.L1} ms, engine told ${p.L2} ms later${p.part ? `, fills ${p.part * 100}%` : ''}${p.quoted ? `, handed back with the quote's coin count (the wallet got ${p.quoted}x of it)` : ''}${p.refineNull ? ', exact SOL never read' : `, exact SOL ${p.L3} ms after that`}`}`)).filter(Boolean);
+  const at = (p: OpPlan) => `at its last valid height ${p.late! < 0 ? '−' : '+'}${Math.abs(p.late!)}`;
+  const lands = (p: OpPlan) => (p.late !== undefined ? `lands LATE, ${at(p)}` : `lands after ${p.L1} ms`);
+  const odd = (list: OpPlan[]) => list.map((p, i) => (isCalm(p) ? null : `#${i + 1}: ${p.fail ? `fails (${p.fail})${p.ghost ? ` but ${lands(p)}` : p.late !== undefined ? `, told ${at(p)}` : ''}` : `${lands(p)}, engine told ${p.L2} ms later${p.part ? `, fills ${p.part * 100}%` : ''}${p.quoted ? `, handed back with the quote's coin count (the wallet got ${p.quoted}x of it)` : ''}${p.refineNull ? ', exact SOL never read' : `, exact SOL ${p.L3} ms after that`}`}`)).filter(Boolean);
   const out = [`buys: ${odd(t.buy).join('; ') || 'all ordinary'}`, `sells: ${odd(t.sell).join('; ') || 'all ordinary'}`];
+  const behind = (t.status ?? []).map((lag, i) => (lag ? `#${i + 1}: ${lag} blocks behind` : null)).filter(Boolean);
+  if (behind.length) out.push(`status reads from a node behind the tip: ${behind.join('; ')}`);
   const writes = (t.db ?? []).map((d, i) => (d ? `#${i + 1} (${d.m ?? '?'}): ${d.err === 'io' ? 'disk I/O error' : 'database or disk is full'}` : null)).filter(Boolean);
   if (writes.length) out.push(`database writes that fail: ${writes.join('; ')}`);
   if (db?.full?.length) out.push(`disk full: ${db.full.map((w) => `+${(w.at / 1000).toFixed(3)}s for ${w.ms / 1000}s`).join('; ')}`);
