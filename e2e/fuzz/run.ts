@@ -57,7 +57,11 @@ export interface RunOptions {
 
 interface FeedRec { i: number; t: number; op: number; userId: number; copyId: number | null; kind: EventKind; message: string; mint: string | null; signature: string | null; ctx?: Ctx }
 interface MirrorDue { sig: string; percent: number; mode: string; invoked: boolean; ok: boolean }
-interface Flying { key: string; kind: 'bag' | 'queue'; tokens: bigint; call: SellCall }
+interface Flying {
+  key: string; kind: 'bag' | 'queue'; tokens: bigint; call: SellCall;
+  /** The engine has been told it sold. Its coins stay reserved until the sale is booked (the wallet is read first). */
+  answered?: boolean;
+}
 interface Track {
   pid: number; userId: number; copyId: number; mint: string; leader: string; sell: SellSettings; leaderSig: string; createdAt: number;
   /** Opened by restore() from the wallet's balance (a buy cut off by a restart): its cost is an estimate, it has no buy fill. */
@@ -324,7 +328,7 @@ class Run {
       const tr = this.pos.get(positionId);
       if (gen === this.gen) { this.sellInvoked(positionId, order); if (tr) tr.queueActive++; }
       const res = als.run({ kind: 'queue', positionId, order, gen, inv }, () => sell(positionId, order, ...rest));
-      const done = () => { if (tr && gen === this.gen) tr.queueActive = Math.max(0, tr.queueActive - 1); };
+      const done = () => { if (tr && gen === this.gen) { tr.queueActive = Math.max(0, tr.queueActive - 1); this.landedOrGone(tr, inv); } };
       void res.then((r) => { done(); if (gen === this.gen) this.sellReturned(positionId, order, r, inv); }, done);
       return res;
     };
@@ -339,7 +343,7 @@ class Run {
       }
       this.timedNotEarly(positionId, order, 'started');
       const res = als.run({ kind: 'bag', positionId, order, gen, inv }, () => bagStep(positionId, order, ...rest));
-      const done = () => { if (tr && gen === this.gen) tr.bagActive.set(stage, Math.max(0, (tr.bagActive.get(stage) ?? 0) - 1)); };
+      const done = () => { if (tr && gen === this.gen) { tr.bagActive.set(stage, Math.max(0, (tr.bagActive.get(stage) ?? 0) - 1)); this.landedOrGone(tr, inv); } };
       void res.then(done, done);
       return res;
     };
@@ -352,6 +356,12 @@ class Run {
       void res.then(done, done);
       return res;
     };
+  }
+
+  /** An engine step has returned: nothing it sent is on its way any more, except a sell whose outcome it never learnt. */
+  private landedOrGone(tr: Track, inv: number): void {
+    const f = tr.flying.get(inv);
+    if (f && (f.answered || !f.call.uncertain)) tr.flying.delete(inv);
   }
 
   /** Every booking the engine makes goes through here first. */
@@ -388,6 +398,9 @@ class Run {
       orig.updatePosition(id, patch);
       this.storeOps++;
       this.dirty.add(id);
+      // A sell the engine was told has sold stays reserved until this, its booking (the engine reads the wallet in
+      // between): from here on the books carry it. (The exact SOL arriving later is not a booking of coins.)
+      if (tr && ctx && ctx.gen === this.gen && who !== 'refine' && patch.tokensHeld !== undefined && tr.flying.get(ctx.inv)?.answered) tr.flying.delete(ctx.inv);
       const bits: string[] = [];
       if (patch.status !== undefined) bits.push(`status ${before?.status}→${patch.status}`);
       if (patch.mode !== undefined && patch.mode !== before?.mode) bits.push(`mode ${patch.mode}`);
@@ -472,8 +485,9 @@ class Run {
     const tr = this.pos.get(pid);
     if (!tr) return;
     if (!tr.invoked.has(okey(order))) tr.invoked.set(okey(order), this.feed.length);
-    // (a ":rest" order is the follow-up of a full exit that left coins to other sells on their way: documented)
-    const tag = (order.tag ?? '').replace(/(:rest)+$/, '');
+    // (a ":rest" order is the follow-up of a full exit that left coins to other sells on their way, an ":owed" one a
+    // full exit written down in the database and taken up again after a restart: both documented in the engine)
+    const tag = (order.tag ?? '').replace(/(:rest|:owed)+$/, '');
     if (order.reason === 'mirror' && tag !== 'reconcile') {
       const due = tr.mirrorDue.find((d) => d.sig === tag);
       if (!due) this.problem('MI1', 'mirror-order-nobody-asked-for', `p${pid}: ${orderText(order)}`);
@@ -596,7 +610,7 @@ class Run {
       // A sell whose outcome is unknown must be settled before anything else is sold (its coins stay reserved): an
       // ask that only fits when that sell is ignored has its own name.
       let unsettled = 0n;
-      for (const [inv, f] of tr.flying) if (inv !== ctx.inv && f.call.uncertain) unsettled += f.tokens;
+      for (const [inv, f] of tr.flying) if (inv !== ctx.inv && f.call.uncertain && !f.answered) unsettled += f.tokens;
       if (unsettled > 0n) this.problem('US1', 'sold-on-before-a-sell-of-unknown-outcome-was-settled', `p${p.id} ${orderText(order)} asked ${c.asked} while sell(s) of ${unsettled} tokens with an unknown outcome were not settled yet (the rule leaves ${expect} to ask for)`);
       else this.problem('AM1', `ask:${kind}`, `p${p.id} ${orderText(order)} asked ${c.asked}; the rule is ${rule} = ${expect}`);
     }
@@ -644,8 +658,11 @@ class Run {
     const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
     this.line(`exec sell#${c.id} p${c.pid ?? '?'} read again from its own transaction: ${c.landedAt !== undefined ? `it landed (sold ${c.sold} for ${c.exact})` : c.chainFailed ? 'it failed' : final ? 'never found: it did not land' : 'not found yet'}`);
     if (!tr || !ctx || c.gen !== this.gen || !final) return;
+    const mine = tr.flying.get(ctx.inv);
+    // Landed: the engine books it now, its coins reserved until then. Not landed: the reservation ends with the answer.
+    if (c.landedAt !== undefined && mine?.call === c) mine.answered = true;
     queueMicrotask(() => {
-      tr.flying.delete(ctx.inv);
+      if (c.landedAt === undefined && tr.flying.get(ctx.inv)?.call === c) tr.flying.delete(ctx.inv);
       if (ctx.kind !== 'bag') tr.queueFlying = Math.max(0, tr.queueFlying - 1);
     });
     if (c.landedAt === undefined && ctx.order) {
@@ -672,10 +689,14 @@ class Run {
     if (!tr || !ctx?.order) return;
     const order = ctx.order;
     if (c.gen === this.gen && !(c.uncertain && c.signature && !c.severed)) {
-      // The engine keeps this sell's tokens reserved until its await returns (the next microtask), not until now:
-      // a step that is started in between must still see them as "out".
+      // The engine keeps this sell's tokens reserved until it has booked the sale (it reads the wallet first), or,
+      // when the sell failed, until its await returns (the next microtask): a step that sizes itself in between must
+      // still see them as "out".
+      const mine = tr.flying.get(ctx.inv);
+      const sold = !!c.ok && !c.severed && mine?.call === c;
+      if (sold) mine!.answered = true;
       queueMicrotask(() => {
-        tr.flying.delete(ctx.inv);
+        if (!sold && tr.flying.get(ctx.inv)?.call === c) tr.flying.delete(ctx.inv);
         if (ctx.kind !== 'bag') tr.queueFlying = Math.max(0, tr.queueFlying - 1);
       });
     }

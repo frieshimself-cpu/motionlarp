@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 390 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 393 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -331,15 +331,18 @@ that could not be read shows "—"; the 3-second refresh keeps scroll positions 
 is refused. Not changed (cosmetic or owner-only): the owner's Users table adds test profit to real; dates for viewers
 at UTC+12 and beyond; very small numbers printed as 5e-7; two minus signs on a History line.
 
-**Known, not changed yet** (from the reviews; none blocks the Scharo preset): a server restart while a "same %" mirror
-sell is waiting for its retry, or while a sell kept during an unconfirmed buy is waiting, loses that sell (both held
-in memory only; a full exit is still caught by the 30 s safety net, and the Scharo preset's timed exit sells the rest);
-a timed step sizes itself from the quote's coin count when the exact count arrives late (it sells a little less, the
-later steps sell the rest); a server crash in the very second a sell
-is out loses that sale's answer: its SOL is not booked and the step sells once more after the restart (the coins stay
-right: the wallet corrects the books; the fix is to save each sell's signature before it is sent, as buys already do); a stop loss is measured against the
+**Restarts** (an update restarts the server): a full exit that is owed (failed and waiting for its retry, left coins
+to other sells, or came while our buy's outcome was unknown) is written down on the position and sold by the settling
+pass after the restart (fuzzer cases 9 and 10 pass; it used to be held in memory only).
+
+**Known, not changed yet** (from the reviews; none blocks the Scharo preset): a restart while a PARTIAL "same %" mirror
+sell waits for its retry loses that sell (full exits are kept, see above); a restart while a sell's outcome is unknown
+(it needs an RPC outage of over two minutes first) lets the next step sell before that one is settled and leaves its
+SOL unbooked (fuzzer case 11; the fix is to save each sell's signature before it is sent, as buys already do; the
+coins stay right, the wallet corrects the books); a timed step sizes itself from the quote's coin count when the exact
+count arrives late (it sells a little less, the later steps sell the rest); a stop loss is measured against the
 buy cost with every fee in it, so a level tighter than the entry costs fires at once (the preset has no stop
-loss); a copy's profit line and History add test and real results together; a sell's feed line shows the quoted
+loss); a sell's feed line shows the quoted
 SOL (History and the profit use the exact amount); the admin's Live switch takes effect when Save is pressed;
 the Helius RPC lane's MEV Protect is unproven (Sender's is proven).
 
