@@ -108,7 +108,7 @@ function renderConnections() {
     <main class="page">
       <div class="stack">
         <div class="card">
-          <div class="card-head"><h2>Status<span class="sub">is everything the site trades through working right now?</span></h2><div style="display:flex;gap:10px;align-items:center">${head}<button class="btn small" id="conn-check" ${connBusy ? 'disabled' : ''}>${connBusy ? 'Checking…' : 'Check again'}</button></div></div>
+          <div class="card-head"><h2>Status<span class="sub">is everything the site trades through working right now?</span></h2><div style="display:flex;gap:8px 10px;align-items:center;flex-wrap:wrap;justify-content:flex-end">${head}<button class="btn small" id="conn-check" ${connBusy ? 'disabled' : ''}>${connBusy ? 'Checking…' : 'Check again'}</button></div></div>
           <div class="card-body"><div class="muted" style="font-size:13px">Each row is a real request sent just now. The Helius link and the Jupiter key are set once on the server itself and used for every user: this website cannot show or change them.</div></div>
         </div>
         <div class="card">
