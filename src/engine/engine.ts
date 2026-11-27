@@ -99,6 +99,9 @@ export class Engine {
   private readonly solCache = new Map<string, { lamports: bigint; at: number }>();
   /** Their sells that arrived while our buy's outcome was unknown: run once the buy is settled. */
   private readonly pendingMirror = new Map<number, SellOrder[]>();
+  /** Full exits that went out while another of our sells was on its way: once nothing is out any more, whatever is
+   *  still held is sold too (an overlapping sell the market paid only part of, or one that failed for good). */
+  private readonly exitOwed = new Map<number, SellOrder>();
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? Date.now;
@@ -425,6 +428,7 @@ export class Engine {
           continue;
         }
         error = fill.error;
+        this.followUpExit(p.id);
       } catch (err) {
         error = safeErrorMessage(err);
       }
@@ -483,6 +487,7 @@ export class Engine {
       if (now) store.updatePosition(p.id, { proceedsLamports: now.proceedsLamports + (exact.lamports - lamports) });
     }).catch(() => undefined);
     store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, lamports, sentAt, fill.simulated, closed, marketShort && !closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
+    this.followUpExit(p.id);
   }
 
   /** "Sold 40% of the bag of X (copy) for 0.4 SOL — +2.0s after buy · 412K tokens (test). Position closed." */
@@ -566,9 +571,9 @@ export class Engine {
     }
     const owner = wallet.publicKey.toBase58();
     // A stage that already fired (e.g. finished while this order waited in the queue) never sells twice.
-    if ((order.reason === 'timed' && order.stage !== undefined && p.firedTimed.includes(order.stage))
+    if (!order.rest && ((order.reason === 'timed' && order.stage !== undefined && p.firedTimed.includes(order.stage))
       || (order.reason === 'stop_loss' && order.stage !== undefined && p.firedStop.includes(order.stage))
-      || (order.reason === 'dead_coin' && p.deadFired)) return { ok: true };
+      || (order.reason === 'dead_coin' && p.deadFired))) return { ok: true };
     const live = p.mode === 'live';
     // The Live switch stops new real buys only: a position bought for real is always sold by its rules.
     if (live && !executor.isLive({ live: true, exit: true })) {
@@ -621,7 +626,11 @@ export class Engine {
         mine.delete(key);
         if (!mine.size) this.reserved.delete(p.id);
       }
-      if (!fill.ok) return this.sellFailed(p, order, label, fill.error, quiet);
+      if (!fill.ok) {
+        const failed = this.sellFailed(p, order, label, fill.error, quiet);
+        this.followUpExit(p.id);
+        return failed;
+      }
 
       this.retries.delete(key);
       this.solCache.delete(owner); // the wallet's SOL just changed
@@ -650,6 +659,8 @@ export class Engine {
         ...(partial ? {} : this.markDone(cur, order)),
       });
       if (partial && order.reason !== 'manual') this.retries.set(key, { positionId: p.id, order, tries: 1, nextAt: this.now() + (this.deps.slowRetryMs ?? SLOW_RETRY_MS) });
+      // A full exit that left coins to our other sells on their way: whatever they do not sell is sold after them.
+      if (!closed && !partial && order.percent >= 100 && this.reservedExcept(p.id, '') > 0n) this.exitOwed.set(p.id, order);
       const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
       const booked = fill.lamports;
       void fill.refine?.then((exact) => {
@@ -659,6 +670,7 @@ export class Engine {
         if (cur) store.updatePosition(p.id, { proceedsLamports: cur.proceedsLamports + (exact.lamports - booked) });
       }).catch(() => undefined);
       store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, fill.lamports, sentAt, fill.simulated, closed, partial), mint: p.mint, signature: fill.simulated ? null : fill.signature });
+      this.followUpExit(p.id);
       return { ok: true };
     } catch (err) {
       return this.sellFailed(p, order, label, safeErrorMessage(err), quiet);
@@ -772,6 +784,17 @@ export class Engine {
         this.run(p.id, { reason: 'mirror', percent: 100, tag: 'reconcile' });
       }
     }
+  }
+
+  /** A full exit owed to this position (see exitOwed): sold now if nothing else of ours is on its way. */
+  private followUpExit(positionId: number): void {
+    const order = this.exitOwed.get(positionId);
+    if (!order) return;
+    const p = this.deps.store.position(positionId);
+    if (!p || p.status !== 'open' || p.tokensHeld <= 0n) { this.exitOwed.delete(positionId); return; }
+    if (this.reservedExcept(positionId, '') > 0n) return;
+    this.exitOwed.delete(positionId);
+    this.run(positionId, { reason: order.reason, percent: 100, tag: `${order.tag ?? order.stage ?? ''}:rest`, rest: true });
   }
 
   /** Runs their sells that were kept while this position's buy was unsettled (it has just opened). */

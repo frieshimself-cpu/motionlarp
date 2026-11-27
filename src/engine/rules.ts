@@ -16,6 +16,8 @@ export interface SellOrder {
   basis?: 'bag';
   /** Sell whatever is in the wallet (the last step of a bag-based timed exit). */
   everything?: boolean;
+  /** The rest of a full exit that already fired (what an overlapping sell left): sold even though its rule is done. */
+  rest?: boolean;
 }
 
 export interface PositionView {

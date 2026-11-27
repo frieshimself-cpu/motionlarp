@@ -747,3 +747,23 @@ describe('test mode: the last step of a timed exit waits for a step that is stil
     expect(feed().some((l) => /could pay for only part/.test(l))).toBe(false); // the market was not short: no such line
   });
 });
+
+describe('a full exit leaves nothing behind when an overlapping sell fills only part (found by the timing fuzzer)', () => {
+  it('the stop loss sells everything free, the timed step then sells only a quarter of its share: the rest is sold at once', async () => {
+    ex.live = true;
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: false, mode: 'same' }, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 600, percent: 100 }], stopLoss: [{ lossPct: 20, percent: 100 }], deadCoin: { enabled: false, idleSec: 120 } } }));
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let settle!: (v: 'ok') => void;
+    ex.plan = (n) => (n === 1 ? new Promise((r) => { settle = r; }) : 'ok');
+    ex.sellCap = (n) => (n === 1 ? 100_000n : null); // the market pays for a quarter of the +2 s step's 400k
+    clock = 1_002_000; await engine.tick(); await sleep(5); // the +2 s step is out
+    ex.quoteSell = async (_m, tokens) => (tokens * SOL * 7n) / (BAG * 10n); // down 30 %
+    (engine as unknown as { lastQuoteAt: Map<number, number> }).lastQuoteAt.set(open()[0]!.id, -1e12);
+    clock = 1_003_000; await engine.tick(); await sleep(5); // the stop loss sells what is not out: 600k
+    expect(ex.sells.map((s) => s.tokens)).toEqual([600_000n]);
+    settle('ok'); await sleep(5); await engine.idle(); // the step sells 100k; 300k would be left until +600 s
+    expect(ex.sells.map((s) => s.tokens)).toEqual([600_000n, 100_000n, 300_000n]);
+    expect(ex.held).toBe(0n);
+    expect(open()).toHaveLength(0);
+  });
+});
