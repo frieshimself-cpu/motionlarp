@@ -768,18 +768,18 @@ status read, after which `notLanding` fell back to the fixed 180 s or 120 s alth
 known: on a slow chain a sell left behind was dropped before its last block (lag seed 512, 18 blocks short) or, with no
 tip, on the word of a node far behind (slow seed 50: a sale that had landed, dropped because a node 30 blocks behind
 had not seen it, never booked, its SOL missing from the books and the profit). 63fc09c, from the review that ran
-meanwhile, keeps the highest tip read instead, and on the merged code (964abdd) no seed is flagged: default mix 0 of
-2,000, lag 0 of 3,000, slow 0 of 2,000, crash, ghost and outage 0 of 1,500 each; all saved cases pass. In the lag run
-3,805 sells were left behind (2,458 had landed, all booked; dropped 469 by the slotted rule, 190 by the 30-block rule,
-none by a time limit; 688 had failed on chain) and 465 sells of unknown outcome were settled (346 landed, 119 taken as
-never landed by the two rules); of 30,596 status reads 21,117 came from a node behind, 1,235 from a fork, 285 were
-answered "not confirmed yet", and 2,468 reads of the chain took 4 s or more; none of the verdicts was contradicted by
-the chain. The engine before e6575c1 on the same model: lag 67 of 3,000, slow 474 of 2,000, default 2 of 2,000, the
-first flag of all but one of those seeds a verdict of its fixed 120 s or 180 s (slow seed 142: a sell of unknown
-outcome given up 127 s after it was sent, the chain 44 blocks short of its last block; slow seed 5: a sell left behind
-dropped at 180 s, landed 8 s later and never booked). A change to the drop rules needs a `--profile lag` and a
-`--profile slow` run: in the default mix lag is 6 % of the seeds and slow periods 4 %, so the default mix alone catches
-such a change only at large seed counts.
+meanwhile, keeps the highest tip read instead, and on the merged code (964abdd, and again on 37caabf with 372fc55) no
+seed is flagged: default mix 0 of 2,000, lag 0 of 3,000, slow 0 of 2,000, crash, ghost and outage 0 of 1,500 each; all
+saved cases pass. In the lag run 3,805 sells were left behind (2,458 had landed, all booked; dropped 469 by the slotted
+rule, 190 by the 30-block rule, none by a time limit; 688 had failed on chain) and 465 sells of unknown outcome were
+settled (346 landed, 119 taken as never landed by the two rules); of 30,596 status reads 21,117 came from a node
+behind, 1,235 from a fork, 285 were answered "not confirmed yet", and 2,468 reads of the chain took 4 s or more; none
+of the verdicts was contradicted by the chain. The engine before e6575c1 on the same model: lag 67 of 3,000, slow 474
+of 2,000, default 2 of 2,000, the first flag of all but one of those seeds a verdict of its fixed 120 s or 180 s (slow
+seed 142: a sell of unknown outcome given up 127 s after it was sent, the chain 44 blocks short of its last block; slow
+seed 5: a sell left behind dropped at 180 s, landed 8 s later and never booked). A change to the drop rules needs a
+`--profile lag` and a `--profile slow` run: in the default mix lag is 6 % of the seeds and slow periods 4 %, so the
+default mix alone catches such a change only at large seed counts.
 
 ## Not yet verified
 
