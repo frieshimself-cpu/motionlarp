@@ -222,6 +222,10 @@ if (autoSender && config.rpcUrl) {
   setInterval(() => { if (senderRegion) void pingRegion(senderRegion).catch(() => undefined); }, 5_000).unref();
   // Measured again every five minutes: a region that went slow, or was dropped after failed sends, is replaced.
   setInterval(() => void pickSender().catch(() => undefined), 300_000).unref();
+  // And once half a minute after a start: the first measurement runs while the server is still starting (cold
+  // connections, a busy process) and read every region about 40 ms off, so the first five minutes after an update
+  // could go through a farther region (warm, the nearest one answers in about 3 ms).
+  setTimeout(() => void pickSender().catch(() => undefined), 30_000).unref();
 }
 
 app.listen(config.port, config.host, () => {
