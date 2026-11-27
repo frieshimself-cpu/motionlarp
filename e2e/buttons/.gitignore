@@ -1,0 +1,2 @@
+# run artifacts of the every-button suite (databases, manifests with throwaway keys, logs, screenshots)
+.run/

@@ -1,0 +1,145 @@
+{
+ "about": "Scharo preset, real trades. The +2 s sell's outcome comes back \"unknown\" (the connection did not answer) although it landed. The step is retried and sells another 40 %; the first sale's SOL is never booked, so the profit shown is short by it.",
+ "expect": [
+  "M3:sold-but-not-booked:outcome-unknown"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "Scharo",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 7,
+    "minLeaderBuySol": 1,
+    "slippagePct": 100,
+    "priorityFeeSol": 0.001,
+    "tipSol": 0.005,
+    "sellPriorityFeeSol": 0.001,
+    "sellTipSol": 0.001,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "exit"
+     },
+     "timedOf": "bag",
+     "timed": [
+      {
+       "afterSec": 2,
+       "percent": 40
+      },
+      {
+       "afterSec": 4,
+       "percent": 30
+      },
+      {
+       "afterSec": 6,
+       "percent": 100
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 2400,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 2000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 2000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [
+   {
+    "L1": 400,
+    "L2": 200,
+    "L3": 100,
+    "fail": "x",
+    "ghost": true
+   }
+  ],
+  "quote": [],
+  "bal": []
+ }
+}

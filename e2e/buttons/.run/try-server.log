@@ -1,5 +1,0 @@
-(node:23443) ExperimentalWarning: SQLite is an experimental feature and might change at any time
-(Use `node --trace-warnings ...` to show where the warning was created)
-{"t":"2026-11-27T03:16:50.776Z","level":"info","msg":"motionlarp up","data":{"url":"http://127.0.0.1:38411","mode":"offline","maxSolPerBuy":5,"feeBps":100,"admin":"on"}}
-{"t":"2026-11-27T03:16:50.777Z","level":"warn","msg":"no RPC link yet: the site works but nothing is watched or traded (add it at /admin)"}
-{"t":"2026-11-27T03:17:03.866Z","level":"info","msg":"shutting down","data":{"signal":"SIGTERM"}}

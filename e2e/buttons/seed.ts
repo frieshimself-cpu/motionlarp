@@ -389,6 +389,17 @@ position({ // the same day as H4: a day with both real and test trades
   key: 'T5-test-win-3d', copy: scharo!, mode: 'paper', end: 'closed', boughtAgo: 3 * DAY + 20 * MIN, tokens: T(8_000_000), buy: { lamports: L('7.041005'), fee: L('0.035') },
   sells: [sell('timed', T(3_200_000), '3', '0.015', 2000, 40, { stage: 0, bag: true }), sell('timed', T(2_400_000), '2.141005', '0.0107', 4000, 30, { stage: 1, bag: true }), sell('timed', T(2_400_000), '2', '0.01', 6000, 100, { stage: 2, rest: true })],
 });
+// A real trade that closed at 00:30 on 19 October 2026 for someone in Berlin: 22:30 UTC on the 18th, a week before
+// the clocks went back there (so that day's offset is not today's).
+{
+  const closedAt = Date.UTC(2026, 9, 18, 22, 30, 0);
+  if (NOW - closedAt > 2 * DAY && NOW - closedAt < 45 * DAY) {
+    position({
+      key: 'H9-live-dst-edge', copy: allSame!, mode: 'live', end: 'closed', boughtAgo: NOW - closedAt + 60_000, tokens: T(100_000), buy: { lamports: L('0.2'), fee: L('0.001') },
+      sells: [sell('manual', T(100_000), '0.21', '0.001', 60_000, 100)],
+    });
+  }
+}
 // Alice, a buy that failed ──────────────────────────────────────────────
 position({ key: 'F1-failed-buy', copy: allSame!, mode: 'live', end: 'failed', boughtAgo: 40 * MIN, failError: 'custom program error: 0x1772 TooMuchSolRequired', failText: 'price moved more than your slippage allows' });
 
@@ -442,6 +453,7 @@ manifest.keys.revokedUnused.status = 'revoked';
     address: pubkey(),
     leaders: Array.from({ length: 12 }, pubkey),
   };
+  manifest.fillers = Array.from({ length: 40 }, pubkey);
 }
 
 store.close();

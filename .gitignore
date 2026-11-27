@@ -4,3 +4,8 @@ data/
 .env
 *.db
 *.db-*
+
+# scratch probes, never committed
+scripts/tmp/
+# output of the last fuzz run (the shrunk cases worth keeping are in e2e/fuzz/cases/)
+e2e/fuzz/out/
