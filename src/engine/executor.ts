@@ -315,9 +315,12 @@ export class ChainExecutor implements Executor {
   }
 
   /**
-   * Live path: send, confirm (until the blockhash expires), then read what really happened from our own confirmed
-   * transaction. If confirmation is unknown or says "not landed", the wallet's balance of the coin decides: a
-   * transaction that landed late is still recorded as a fill, never left as orphaned coins.
+   * Live path: send, then return THE MOMENT the transaction is confirmed (timed sells count from there), with the
+   * tokens known and the SOL as quoted; the exact SOL is read from the confirmed transaction afterwards (`refine`).
+   *
+   * A transaction that errored or expired did not land, full stop. Only when the outcome is unknown (the RPC could
+   * not be reached) does the wallet's balance decide, so a late landing is never left as orphaned coins. With
+   * timed steps overlapping, another sell's balance change must not be mistaken for this one's.
    */
   private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBefore: bigint | null, platformFee: bigint): Promise<FillResult> {
     const sent = await sendTransaction(tx, true, this.tip(req));
@@ -325,12 +328,12 @@ export class ChainExecutor implements Executor {
     const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight);
     const owner = req.wallet.publicKey.toBase58();
     if (!confirmed.landed) {
-      if (balanceBefore !== null) {
+      if (!confirmed.certain && balanceBefore !== null) {
         try {
           const after = await this.tokenBalance(owner, req.mint);
           const moved = side === 'buy' ? after - balanceBefore : balanceBefore - after;
           if (moved > 0n) {
-            return { ok: true, signature: sent.signature, tokens: moved, lamports: side === 'buy' ? expectedLamports : (expectedLamports * moved) / (expectedTokens || 1n), simulated: false, feeLamports: platformFee, note: 'landed late; fill estimated from the balance change' };
+            return { ok: true, signature: sent.signature, tokens: moved, lamports: side === 'buy' ? expectedLamports : (expectedLamports * moved) / (expectedTokens || 1n), simulated: false, feeLamports: platformFee, confirmedAt: Date.now(), note: 'landed late; fill estimated from the balance change' };
           }
         } catch {
           // fall through
@@ -338,22 +341,42 @@ export class ChainExecutor implements Executor {
       }
       return { ok: false, error: `sent but did not land: ${confirmed.reason}` };
     }
+    const confirmedAt = Date.now();
+    const exact = this.readFill(sent.signature, owner, req.mint, side);
+    const refine = exact.then((r) => (r ? { lamports: r.lamports } : null));
+    const base = { ok: true as const, signature: sent.signature, simulated: false, feeLamports: platformFee, confirmedAt };
+    if (side === 'sell') return { ...base, tokens: expectedTokens, lamports: expectedLamports, refine };
+    // A buy: the bag is what the wallet really received, read at once as the change in its balance.
+    if (balanceBefore !== null) {
+      try {
+        const after = await this.tokenBalance(owner, req.mint);
+        if (after > balanceBefore) return { ...base, tokens: after - balanceBefore, lamports: expectedLamports, refine };
+      } catch {
+        // fall through to the transaction itself
+      }
+    }
+    const r = await exact;
+    return { ...base, tokens: r?.tokens ?? expectedTokens, lamports: r?.lamports ?? expectedLamports, ...(r ? {} : { note: 'landed; fill estimated from the quote' }) };
+  }
+
+  /** What our confirmed transaction really did: tokens moved and SOL spent / received, fees included. */
+  private async readFill(signature: string, owner: string, mint: string, side: 'buy' | 'sell'): Promise<{ tokens: bigint; lamports: bigint } | null> {
     for (let i = 0; i < FETCH_FILL_TRIES; i++) {
       try {
-        const got = await getTransaction(sent.signature);
-        const mine = got ? parseLeaderTrades(got, owner).find((t) => t.mint === req.mint && t.side === side) : undefined;
+        const got = await getTransaction(signature);
+        const mine = got ? parseLeaderTrades(got, owner).find((t) => t.mint === mint && t.side === side) : undefined;
         if (mine && got?.meta) {
           // Our own profit counts the network + priority fee we paid (the parser leaves the payer's fee out). The
           // platform fee transfer is already in the wallet's SOL change.
           const fee = BigInt(got.meta.fee);
           const lamports = side === 'buy' ? mine.solLamports + fee : mine.solLamports > fee ? mine.solLamports - fee : 0n;
-          return { ok: true, signature: sent.signature, tokens: mine.tokenAmount, lamports, simulated: false, feeLamports: platformFee };
+          return { tokens: mine.tokenAmount, lamports };
         }
       } catch (err) {
-        log.warn('could not read the fill yet', { signature: sent.signature, error: safeErrorMessage(err) });
+        log.warn('could not read the fill yet', { signature, error: safeErrorMessage(err) });
       }
       await new Promise((r) => setTimeout(r, 700));
     }
-    return { ok: true, signature: sent.signature, tokens: expectedTokens, lamports: expectedLamports, simulated: false, feeLamports: platformFee, note: 'landed; fill estimated from the quote' };
+    return null;
   }
 }

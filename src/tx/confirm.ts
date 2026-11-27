@@ -4,7 +4,7 @@ import { getConnection } from '../chain/connection.js';
 
 export type ConfirmOutcome = { landed: true; slot?: number } | { landed: false; reason: string; certain: boolean };
 
-const POLL_MS = 800;
+const POLL_MS = 300;
 const HARD_CAP_MS = 150_000;
 
 export async function confirmSignature(signature: string, lastValidBlockHeight?: number): Promise<ConfirmOutcome> {
@@ -18,7 +18,7 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
       const status = res.value[0];
       if (status?.err) return { landed: false, reason: `transaction errored: ${JSON.stringify(status.err)}`, certain: true };
       if (status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) return { landed: true, slot: status.slot };
-      if (lastValidBlockHeight !== undefined && polls % 4 === 3) {
+      if (lastValidBlockHeight !== undefined && polls % 10 === 9) {
         const height = await connection.getBlockHeight('confirmed');
         if (height > lastValidBlockHeight) {
           // Expired: one last look, then it is certain the transaction will never land.

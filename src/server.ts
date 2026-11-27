@@ -94,12 +94,13 @@ const app = createApp({
   serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: senderNote, feed: feedNote() }),
 });
 
-// Every second. Ticks may overlap: the engine runs one price check per position at a time, and timed sells fire
+// Five times a second, so a timed sell goes out within 0.2 s of its time. Ticks may overlap: the engine runs one
+// price check per position at a time, and timed sells fire
 // without waiting for any price check.
 const clock = setInterval(() => {
   if (!config.rpcUrl) return;
   engine.tick().catch((err) => log.warn('tick failed', { error: safeErrorMessage(err) }));
-}, 1000);
+}, 200);
 
 // Safety nets: settle buys interrupted by a restart, and sell coins whose followed wallet already left.
 let reconciling = false;
