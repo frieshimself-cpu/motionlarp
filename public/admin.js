@@ -97,9 +97,9 @@ function render() {
           <div class="card-head"><h2>Settings</h2></div>
           <form id="settings">
             <div class="setting"><div class="what"><b>Helius RPC link</b><span>The connection to Solana. Helius → RPC → "RPC URL".</span></div>
-              <div><div class="hint" style="margin:0 0 6px">${st.rpcSet ? `Current: <span class="mono">${esc(st.rpc)}</span>` : 'Not set: nothing is watched or traded yet.'}</div><input id="set-rpc" type="password" autocomplete="off" placeholder="${st.rpcSet ? 'Paste a new link to replace it' : 'https://mainnet.helius-rpc.com/?api-key=…'}"><div class="hint">Stored encrypted, never shown again. Changing it restarts the site (a few seconds).</div></div></div>
+              <div><div class="hint" style="margin:0 0 6px">${st.rpcSet ? `Current: <span class="mono">${esc(st.rpc)}</span>` : 'Not set: nothing is watched or traded yet.'}</div><input id="set-rpc" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="${st.rpcSet ? 'Leave empty to keep the current link' : 'https://mainnet.helius-rpc.com/?api-key=…'}"><div class="hint">Stored encrypted, never shown again. Changing it restarts the site (a few seconds).</div></div></div>
             <div class="setting"><div class="what"><b>Jupiter API key</b><span>Optional. For coins outside pump.fun: a key from portal.jup.ag lifts the free rate limit.</span></div>
-              <div><input id="set-jup" type="password" autocomplete="off" placeholder="${st.jupiterKeySet ? 'Set — paste a new key to replace it' : 'Optional'}"></div></div>
+              <div><input id="set-jup" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="${st.jupiterKeySet ? 'Set — paste a new key to replace it' : 'Optional'}"></div></div>
             <div class="setting"><div class="what"><b>Platform fee</b><span>Your cut of every buy and sell, paid inside the same transaction. A license can have its own.</span></div>
               <div class="row2"><div><label for="set-fee">Fee</label><div class="unit"><input id="set-fee" type="number" min="0" max="10" step="any" value="${esc(st.feePercent)}"><span>%</span></div></div>
               <div><label for="set-wallet">Paid to wallet</label><input id="set-wallet" type="text" autocomplete="off" spellcheck="false" value="${esc(st.feeWallet)}" placeholder="Wallet address (must hold ≥ 0.001 SOL)"></div></div></div>
@@ -164,7 +164,12 @@ function bind() {
     const msg = $('#settings-msg');
     msg.className = 'muted';
     msg.textContent = 'Saving…';
-    const body = { feePercent: Number($('#set-fee').value || 0), feeWallet: $('#set-wallet').value.trim(), maxSolPerBuy: Number($('#set-max').value), liveTrading: $('#set-live').checked };
+    const body = { feePercent: Number($('#set-fee').value || 0), feeWallet: $('#set-wallet').value.trim(), liveTrading: $('#set-live').checked };
+    // An empty "max per buy" keeps the current value.
+    if ($('#set-max').value.trim()) body.maxSolPerBuy = Number($('#set-max').value);
+    // The RPC link is a link: anything else in that box (a password a browser filled in by itself) is ignored.
+    const rpcBox = $('#set-rpc').value.trim();
+    if (rpcBox && !/^https:\/\//.test(rpcBox)) $('#set-rpc').value = '';
     if ($('#set-rpc').value.trim()) body.rpcUrl = $('#set-rpc').value.trim();
     if ($('#set-jup').value.trim()) body.jupiterApiKey = $('#set-jup').value.trim();
     try {
