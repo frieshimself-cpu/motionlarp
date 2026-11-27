@@ -20,7 +20,8 @@ import { log, safeErrorMessage } from '../log.js';
 import { buildSignedTx } from '../tx/build.js';
 import { feeLamports, withFee } from '../fee.js';
 import { confirmSignature } from '../tx/confirm.js';
-import { canSendLive, resend, sendTransaction } from '../tx/send.js';
+import { canSendLive, resend, sendTransaction, signatureOf } from '../tx/send.js';
+import { programError } from '../tx/errors.js';
 import { tipAccount, tipInstruction, tipLamports, tipRoute } from '../tx/tip.js';
 import { appendInstruction, Jupiter, MAX_TRANSACTION_BYTES, ROUTE_SMALL } from '../venues/jupiter.js';
 import { PfDispatcher } from '../venues/pf.js';
@@ -55,6 +56,8 @@ export interface TradeRequest {
   exit?: boolean;
   /** Simulate before sending (a retry: one that cannot work then costs nothing). */
   checkFirst?: boolean;
+  /** Told the transaction's signature the moment it is signed, before it is sent (so it can be written down). */
+  onSigned?: (signature: string) => void;
 }
 
 export interface Executor {
@@ -69,6 +72,9 @@ export interface Executor {
   isLive(req: { live: boolean; exit?: boolean }): boolean;
   /** Optional: look the coin up ahead of the buy (the engine calls it while it checks the wallet's balance). */
   warm?(mint: string): Promise<void>;
+  /** Optional: what became of a buy, from its own transaction (restore after a crash or an unknown outcome). Throws
+   *  when the RPC cannot be read. */
+  settleBuy?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }>;
 }
 
 const FETCH_FILL_TRIES = 6;
@@ -139,7 +145,12 @@ export class ChainExecutor implements Executor {
     if (hit && Date.now() - hit.at < QUOTE_CACHE_MS) return hit.lamports;
     const lamports = await this.route(
       mint,
-      (pool) => this.pf.venueFor(pool).quoteSell(pool, tokens),
+      async (pool) => {
+        const out = await this.pf.venueFor(pool).quoteSell(pool, tokens);
+        // A quote of nothing for something is not a price (a finished curve, a drained pool): no price this time.
+        if (out === 0n && tokens > 0n) throw new Error('no price: the quote came back 0');
+        return out;
+      },
       // price checks never wait on retries: they must not hold up the clock that fires timed sells
       async () => BigInt((await this.jup.route(mint, WSOL_MINT, tokens, 100, false)).quote.outAmount),
     );
@@ -177,6 +188,18 @@ export class ChainExecutor implements Executor {
       }
       throw err;
     }
+  }
+
+  /** What became of a buy, from its own transaction: landed (exact tokens and SOL), failed, or not found (yet). */
+  async settleBuy(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
+    const status = (await getConnection().getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0];
+    if (!status) return { state: 'not_found' };
+    if (status.err) return { state: 'failed' };
+    if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') return { state: 'not_found' };
+    const got = await getTransaction(signature);
+    const change = got ? walletChange(got, owner, mint) : null;
+    if (!change || change.tokens <= 0n) return { state: 'failed' };
+    return { state: 'landed', tokens: change.tokens, lamports: -change.lamports };
   }
 
   /** Looks the coin up ahead of its buy (cached for a minute), so the buy itself has one round trip less to wait for. */
@@ -375,7 +398,11 @@ export class ChainExecutor implements Executor {
     // The tip the transaction really carries decides its lanes (a Jupiter route too big for it goes without).
     const tip = tipCarried ?? this.tip(req);
     const sendOpts = { exit: !!req.exit, simulateFirst: !!req.checkFirst };
+    const mine = signatureOf(tx);
+    try { req.onSigned?.(mine); } catch { /* bookkeeping must not stop the trade */ }
+    const t0 = Date.now();
     const sent = await sendTransaction(tx, true, tip, sendOpts);
+    log.info('trade sent', { side, mint: req.mint, wallet: req.wallet.publicKey.toBase58(), signature: mine, ok: sent.ok, tip: Number(tip) / 1e9, priorityFee: req.priorityFeeSol, retry: !!req.checkFirst, ...(sent.ok ? {} : { error: sent.error }) });
     if (!sent.ok) return { ok: false, error: sent.error };
     // The owner switched live trading off while this was being built: it was only simulated. Nothing happened.
     if (sent.simulated) return { ok: false, error: 'live trading was switched off before this was sent' };
@@ -400,8 +427,17 @@ export class ChainExecutor implements Executor {
           return { ok: false, error: `sent, outcome unknown: ${confirmed.reason}`, uncertain: true };
         }
       }
-      return { ok: false, error: `sent but did not land: ${confirmed.reason}` };
+      // Landed and failed: the program's own words say why (slippage, a finished curve, not enough SOL, …).
+      let reason = confirmed.reason;
+      if (/errored/.test(reason)) {
+        const detail = await getTransaction(sent.signature).then((t) => programError(t?.meta?.logMessages)).catch(() => null);
+        if (detail) reason = `${reason} (${detail})`;
+        if (/ComputationalBudgetExceeded|exceeded CUs/i.test(reason)) this.heavy.set(req.mint, config.computeUnitLimit * 2);
+      }
+      log.warn('trade did not land', { side, mint: req.mint, signature: sent.signature, ms: Date.now() - t0, reason });
+      return { ok: false, error: `sent but did not land: ${reason}` };
     }
+    log.info('trade landed', { side, mint: req.mint, signature: sent.signature, ms: Date.now() - t0 });
     const confirmedAt = Date.now();
     const exact = this.readFill(sent.signature, owner, req.mint, side);
     const refine = exact.then((r) => (r ? { lamports: r.lamports } : null));

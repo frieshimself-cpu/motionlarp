@@ -71,6 +71,7 @@ describe('every RPC request is bounded', () => {
   });
 
   it('after a few tries the 429 is handed back (the caller decides)', async () => {
+    config.rpcBackupUrl = 'off'; // the main link alone (the backup link has its own tests)
     let n = 0;
     vi.stubGlobal('fetch', async () => { n++; return new Response('busy', { status: 429 }); });
     expect((await boundedFetch('https://rpc.test')).status).toBe(429);

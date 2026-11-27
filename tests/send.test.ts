@@ -152,16 +152,16 @@ describe('waiting for a transaction to land', () => {
   it('re-sends the same transaction about once a second until it lands (a dropped one is not stuck until it expires)', async () => {
     chain([null, null, null, null, null, null, null, { confirmationStatus: 'confirmed', slot: 9 }]);
     let resent = 0;
-    const r = await confirmSignature('sig', 1_000, { resend: () => { resent++; }, pollMs: 2 });
+    const r = await confirmSignature('sig', 1_000, { resend: () => { resent++; }, pollMs: 6, resendEveryMs: 10 });
     expect(r).toEqual({ landed: true, slot: 9 });
-    expect(resent).toBe(2); // after polls 3 and 6
+    expect(resent).toBeGreaterThanOrEqual(2); // on its own timer, while nothing is seen
   });
 
   it('a buy is re-sent only for its first moments: one that missed its chance is left to expire, not pushed for 30 s', async () => {
     chain([null, null, null, null, null, null, null, null, null, null, null, null, { confirmationStatus: 'confirmed', slot: 9 }]);
     let resent = 0;
-    await confirmSignature('sig', 1_000, { resend: () => { resent++; }, pollMs: 10, resendForMs: 45 });
-    expect(resent).toBe(1); // at poll 3 (30 ms); polls 6, 9 and 12 are past the 45 ms budget
+    await confirmSignature('sig', 1_000, { resend: () => { resent++; }, pollMs: 10, resendForMs: 45, resendEveryMs: 20 });
+    expect(resent).toBe(2); // at 20 and 40 ms; later ticks are past the 45 ms budget
   });
 
   it('stops re-sending once it has landed or failed on chain', async () => {

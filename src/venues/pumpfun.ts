@@ -22,6 +22,7 @@ export class PumpFunVenue implements Venue {
   readonly kind = 'pumpfun_curve' as const;
   private online: OnlinePumpSdk | null = null;
   private globals: { global: Global; feeConfig: FeeConfig | null; at: number } | null = null;
+  private lastFeeConfig: FeeConfig | null = null;
 
   private sdk(): OnlinePumpSdk {
     if (!this.online) this.online = new OnlinePumpSdk(getFastConnection());
@@ -30,13 +31,15 @@ export class PumpFunVenue implements Venue {
 
   /** `Global` and `FeeConfig` change rarely; cache them for five minutes. */
   private async fetchGlobals(): Promise<{ global: Global; feeConfig: FeeConfig | null }> {
-    if (this.globals && Date.now() - this.globals.at < GLOBAL_TTL_MS) return this.globals;
+    // Kept only when the fee table was read: without it the SDK prices with a flat fee that is 0.24 % off.
+    if (this.globals && this.globals.feeConfig !== null && Date.now() - this.globals.at < GLOBAL_TTL_MS) return this.globals;
     const sdk = this.sdk();
-    const [global, feeConfig] = await Promise.all([
+    const [global, fee] = await Promise.all([
       sdk.fetchGlobal(),
       sdk.fetchFeeConfig().catch(() => null),
     ]);
-    this.globals = { global, feeConfig, at: Date.now() };
+    if (fee) this.lastFeeConfig = fee;
+    this.globals = { global, feeConfig: fee ?? this.lastFeeConfig, at: Date.now() };
     return this.globals;
   }
 
@@ -66,6 +69,8 @@ export class PumpFunVenue implements Venue {
     const { global, feeConfig } = await this.fetchGlobals();
     const curve = await this.sdk().fetchBondingCurve(pool.mint);
     this.assertSolCurve(curve.quoteMint);
+    // A completed curve quotes 0 (its reserves are gone): that would fire every stop loss. It trades on PumpSwap now.
+    if (curve.complete) throw new VenueError('bonding curve is complete (migrated)', 'migrated');
     const out = getSellSolAmountFromTokenAmount({
       global,
       feeConfig,
@@ -81,6 +86,9 @@ export class PumpFunVenue implements Venue {
     const state = await this.sdk().fetchBuyState(pool.mint, user, pool.tokenProgram);
     this.assertSolCurve(state.quoteMint);
     if (state.bondingCurve.complete) throw new VenueError('bonding curve is complete (migrated)', 'migrated');
+    // A cashback coin (an older kind) does not take the exact-spend buy, and the older buy can take up to the amount
+    // times (1 + slippage): it is bought through Jupiter, which spends exactly the amount set.
+    if (state.bondingCurve.isCashbackCoin && process.env.PUMP_EXACT_BUY !== 'off') throw new VenueError('a cashback coin: bought through Jupiter (exact spend)', 'unsupported_pool');
     const solAmount = bn(lamportsIn);
     const amount = getBuyTokenAmountFromSolAmount({
       global,
@@ -97,8 +105,9 @@ export class PumpFunVenue implements Venue {
     // fixed number of tokens and lets the program take up to lamportsIn + slippage: at 100 % slippage a buy could
     // cost twice what the user set.) Simulated on mainnet with scripts/check-exact-buy.ts.
     if (process.env.PUMP_EXACT_BUY !== 'off') {
+      let instructions;
       try {
-        const instructions = await PUMP_SDK.buyExactQuoteInV3Instructions({
+        instructions = await PUMP_SDK.buyExactQuoteInV3Instructions({
           bondingCurve: state.bondingCurve,
           associatedUserAccountInfo: state.associatedUserAccountInfo,
           mint: pool.mint,
@@ -107,12 +116,15 @@ export class PumpFunVenue implements Venue {
           quoteAmount: solAmount,
           slippage: slippagePct,
           tokenProgram: pool.tokenProgram,
+          // A mayhem curve near its end: buy what is left instead of failing (ordinary curves complete and carry on).
+          partialFill: !!state.bondingCurve.isMayhemMode,
         });
-        const minOut = expectedOut - (expectedOut * BigInt(Math.round(Math.min(100, Math.max(0, slippagePct)) * 10))) / 1000n;
-        return { instructions, expectedOut, minOut };
-      } catch {
-        // The SDK refuses this instruction for some coins (cashback coins): they use the older buy below.
+      } catch (err) {
+        // Never fall back to the older buy (it can spend up to twice the amount): Jupiter spends an exact amount.
+        throw new VenueError(`the exact-spend buy cannot be built for this coin (${err instanceof Error ? err.message : err}): bought through Jupiter`, 'unsupported_pool');
       }
+      const minOut = expectedOut - (expectedOut * BigInt(Math.round(Math.min(100, Math.max(0, slippagePct)) * 10))) / 1000n;
+      return { instructions, expectedOut, minOut };
     }
     // The SDK applies `slippage` (percent) to solAmount as the max SOL the program may take.
     const instructions = await PUMP_SDK.buyInstructions({

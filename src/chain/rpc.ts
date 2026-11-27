@@ -1,5 +1,6 @@
 // Raw JSON-RPC for the calls whose exact JSON shape we parse ourselves (transactions, signatures).
 import { config } from '../config.js';
+import { boundedFetch } from './connection.js';
 
 export interface RawTokenBalance {
   accountIndex: number;
@@ -42,12 +43,12 @@ class RateLimited extends Error {}
 
 async function rpcOnce<T>(method: string, params: unknown[], url: string): Promise<T> {
   if (!url) throw new Error('RPC_URL is not configured');
-  const res = await fetch(url, {
+  // Through the same guard as the connection: a time limit, quick 429 retries, the backup link on failure.
+  const res = await boundedFetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
-    signal: AbortSignal.timeout(15_000),
-  });
+  }, 15_000);
   if (res.status === 429) throw new RateLimited(`rpc ${method}: rate limited (429)`);
   const body = (await res.json()) as { result?: T; error?: { message?: string } };
   if (body.error) throw new Error(`rpc ${method}: ${body.error.message ?? 'error'}`);

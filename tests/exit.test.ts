@@ -461,3 +461,40 @@ describe('found by the review of the engine (27 Nov 2026)', () => {
     expect(ex.requests[0]).toMatchObject({ slippagePct: 100, priorityFeeSol: 0.001, tipSol: 0.001 });
   });
 });
+
+describe('a buy cut short (crash, lost connection) is settled from its own transaction, not guessed', () => {
+  // Velo writes every trade down with its signature the moment it is sent; the site only had "does the wallet hold
+  // the coin", which counts coins the user already had and books the buy size as the cost.
+  it('the signature is kept as soon as the buy is signed; restore reads that transaction for the exact bag and cost', async () => {
+    ex.live = true;
+    scharo();
+    ex.held = 123n; // coins of this mint the user already had
+    let signed = '';
+    ex.buy = async (req) => { req.onSigned?.('BUYSIG1'); signed = 'BUYSIG1'; return { ok: false, error: 'sent, outcome unknown', uncertain: true }; };
+    const settled: string[] = [];
+    (ex as unknown as { settleBuy: unknown }).settleBuy = async (sig: string) => { settled.push(sig); return { state: 'landed', tokens: 900_000n, lamports: 1_010_000_000n }; };
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    expect(signed).toBe('BUYSIG1');
+    expect(store.openingPositions()[0]!.buySig).toBe('BUYSIG1');
+    await engine.restore();
+    expect(settled).toEqual(['BUYSIG1']);
+    expect(open()[0]).toMatchObject({ status: 'open', tokensBought: 900_000n, tokensHeld: 900_000n, costLamports: 1_010_000_000n });
+  });
+
+  it('a buy whose transaction failed, or never showed up before its blockhash ran out, is marked failed (the user\'s own coins are not taken for it)', async () => {
+    ex.live = true;
+    scharo();
+    ex.held = 5_000n;
+    ex.buy = async (req) => { req.onSigned?.('BUYSIG2'); return { ok: false, error: 'sent, outcome unknown', uncertain: true }; };
+    let answer = 'not_found';
+    (ex as unknown as { settleBuy: unknown }).settleBuy = async () => ({ state: answer });
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    await engine.restore();
+    expect(store.openingPositions()).toHaveLength(1); // too young to say
+    clock += 120_000;
+    await engine.restore();
+    expect(store.openingPositions()).toHaveLength(0);
+    expect(open()).toHaveLength(0);
+    answer = 'failed';
+  });
+});

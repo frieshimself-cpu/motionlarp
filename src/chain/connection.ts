@@ -24,16 +24,53 @@ const FASTEST_SLOT_MS = 200;
 /** A buy is signed with a blockhash that has at least this many blocks left (about 8 s) and as few more as possible. */
 export const BUY_BLOCKHASH_MIN_BLOCKS = 40;
 
-export interface StampedBlockhash extends BlockhashWithExpiryBlockHeight { at: number }
+/** `at`: last time the RPC gave it; `firstSeen`: when it first appeared (its age decides how much life it has left). */
+export interface StampedBlockhash extends BlockhashWithExpiryBlockHeight { at: number; firstSeen?: number }
 let recent: StampedBlockhash[] = [];
 
-/** fetch with a time limit; a 429 is tried again after 80, 160 and 320 ms before it is handed back. */
-export async function boundedFetch(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> {
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(input, { ...init, signal: AbortSignal.timeout(config.rpcTimeoutMs) });
-    if (res.status !== 429 || attempt >= 3) return res;
-    await new Promise((r) => setTimeout(r, 80 * 2 ** attempt));
+/**
+ * fetch with a time limit; a 429 is tried again after 80, 160 and 320 ms. When the main link still fails (no answer,
+ * 5xx, 429), the same request goes to the backup link (RPC_BACKUP_URL; the public endpoint by default) and its answer
+ * is used: an outage of the main provider must not stop every sell. Only the request body travels to the backup,
+ * never the main link's key.
+ */
+export async function boundedFetch(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1], timeoutMs = config.rpcTimeoutMs): Promise<Response> {
+  let res: Response | null = null;
+  let failure: unknown = null;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      res = await fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      if (res.status !== 429 || attempt >= 3) break;
+      await new Promise((r) => setTimeout(r, 80 * 2 ** attempt));
+    }
+  } catch (err) {
+    failure = err;
   }
+  if (res && res.status !== 429 && res.status < 500) return res;
+  const backup = config.rpcBackupUrl;
+  if (backup && backup !== 'off' && backup !== String(input)) {
+    try {
+      const other = await fetch(backup, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      if (other.ok) {
+        noteBackupUsed();
+        return other;
+      }
+    } catch {
+      // the backup failed too: the main link's answer (or error) stands
+    }
+  }
+  if (res) return res;
+  throw failure;
+}
+
+let backupUsedAt = 0;
+function noteBackupUsed(): void {
+  if (Date.now() - backupUsedAt > 60_000) log.warn('the main RPC link failed: a request was answered by the backup link');
+  backupUsedAt = Date.now();
+}
+/** When the backup link last answered for the main one (0: never). */
+export function backupLastUsed(): number {
+  return backupUsedAt;
 }
 
 function make(commitment: Commitment): Connection {
@@ -69,8 +106,15 @@ export function setBlockhashesForTests(list: StampedBlockhash[]): void {
 export async function refreshBlockhash(): Promise<BlockhashWithExpiryBlockHeight> {
   const bh = await getConnection().getLatestBlockhash('confirmed');
   const now = Date.now();
-  if (recent[recent.length - 1]?.blockhash !== bh.blockhash) recent.push({ ...bh, at: now });
-  else recent[recent.length - 1]!.at = now;
+  const newest = recent[recent.length - 1];
+  // A node that lags behind the one that answered last time: its blockhash is older than one already held. Keep the
+  // newer one (signing with the older would shorten the life of every transaction).
+  if (newest && bh.lastValidBlockHeight < newest.lastValidBlockHeight) {
+    newest.at = now;
+    return newest;
+  }
+  if (newest?.blockhash !== bh.blockhash) recent.push({ ...bh, at: now, firstSeen: now });
+  else newest.at = now;
   // Keep what can still be useful: about 40 s of history.
   recent = recent.filter((r) => now - r.at < 40_000).slice(-40);
   return bh;
@@ -93,8 +137,12 @@ export async function getShortBlockhash(now = Date.now()): Promise<BlockhashWith
   const latest = await getBlockhash();
   const newest = recent[recent.length - 1];
   if (!newest) return latest;
+  // The feed has not moved for a while (the RPC keeps answering with the same blockhash): the height cannot be
+  // guessed, so take the newest, as Velo does.
+  const born = newest.firstSeen ?? newest.at;
+  if (now - born > 4_000) return newest;
   // The chain's height now, guessed high (so a blockhash is never thought to live longer than it does).
-  const height = newest.lastValidBlockHeight - BLOCKHASH_LIFE_BLOCKS + Math.ceil(Math.max(0, now - newest.at) / FASTEST_SLOT_MS);
+  const height = newest.lastValidBlockHeight - BLOCKHASH_LIFE_BLOCKS + Math.ceil(Math.max(0, now - born) / FASTEST_SLOT_MS);
   let pick: StampedBlockhash | null = null;
   for (const r of recent) {
     const left = r.lastValidBlockHeight - height;

@@ -8,14 +8,16 @@ export type ConfirmOutcome = { landed: true; slot?: number } | { landed: false; 
 
 const POLL_MS = 300;
 const HARD_CAP_MS = 150_000;
-/** Re-send every this many polls (0.9 s at the normal pace). */
-const RESEND_EVERY_POLLS = 3;
+/** Re-send this often while the transaction has not been seen in a block. */
+const RESEND_EVERY_MS = 900;
 
 export interface ConfirmOptions {
   /** Puts the same signed transaction out again (never a newly signed one). */
   resend?: () => void;
-  /** Re-send only for this long after the first poll (a buy); omitted = until it lands or expires (a sell). */
+  /** Re-send only for this long after the start (a buy); omitted = until it lands or expires (a sell). */
   resendForMs?: number;
+  /** How often to re-send (default 0.9 s). */
+  resendEveryMs?: number;
   /** For tests. */
   pollMs?: number;
 }
@@ -27,6 +29,22 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
   const started = Date.now();
   const deadline = started + HARD_CAP_MS;
   let polls = 0;
+  // Re-sending runs on its own timer: when the status checks fail (the RPC in trouble), a dropped transaction must
+  // still be pushed again, through Sender at least. It stops the moment the outcome is known.
+  let seen = false;
+  const timer = opts.resend
+    ? setInterval(() => {
+        if (seen || (opts.resendForMs !== undefined && Date.now() - started > opts.resendForMs)) return;
+        try { opts.resend!(); } catch { /* the next tick tries again */ }
+      }, opts.resendEveryMs ?? RESEND_EVERY_MS)
+    : null;
+  try {
+    return await poll();
+  } finally {
+    if (timer) clearInterval(timer);
+  }
+
+  async function poll(): Promise<ConfirmOutcome> {
   while (Date.now() < deadline) {
     try {
       const res = await connection.getSignatureStatuses([signature], { searchTransactionHistory: false });
@@ -42,8 +60,7 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
           return { landed: false, reason: 'expired before landing', certain: true };
         }
       }
-      // Not seen yet (or only processed): give it another push.
-      if (!status && opts.resend && polls > 0 && polls % RESEND_EVERY_POLLS === 0 && (opts.resendForMs === undefined || Date.now() - started <= opts.resendForMs)) opts.resend();
+      if (status) seen = true; // processed: in a block already, no more pushing
     } catch {
       // RPC hiccup: keep polling.
     }
@@ -51,4 +68,5 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
     await new Promise((r) => setTimeout(r, pollMs));
   }
   return { landed: false, reason: 'confirmation unknown (RPC unreachable)', certain: false };
+  }
 }

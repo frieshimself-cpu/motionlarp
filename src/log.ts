@@ -70,6 +70,9 @@ export function friendlyError(text: string): string {
   if (/insufficient lamports|insufficient funds/i.test(text)) return 'not enough SOL in the wallet';
   if (/blockhash not found|block height exceeded/i.test(text)) return 'the transaction expired before landing';
   if (/slippage|TooMuchSolRequired|TooLittleSolReceived|ExceededSlippage/i.test(text)) return 'price moved more than your slippage allows';
+  if (/BondingCurveComplete|bonding curve is complete/i.test(text)) return 'the coin just moved to PumpSwap (it graduated): retried there';
+  if (/NotEnoughTokensToBuy/i.test(text)) return 'not enough coins left on the curve for this buy';
+  if (/ComputationalBudgetExceeded|exceeded CUs/i.test(text)) return 'the trade needed more compute than it asked for: retried with more';
   if (/fetch failed|ECONNRESET|ETIMEDOUT|aborted|timeout/i.test(text)) return 'could not reach the Solana RPC';
   return text.length > 160 ? `${text.slice(0, 157)}…` : text;
 }

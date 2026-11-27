@@ -197,7 +197,10 @@ export class Engine {
           return;
         }
       }
-      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: true, feeBps });
+      // The buy's signature is written down the moment it is signed: if the outcome is lost (a crash, no answer from
+      // the RPC), restore() reads that very transaction instead of guessing from the wallet.
+      const onSigned = (sig: string) => store.updatePosition(id, { buySig: sig });
+      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: true, feeBps, onSigned });
       if (!fill.ok && fill.uncertain) {
         // It went out and nobody could tell us what became of it. Not failed, not bought: the position stays
         // "opening" (so the coin is not bought twice) and restore() settles it from the wallet within a minute.
@@ -618,6 +621,21 @@ export class Engine {
         continue;
       }
       try {
+        if (p.buySig && executor.settleBuy) {
+          // Its own transaction says what happened: exact coins and cost, or that it failed.
+          const r = await executor.settleBuy(p.buySig, wallet.publicKey.toBase58(), p.mint);
+          if (r.state === 'landed') {
+            const now = this.now();
+            store.updatePosition(p.id, { status: 'open', tokensBought: r.tokens, tokensHeld: r.tokens, costLamports: r.lamports, refValueLamports: r.lamports, openedAt: now, lastChangeAt: now });
+            store.insertFill({ positionId: p.id, userId: p.userId, side: 'buy', reason: 'copy', tokens: r.tokens, lamports: r.lamports, signature: p.buySig, simulated: false, error: null, feeLamports: 0n });
+            store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'buy', message: `Bought ${fmtSol(r.lamports)} of ${label} — confirmed late (its exit starts now)`, mint: p.mint, signature: p.buySig });
+          } else if (r.state === 'failed' || this.now() - p.openedAt > 90_000) {
+            // Failed on chain, or not found long after its blockhash ran out: it never landed.
+            store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
+            store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${label}: the buy whose outcome was unknown did not land — nothing bought`, mint: p.mint });
+          }
+          continue;
+        }
         const held = await executor.tokenBalance(wallet.publicKey.toBase58(), p.mint);
         if (held > 0n) {
           const cost = BigInt(Math.round((store.copy(p.copyId)?.settings.buySol ?? 0) * 1e9));

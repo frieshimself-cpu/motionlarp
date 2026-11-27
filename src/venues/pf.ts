@@ -58,7 +58,14 @@ export class PfDispatcher {
     if (curveInfo && curveInfo.owner.equals(PUMP_PROGRAM_ID)) {
       const curve = PUMP_SDK.decodeBondingCurve(curveInfo as never);
       if (!curve.complete) return { kind: 'pumpfun_curve', pool: curvePda, mint, tokenProgram };
-      if (!ammPool) throw new VenueError('curve is complete but its PumpSwap pool was not found yet', 'migrating');
+      if (!ammPool) {
+        // Nothing left on the curve and no PumpSwap pool: it graduated long ago to another exchange (Raydium, before
+        // PumpSwap existed) or to a pool priced in another token. That is not "in between": Jupiter trades it.
+        const reserves = (curve as unknown as { realQuoteReserves?: { isZero(): boolean }; realSolReserves?: { isZero(): boolean } });
+        const left = reserves.realQuoteReserves ?? reserves.realSolReserves;
+        if (left && left.isZero()) throw new VenueError('graduated to another exchange: traded through Jupiter', 'unresolved');
+        throw new VenueError('curve is complete but its PumpSwap pool was not found yet', 'migrating');
+      }
       return { kind: 'pumpswap', pool: ammPool, mint, tokenProgram, migratedFrom: curvePda };
     }
     if (ammPool) return { kind: 'pumpswap', pool: ammPool, mint, tokenProgram };

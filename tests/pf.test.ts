@@ -82,7 +82,7 @@ describe('a pump.fun coin whose curve completed while we held it', () => {
   // failed on chain again and again. It must be refused as "migrated", which re-routes it to PumpSwap at once.
   it('the curve sell is refused as "migrated"', async () => {
     const v = new PumpFunVenue();
-    (v as unknown as { globals: unknown }).globals = { global: {}, feeConfig: null, at: Date.now() };
+    (v as unknown as { globals: unknown }).globals = { global: {}, feeConfig: {}, at: Date.now() };
     (v as unknown as { online: unknown }).online = { fetchSellState: async () => ({ bondingCurve: { complete: true }, quoteMint: new PublicKey('So11111111111111111111111111111111111111112') }) };
     const pool = { kind: 'pumpfun_curve' as const, pool: PublicKey.unique(), mint: PublicKey.unique(), tokenProgram: TOKEN_PROGRAM_ID };
     const err = await v.buildSell({ pool, user: PublicKey.unique(), tokensIn: 10n, slippagePct: 10 }).catch((e) => e);
