@@ -149,7 +149,7 @@ export class Engine {
         const order: SellOrder = { reason: 'mirror', percent, tag: t.signature };
         const key = this.orderKey(p.id, order);
         this.inFlight.add(key);
-        jobs.push(this.enqueue(p.id, () => this.sell(p.id, order)).finally(() => this.inFlight.delete(key)));
+        jobs.push(this.enqueue(p.id, () => this.sell(p.id, order)).finally(() => { this.inFlight.delete(key); this.closeIfEmpty(p.id); }));
       }
     }
     void Promise.all(jobs);
@@ -334,6 +334,7 @@ export class Engine {
     }
     for (const [key, f] of this.owedFails) if (this.deps.store.position(f.positionId)?.status !== 'open') this.owedFails.delete(key);
     const positions = this.deps.store.activePositions().filter((p) => p.status === 'open');
+    for (const p of positions) if (p.tokensHeld <= 0n) this.closeIfEmpty(p.id);
     await Promise.all(positions.map((p) => this.tickOne(p)));
   }
 
@@ -431,7 +432,7 @@ export class Engine {
     this.inFlight.add(key);
     const job: Promise<void> = this.bagStep(positionId, order, key)
       .catch((err) => log.warn('timed step failed', { position: positionId, error: safeErrorMessage(err) }))
-      .finally(() => { this.inFlight.delete(key); this.loose.delete(job); });
+      .finally(() => { this.inFlight.delete(key); this.loose.delete(job); this.closeIfEmpty(positionId); });
     this.loose.add(job);
   }
 
@@ -597,7 +598,31 @@ export class Engine {
     const key = this.orderKey(positionId, order);
     if (this.inFlight.has(key)) return;
     this.inFlight.add(key);
-    void this.enqueue(positionId, () => this.sell(positionId, order)).finally(() => this.inFlight.delete(key));
+    void this.enqueue(positionId, () => this.sell(positionId, order)).finally(() => { this.inFlight.delete(key); this.closeIfEmpty(positionId); });
+  }
+
+  /** True while anything of this position is queued or running (its buy, a sell, a timed step) or a sell of it is out. */
+  private busy(positionId: number): boolean {
+    if (this.queues.has(positionId) || this.reserved.get(positionId)?.size) return true;
+    const prefix = `${positionId}:`;
+    for (const key of this.inFlight) if (key.startsWith(prefix)) return true;
+    return false;
+  }
+
+  /**
+   * An open position whose books hold nothing, with nothing of it under way, is closed. Nothing else would close it:
+   * the rules, their sells, the safety pass and Sell now all skip a position that holds nothing, so it stayed open
+   * for good and its coin could never be copied again (fuzzer case 18: the exact coin count of a buy booked with the
+   * quote's count took the books to nothing while a sell of the rest was out, and that sell then failed). A retry or
+   * an owed exit waiting for it is not "under way": they sell what the books hold, and the books hold nothing. If the
+   * buy's exact count later shows more coins, exactBuy opens it again and sells them, as for any closed position.
+   */
+  private closeIfEmpty(positionId: number): void {
+    const { store } = this.deps;
+    const p = store.position(positionId);
+    if (!p || p.status !== 'open' || p.tokensHeld > 0n || this.busy(positionId)) return;
+    store.updatePosition(p.id, { status: 'closed', tokensHeld: 0n, closedAt: this.now() });
+    store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${shortMint(p.mint)} (${p.copyName}): nothing of it is left to sell — closed`, mint: p.mint });
   }
 
   async sellNow(userId: number, positionId: number): Promise<{ ok: boolean; error?: string }> {
@@ -854,8 +879,9 @@ export class Engine {
     const sold = store.sellsOf(positionId);
     const held = exact.tokens > sold.tokens ? exact.tokens - sold.tokens : 0n;
     if (p.status === 'open') {
-      const empty = held === 0n && this.reservedExcept(positionId, '') === 0n;
-      store.updatePosition(positionId, { tokensBought: exact.tokens, tokensHeld: held, ...(empty ? { status: 'closed' as const, closedAt: this.now() } : {}) });
+      store.updatePosition(positionId, { tokensBought: exact.tokens, tokensHeld: held });
+      // Nothing left: closed now, or by whatever of it is still under way once that is over.
+      this.closeIfEmpty(positionId);
       return;
     }
     store.updatePosition(positionId, { tokensBought: exact.tokens });
@@ -1028,7 +1054,9 @@ export class Engine {
     const tail = next.catch(() => undefined);
     this.queues.set(positionId, tail);
     void tail.then(() => {
-      if (this.queues.get(positionId) === tail) this.queues.delete(positionId);
+      if (this.queues.get(positionId) !== tail) return;
+      this.queues.delete(positionId);
+      this.closeIfEmpty(positionId);
     });
     return next;
   }
