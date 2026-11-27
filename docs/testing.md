@@ -596,7 +596,10 @@ position of the coin had opened), `diskfull` **0** of 2,000; default mix 0 of 3,
 self-test (now with a booking dropped and a sale booked twice) catches every planted fault.
 
 **A third round of reviewers** (money and database faults, chain reads and restarts, what the user sees, the fuzzer,
-the speed of the hot paths) read the fixes above. Fixed from it, each with a test that fails on the code before:
+the speed of the hot paths) read the fixes above: 24 findings, every one confirmed by a separate verifier, and every one
+fixed below or in the later paragraphs of this section, but one accepted as it is (the write that records a stop loss
+level or the dead-coin rule before its sell goes out: 31 to 81 µs). Fixed from it, each with a test that fails on the
+code before:
 - A status seen only at "processed" (in a block not confirmed yet) is asked again: never taken as "not found" (after a
   crash, a sale that landed in its last block, read from a node behind on its confirmations, was dropped once the chain
   was well past it, and its rule sold a second time: a 40 % step sold 80 %, the first sale's SOL never booked), nor,
