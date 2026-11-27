@@ -335,16 +335,20 @@ at UTC+12 and beyond; very small numbers printed as 5e-7; two minus signs on a H
 to other sells, or came while our buy's outcome was unknown) is written down on the position and sold by the settling
 pass after the restart (fuzzer cases 9 and 10 pass; it used to be held in memory only).
 
-**Known, not changed yet** (from the reviews; none blocks the Scharo preset): a restart while a PARTIAL "same %" mirror
-sell waits for its retry loses that sell (full exits are kept, see above); a restart while a sell's outcome is unknown
-(it needs an RPC outage of over two minutes first) lets the next step sell before that one is settled and leaves its
-SOL unbooked (fuzzer case 11; the fix is to save each sell's signature before it is sent, as buys already do; the
-coins stay right, the wallet corrects the books); a timed step sizes itself from the quote's coin count when the exact
-count arrives late (it sells a little less, the later steps sell the rest); a stop loss is measured against the
-buy cost with every fee in it, so a level tighter than the entry costs fires at once (the preset has no stop
-loss); a sell's feed line shows the quoted
-SOL (History and the profit use the exact amount); the admin's Live switch takes effect when Save is pressed;
-the Helius RPC lane's MEV Protect is unproven (Sender's is proven).
+**Known, not changed yet** (from the reviews and the timing fuzzer; none blocks the Scharo preset; as it stands after
+the restart fixes further down, which removed two items: a partial "same %" sell lost by a restart, and a sell of unknown
+outcome given up by a restart): a timed step sizes itself from the quote's coin count when the exact count arrives late
+(it sells a little less, the later steps sell the rest); after a buy booked with the quote's coin count, if its
+position is sold out on that count and the same coin is bought again before the first buy's exact count arrives (a few
+seconds), the coins beyond the quote are sold together with the new position's, or the first position is opened again
+beside the new one to sell them (two positions of one coin for that moment): the wallet's SOL and the total profit are
+right, but the profit is split wrongly between the two positions (the slow-read fuzzer profile, 6 of 3,000 seeds; not
+changed because no clean way was found: moving coins and their cost from one position to the other breaks the rule
+that a position's buy row describes it, and holding back a new copy of the coin while the last buy's count is still an
+estimate would cost real copies to fix a split that only shows in History); a stop loss is measured against the buy
+cost with every fee in it, so a level tighter than the entry costs fires at once (the preset has no stop loss); a
+sell's feed line shows the quoted SOL (History and the profit use the exact amount); the admin's Live switch takes
+effect when Save is pressed; the Helius RPC lane's MEV Protect is unproven (Sender's is proven).
 
 
 ## 27 Nov 2026, 05:40 UTC: real money on walletmotion.app itself
@@ -414,8 +418,45 @@ whose exact count was taken off a second time after a sell had already matched t
 position sold out on the quote's count whose buy had received more (17: it is opened again and the rest sold). The
 harness does not know case 17's follow-up sell yet (it flags it, and the 2 s before the exact count arrives).
 
+## 27 Nov 2026: restarts, crashes and sells of unknown outcome (the timing fuzzer's findings at af4bf0d)
+
+The timing fuzzer's report at af4bf0d had five open findings in the engine. Each is fixed with tests that fail on the
+code before (`tests/restarts.test.ts`, one case in `tests/review-exact.test.ts`); saved cases 11, 18, 19, 20 and 21 now
+pass, so all 21 do:
+- **A position open with nothing in its books and nothing under way is closed** (case 18). The exact coin count of a
+  buy booked with the quote's count could take the books to nothing while a sell of the rest was out; that sell then
+  failed and the position stayed open for good (no rule, button or safety pass looks at a position holding nothing, and
+  the coin could not be copied again). It now closes the moment the last thing of it ends; the clock checks as well.
+- **A stopped server sends nothing** (cases 20 and 21). During an update's shutdown, a price check coming back after
+  the stop fired a dead-coin sell, and the exact count of a buy arriving while the server waited for its last figures
+  sold the coins beyond the quote; both landed after the process had exited and nobody booked them. From the stop on,
+  nothing new goes out: a full exit (their exit, Sell now, the rest of a full exit) is written down and sold right after
+  the restart, a timed step is overdue then, stop loss and dead coin are checked again. Their full exit is written down
+  the moment it is heard. Sell now pressed during a restart says so, in its answer and in the feed.
+- **Every real sell is written down before it is sent** (case 11, and the crash profile). A new table, `sells_out`,
+  holds each sell from the moment it is signed until it is booked (in the same transaction) or known to have failed.
+  After a crash, or a restart while a sell's outcome is unknown, the next start settles it from its own transaction
+  before that position's rules go on: landed, it is booked by the same code as any sell (the step done, the SOL in);
+  failed, its rule sells again; not found, it is kept for three minutes from its sending, then dropped. Meanwhile its
+  coins count as on their way: Sell now sells only what is free, and the coin is not bought again (a late landing would
+  sell the new coins).
+- **Their partial sell ("same share") is written down until our share is sold** (case 19), in a new column,
+  `positions.owed_sells`; after a restart it is sold once, unless it went out before and landed.
+- Databases of earlier versions open as before and get the table and the column at start (tested on an old database).
+
+The fuzzer, the report's commands, before and after (seeds flagged): default mix 32 → **0** of 6,000; crash profile
+272 → **0** of 3,000; ghost 112 → **0**; outage 1 → **0**; slow-read 18 → **6** (the quoted coin count case kept as
+known, above); the five core profiles 0 of 3,000 before and after; the self-test catches every planted fault. The
+harness learnt what the engine now does, each time with a check that it is written down: a stopped engine leaves the
+rest of a full exit to the next start (accepted only when it is in `exit_owed`); a new engine knows the real sells the
+old one left written down (they stay on their way until it settles them, a position waiting for one sends nothing
+until then, and stop loss levels are counted afresh after a restart, as the engine checks them again); a test sell cut
+off by a crash sold nothing anywhere.
+
 ## Not yet verified
 
+- A crash or a restart with a real sell out on the real server: the settling of sells written down before a crash is
+  proven offline only (tests, the fuzzer's crash and ghost profiles).
 - The Helius RPC lane with `mev-protect=true` on its own (it carried the trades above together with Sender).
 - A real 7 SOL trade. 7 SOL buys are proven by simulation on 8 live coins (above); the largest real buy so far is
   0.02 SOL. On a curve with less than 7 SOL of coins left, our buy completes it and spends the whole amount
