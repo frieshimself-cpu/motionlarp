@@ -8,7 +8,6 @@ let timer = null;
 let tab = 'admin';
 let conn = null; // the last connection report (null: not checked yet)
 let connBusy = false;
-const openForms = new Set(); // "replace" forms the owner opened: they stay open across re-draws
 
 function renderLogin(error = '') {
   clearInterval(timer);
@@ -42,7 +41,7 @@ const feeLabel = (l) => (l.feePercent === null ? `Default (${state.settings.feeP
 const topbar = (s) => `
     <header class="topbar"><div class="topbar-in">
       ${brandHtml(config.brand)}
-      <nav class="nav"><button data-tab="admin" class="${tab === 'admin' ? 'on' : ''}">Admin</button><button data-tab="connections" class="${tab === 'connections' ? 'on' : ''}">Connections${conn && !conn.ok ? ' <span class="dot bad"></span>' : ''}</button></nav>
+      <nav class="nav"><button data-tab="admin" class="${tab === 'admin' ? 'on' : ''}">Admin</button><button data-tab="connections" class="${tab === 'connections' ? 'on' : ''}">Status${conn && !conn.ok ? ' <span class="dot bad"></span>' : ''}</button></nav>
       <div class="right">${modePill(s.server)}<a class="btn small ghost" href="/">Open site</a><button class="btn small ghost" id="admin-logout">Log out</button></div>
     </div></header>`;
 
@@ -55,90 +54,41 @@ function bindTop() {
   }));
 }
 
-// ── Connections: the Helius link and the Jupiter key, saved once, used for every user ──
-const connRow = (c) => `<div class="conn-row"><span class="dot ${c.ok ? 'good' : c.optional ? 'warn' : 'bad'}"></span><b>${esc(c.name)}</b><span class="${c.ok ? 'muted' : c.optional ? 'muted' : 'down'}">${esc(c.detail)}</span></div>`;
+// ── Status: does each connection work right now? Read-only. The Helius link and the Jupiter key live in the
+// server's own file; this page cannot show or change them. ──
+const connRow = (c) => `<div class="conn-row"><span class="dot ${c.ok ? 'good' : c.optional ? 'warn' : 'bad'}"></span><b>${esc(c.name)}</b><span class="${c.ok || c.optional ? 'muted' : 'down'}">${esc(c.detail)}</span></div>`;
+const WHERE = {
+  server: '<span class="pill live">Set on the server</span>',
+  saved: '<span class="pill">Moving to the server file</span>',
+  none: '<span class="pill off">Not set on the server</span>',
+};
 
 function renderConnections() {
   const s = state;
   const st = s.settings;
   const by = (id) => conn?.checks.find((c) => c.id === id);
   const rows = (ids) => (conn ? ids.map((id) => by(id)).filter(Boolean).map(connRow).join('') : '<div class="conn-row"><span class="dot"></span><span class="muted">Checking…</span></div>');
-  const head = !conn ? '<span class="pill">Checking…</span>' : conn.ok ? '<span class="pill live">All connected</span>' : '<span class="pill off">Needs attention</span>';
+  const head = !conn ? '<span class="pill">Checking…</span>' : conn.ok ? '<span class="pill live">All working</span>' : '<span class="pill off">Needs attention</span>';
+  const moving = '<div class="hint" style="margin-top:10px">It was typed into this page in the past. The server moves it into its own file by itself at its next update; it keeps working meanwhile.</div>';
   app.innerHTML = `${topbar(s)}
     <main class="page">
       <div class="stack">
         <div class="card">
-          <div class="card-head"><h2>Connections<span class="sub">saved once here · used for every user on the site · they survive updates and restarts</span></h2><div style="display:flex;gap:10px;align-items:center">${head}<button class="btn small" id="conn-check" ${connBusy ? 'disabled' : ''}>${connBusy ? 'Checking…' : 'Check again'}</button></div></div>
-          <div class="card-body"><div class="muted" style="font-size:13px">Each row below is a real request sent just now, not just "a key is saved". Nobody else has to set anything: every license key trades through these.</div></div>
+          <div class="card-head"><h2>Status<span class="sub">is everything the site trades through working right now?</span></h2><div style="display:flex;gap:10px;align-items:center">${head}<button class="btn small" id="conn-check" ${connBusy ? 'disabled' : ''}>${connBusy ? 'Checking…' : 'Check again'}</button></div></div>
+          <div class="card-body"><div class="muted" style="font-size:13px">Each row is a real request sent just now. The Helius link and the Jupiter key are set once on the server itself and used for every user: this website cannot show or change them.</div></div>
         </div>
-
         <div class="card">
-          <div class="card-head"><h2>Helius<span class="sub">the connection to Solana: reading the copied wallets and sending trades</span></h2>${st.rpcSet ? '<span class="pill live">Saved</span>' : '<span class="pill off">Not set</span>'}</div>
-          <div class="card-body">
-            ${st.rpcSet ? `<div class="saved" style="margin-bottom:6px"><span class="mono">${esc(st.rpc)}</span></div>` : ''}
-            ${rows(['rpc', 'stream', 'sender'])}
-            <form id="conn-rpc" class="conn-form" ${st.rpcSet && !openForms.has('conn-rpc') ? 'hidden' : ''}>
-              <input id="set-rpc" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="https://mainnet.helius-rpc.com/?api-key=…">
-              <button class="btn primary" type="submit">Test and save</button>
-              <div class="hint">Helius → RPC → "RPC URL". It is tested first, then stored encrypted; saving restarts the site for a few seconds.</div>
-            </form>
-            ${st.rpcSet ? '<button type="button" class="btn small ghost" data-show="conn-rpc" style="margin-top:10px">Replace the link</button>' : ''}
-            <div id="conn-rpc-msg" class="down" style="margin-top:8px"></div>
-          </div>
+          <div class="card-head"><h2>Helius<span class="sub">the connection to Solana: reading the copied wallets and sending trades</span></h2>${WHERE[st.rpcFrom] ?? ''}</div>
+          <div class="card-body">${rows(['rpc', 'stream', 'sender'])}${st.rpcFrom === 'saved' ? moving : ''}</div>
         </div>
-
         <div class="card">
-          <div class="card-head"><h2>Jupiter<span class="sub">buys and sells every coin that is not on pump.fun</span></h2>${st.jupiterKeySet ? '<span class="pill live">Saved</span>' : '<span class="pill">No key</span>'}</div>
-          <div class="card-body">
-            ${rows(['jupiter'])}
-            <form id="conn-jup" class="conn-form" ${st.jupiterKeySet && !openForms.has('conn-jup') ? 'hidden' : ''}>
-              <input id="set-jup" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="The API key from portal.jup.ag">
-              <button class="btn primary" type="submit">Test and save</button>
-              <div class="hint">A real quote is asked with the key before it is saved: a wrong key is refused, the old one stays.</div>
-            </form>
-            ${st.jupiterKeySet ? '<button type="button" class="btn small ghost" data-show="conn-jup" style="margin-top:10px">Replace the key</button>' : ''}
-            <div id="conn-jup-msg" class="down" style="margin-top:8px"></div>
-          </div>
+          <div class="card-head"><h2>Jupiter<span class="sub">buys and sells every coin that is not on pump.fun</span></h2>${WHERE[st.jupiterFrom] ?? ''}</div>
+          <div class="card-body">${rows(['jupiter'])}${st.jupiterFrom === 'saved' ? moving : ''}</div>
         </div>
       </div>
     </main>`;
   bindTop();
   $('#conn-check').addEventListener('click', () => checkConnections());
-  $$('[data-show]', app).forEach((b) => b.addEventListener('click', () => {
-    const f = $(`#${b.dataset.show}`);
-    f.hidden = !f.hidden;
-    if (f.hidden) openForms.delete(f.id); else openForms.add(f.id);
-    if (!f.hidden) $('input', f).focus();
-  }));
-  const saver = (formId, inputId, field, check) => $(`#${formId}`).addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const msg = $(`#${formId}-msg`);
-    const value = $(`#${inputId}`).value.trim();
-    msg.className = 'down';
-    if (!value) { msg.textContent = 'Paste it first.'; return; }
-    const bad = check(value);
-    if (bad) { msg.textContent = bad; return; }
-    msg.className = 'muted';
-    msg.textContent = 'Testing…';
-    try {
-      const r = await api('POST', '/api/admin/settings', { [field]: value });
-      if (r.restart) {
-        msg.textContent = 'Saved. Restarting the site…';
-        await waitForRestart();
-      }
-      toast('Saved and working');
-      openForms.delete(formId);
-      $(`#${inputId}`).value = '';
-      conn = null;
-      await load();
-      checkConnections();
-    } catch (err) {
-      msg.className = 'down';
-      msg.textContent = err.message;
-    }
-  });
-  saver('conn-rpc', 'set-rpc', 'rpcUrl', (v) => (/^https:\/\//.test(v) ? '' : 'That is not a link. Copy the whole "RPC URL" from Helius: it starts with https://'));
-  saver('conn-jup', 'set-jup', 'jupiterApiKey', () => '');
 }
 
 async function checkConnections() {
@@ -155,8 +105,8 @@ async function checkConnections() {
   if (!typingNow()) render();
 }
 
-/** Someone is typing, or has pasted a link or key that is not saved yet: do not re-draw under them. */
-const typingNow = () => (!!document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName) && app.contains(document.activeElement)) || $$('.conn-form input', app).some((i) => i.value);
+/** Someone is typing in a form: do not re-draw under them. */
+const typingNow = () => !!document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName) && app.contains(document.activeElement);
 
 function render() {
   if (tab === 'connections') return renderConnections();
@@ -164,12 +114,12 @@ function render() {
   const st = s.settings;
   app.innerHTML = `${topbar(s)}
     <main class="page">
-      ${conn && !conn.ok ? `<div class="err" style="margin-bottom:16px">A connection needs attention: ${esc(conn.checks.filter((c) => !c.ok && !c.optional).map((c) => `${c.name} — ${c.detail}`).join(' · '))}. Open <b>Connections</b>.</div>` : ''}
+      ${conn && !conn.ok ? `<div class="err" style="margin-bottom:16px">A connection needs attention: ${esc(conn.checks.filter((c) => !c.ok && !c.optional).map((c) => `${c.name} — ${c.detail}`).join(' · '))}. Open <b>Status</b>.</div>` : ''}
       <section class="grid stats">
         <div class="card stat"><div class="label">Users</div><div class="value">${s.totals.users}</div><div class="foot">${s.licenses.filter((l) => l.status === 'unused').length} unused keys</div></div>
         <div class="card stat"><div class="label">Open positions</div><div class="value">${s.totals.open}</div><div class="foot">watching ${s.server.watching} wallets</div></div>
         <div class="card stat"><div class="label">Fees earned</div><div class="value">${fmtSol(s.totals.feesLiveSol, 4)} <small>SOL</small></div><div class="foot">real trades · test mode would have: ${fmtSol(s.totals.feesTestSol, 4)}</div></div>
-        <div class="card stat"><div class="label">Trading</div><div class="value">${s.server.mode === 'offline' ? 'Offline' : s.server.live ? 'Live' : 'Test'}</div><div class="foot">${st.rpcSet ? `Sender ${esc(s.server.sender ?? '—')} · feed: ${esc(s.server.feed ?? 'standard')}` : 'add your Helius link under Connections'}</div></div>
+        <div class="card stat"><div class="label">Trading</div><div class="value">${s.server.mode === 'offline' ? 'Offline' : s.server.live ? 'Live' : 'Test'}</div><div class="foot">${st.rpcSet ? `Sender ${esc(s.server.sender ?? '—')} · feed: ${esc(s.server.feed ?? 'standard')}` : 'the Helius link is not set on the server'}</div></div>
       </section>
 
       <div class="stack">

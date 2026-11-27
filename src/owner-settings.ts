@@ -1,11 +1,17 @@
-// What the owner sets on the admin page instead of in a file on the server: the Helius RPC link, the Jupiter key,
-// the platform fee and its wallet, the most a buy may spend, and the live switch. Saved in the database (secrets
-// encrypted with MASTER_KEY), applied over the environment at start. The RPC link and Jupiter key take effect after
-// a restart (the server restarts itself); the rest applies at once.
+// What the owner sets on the admin page: the platform fee and its wallet, the most a buy may spend, and the live
+// switch. Saved in the database, applied over the environment at start, in force at once.
+//
+// The Helius RPC link and the Jupiter API key are NOT set on the website: they live in the server's own file
+// (.env: RPC_URL and JUPITER_API_KEY), written once on the server and used for every user. The website cannot see
+// or change them. Values an owner saved on the admin page before this rule are still read (so nothing breaks) until
+// deploy/keys-to-env.sh has moved them into the file; a value in the file always wins.
 import { PublicKey } from '@solana/web3.js';
-import { decryptText, encryptText } from './crypto.js';
+import { decryptText } from './crypto.js';
 import { MAX_FEE_BPS } from './fee.js';
 import type { Store } from './store.js';
+
+/** Where a connection's value comes from: the server's file, an earlier save on the admin page, or nowhere. */
+export type ConnectionSource = 'server' | 'saved' | 'none';
 
 export interface MutableConfig {
   rpcUrl: string;
@@ -17,10 +23,13 @@ export interface MutableConfig {
   maxSolPerBuy: number;
   liveTrading: boolean;
   masterKey: string;
+  sources?: { rpc: ConnectionSource; jupiter: ConnectionSource };
 }
 
 export interface OwnerSettingsPatch {
+  /** Refused: set on the server. */
   rpcUrl?: string;
+  /** Refused: set on the server. */
   jupiterApiKey?: string;
   feePercent?: number;
   feeWallet?: string;
@@ -29,35 +38,51 @@ export interface OwnerSettingsPatch {
 }
 
 export interface SettingsChecks {
-  /** Throws when the RPC link does not answer. */
-  testRpc: (url: string) => Promise<void>;
   /** Lamports held by an address. */
   balance: (address: string) => Promise<bigint>;
-  /** Throws when Jupiter refuses the key (a real quote is asked with it). */
-  testJupiter?: (key: string) => Promise<void>;
 }
 
 export class OwnerSettingsError extends Error {
   override name = 'OwnerSettingsError';
 }
 
+const JUPITER_FREE = /lite-api\.jup\.ag/;
+const JUPITER_KEYED = 'https://api.jup.ag';
+
+function storedSecret(store: Pick<Store, 'settings'>, name: string, masterKey: string): string | null {
+  const raw = store.settings()[name];
+  if (!raw) return null;
+  try {
+    return decryptText(raw, name, masterKey) || null;
+  } catch {
+    return null; // wrong MASTER_KEY: as if nothing was saved, rather than crash
+  }
+}
+
+/** The Helius link and Jupiter key saved on the admin page before they moved to the server's file, if any. */
+export function storedConnections(store: Pick<Store, 'settings'>, masterKey: string): { RPC_URL?: string; JUPITER_API_KEY?: string } {
+  const rpc = storedSecret(store, 'rpc_url', masterKey);
+  const jup = storedSecret(store, 'jupiter_api_key', masterKey);
+  return { ...(rpc ? { RPC_URL: rpc } : {}), ...(jup ? { JUPITER_API_KEY: jup } : {}) };
+}
+
 export function applyStoredSettings(store: Store, config: MutableConfig): void {
   const s = store.settings();
-  const secret = (name: string): string | null => {
-    if (!s[name]) return null;
-    try {
-      return decryptText(s[name]!, name, config.masterKey);
-    } catch {
-      return null; // wrong MASTER_KEY: fall back to the environment rather than crash
-    }
-  };
-  const rpc = secret('rpc_url');
-  if (rpc) config.rpcUrl = rpc;
-  const jup = secret('jupiter_api_key');
-  if (jup) {
-    config.jupiterApiKey = jup;
-    config.jupiterUrl = 'https://api.jup.ag'; // the keyed endpoint
+  const saved = storedConnections(store, config.masterKey);
+  const sources = { rpc: 'none' as ConnectionSource, jupiter: 'none' as ConnectionSource };
+  if (config.rpcUrl) sources.rpc = 'server';
+  else if (saved.RPC_URL) {
+    config.rpcUrl = saved.RPC_URL;
+    sources.rpc = 'saved';
   }
+  if (config.jupiterApiKey) sources.jupiter = 'server';
+  else if (saved.JUPITER_API_KEY) {
+    config.jupiterApiKey = saved.JUPITER_API_KEY;
+    sources.jupiter = 'saved';
+  }
+  // A key belongs to Jupiter's keyed address; the free address is only for running without one.
+  if (config.jupiterApiKey && JUPITER_FREE.test(config.jupiterUrl)) config.jupiterUrl = JUPITER_KEYED;
+  config.sources = sources;
   if (s.fee_bps !== undefined) config.feeBps = Number(s.fee_bps);
   if (s.fee_wallet !== undefined) config.feeWallet = s.fee_wallet;
   if (s.max_sol_per_buy !== undefined) config.maxSolPerBuy = Number(s.max_sol_per_buy);
@@ -79,7 +104,9 @@ export function settingsView(config: MutableConfig) {
   return {
     rpc,
     rpcSet: !!config.rpcUrl,
+    rpcFrom: config.rpcUrl ? (config.sources?.rpc ?? 'server') : ('none' as ConnectionSource),
     jupiterKeySet: !!config.jupiterApiKey,
+    jupiterFrom: config.jupiterApiKey ? (config.sources?.jupiter ?? 'server') : ('none' as ConnectionSource),
     feePercent: config.feeBps / 100,
     feeWallet: config.feeWallet,
     maxSolPerBuy: config.maxSolPerBuy,
@@ -97,34 +124,11 @@ function isAddress(a: string): boolean {
 
 /** Validates everything first, then saves and applies; nothing is stored when any part is refused. */
 export async function saveOwnerSettings(store: Store, config: MutableConfig, patch: OwnerSettingsPatch, checks: SettingsChecks): Promise<{ restart: boolean }> {
+  if (patch.rpcUrl !== undefined || patch.jupiterApiKey !== undefined) {
+    throw new OwnerSettingsError('the Helius link and the Jupiter key are set on the server, not on the website');
+  }
   const toStore: Record<string, string> = {};
   const apply: (() => void)[] = [];
-  let restart = false;
-
-  const rpcUrl = patch.rpcUrl?.trim();
-  if (rpcUrl) {
-    if (!/^https:\/\//.test(rpcUrl)) throw new OwnerSettingsError('the RPC link must start with https://');
-    try {
-      await checks.testRpc(rpcUrl);
-    } catch {
-      throw new OwnerSettingsError('could not reach that RPC link: check you copied the whole "RPC URL" from Helius');
-    }
-    toStore.rpc_url = encryptText(rpcUrl, 'rpc_url', config.masterKey);
-    if (rpcUrl !== config.rpcUrl) restart = true;
-  }
-
-  const jup = patch.jupiterApiKey?.trim();
-  if (jup) {
-    if (checks.testJupiter && jup !== config.jupiterApiKey) {
-      try {
-        await checks.testJupiter(jup);
-      } catch {
-        throw new OwnerSettingsError('Jupiter did not accept that key: copy the whole key from portal.jup.ag');
-      }
-    }
-    toStore.jupiter_api_key = encryptText(jup, 'jupiter_api_key', config.masterKey);
-    if (jup !== config.jupiterApiKey) restart = true;
-  }
 
   if (patch.feePercent !== undefined || patch.feeWallet !== undefined) {
     const bps = Math.round((patch.feePercent ?? config.feeBps / 100) * 100);
@@ -151,12 +155,12 @@ export async function saveOwnerSettings(store: Store, config: MutableConfig, pat
 
   if (patch.liveTrading !== undefined) {
     const live = !!patch.liveTrading;
-    if (live && !(rpcUrl || config.rpcUrl)) throw new OwnerSettingsError('add your Helius RPC link before going live');
+    if (live && !config.rpcUrl) throw new OwnerSettingsError('the Helius link is not set on the server yet: live trading needs it');
     toStore.live_trading = String(live);
     apply.push(() => { config.liveTrading = live; });
   }
 
   store.setSettings(toStore);
   for (const f of apply) f();
-  return { restart };
+  return { restart: false };
 }

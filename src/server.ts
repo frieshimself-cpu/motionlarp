@@ -75,6 +75,8 @@ if (watcher && streamUrl) {
   stream = new HeliusStream({ url: streamUrl, leaders: () => store.watchedLeaders(), onTransaction: (tx) => watcher.handleStreamTx(tx) });
 }
 const feedNote = () => (stream ? `Helius stream ${stream.status()}` : 'standard');
+/** Where the Helius link and the Jupiter key come from (never the values): the server's file, or an earlier save on the admin page. */
+const keysNote = () => { const v = settingsView(config); return `helius: ${v.rpcFrom}, jupiter: ${v.jupiterFrom}`; };
 
 const mode = () => (!config.rpcUrl ? 'offline' : canSendLive() ? 'live' : 'test');
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -90,6 +92,21 @@ async function pingGlobalSender(): Promise<number> {
   return performance.now() - t0;
 }
 let senderRegion: string | null = null;
+/** A real request to each service the site trades through (the Status page; also run every few minutes). */
+let health = 'not checked yet';
+async function runChecks() {
+  const report = await checkConnections({
+    rpcSet: !!config.rpcUrl,
+    jupiterKeySet: !!config.jupiterApiKey,
+    rpc: () => rpc<number>('getSlot', [{ commitment: 'processed' }]),
+    stream: () => (stream ? { ok: /^(live|connected)/.test(stream.status()), note: stream.status() } : null),
+    sender: async () => (config.senderUrl === 'off' ? null : { region: senderRegion ?? 'global', ms: senderRegion ? await pingRegion(senderRegion) : await pingGlobalSender() }),
+    jupiter: () => jupiterProbe(config.jupiterUrl, config.jupiterApiKey),
+  });
+  // Names only, never a detail: this line is public (it shows on the site's status).
+  health = report.ok ? 'all working' : `needs attention: ${report.checks.filter((c) => !c.ok && !c.optional).map((c) => c.name).join(', ')}`;
+  return report;
+}
 const app = createApp({
   store, engine, executor, masterKey: config.masterKey, secureCookies: config.secureCookies,
   adminPassword: config.adminPassword,
@@ -97,19 +114,9 @@ const app = createApp({
   owner: {
     view: () => settingsView(config),
     save: (patch) => saveOwnerSettings(store, config, patch as OwnerSettingsPatch, {
-      testRpc: async (url) => { await rpc<number>('getSlot', [], url); },
       balance: (address) => executor.solBalance(address),
-      testJupiter: (key) => jupiterProbe('https://api.jup.ag', key),
     }),
-    // A real request to each service, on demand (the Connections page).
-    connections: () => checkConnections({
-      rpcSet: !!config.rpcUrl,
-      jupiterKeySet: !!config.jupiterApiKey,
-      rpc: () => rpc<number>('getSlot', [{ commitment: 'processed' }]),
-      stream: () => (stream ? { ok: /^(live|connected)/.test(stream.status()), note: stream.status() } : null),
-      sender: async () => (config.senderUrl === 'off' ? null : { region: senderRegion ?? 'global', ms: senderRegion ? await pingRegion(senderRegion) : await pingGlobalSender() }),
-      jupiter: () => jupiterProbe(config.jupiterUrl, config.jupiterApiKey),
-    }),
+    connections: runChecks,
     // Docker restarts the container (restart: unless-stopped); in-flight trades finish first.
     restart: () => void shutdown('settings changed'),
   },
@@ -117,7 +124,7 @@ const app = createApp({
   trustProxy: config.trustProxy,
   feeBpsFor,
   maxCopiesPerUser: config.maxCopiesPerUser,
-  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: senderNote, feed: feedNote() }),
+  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: senderNote, feed: feedNote(), keys: keysNote(), health }),
 });
 
 // Five times a second, so a timed sell goes out within 0.2 s of its time. Ticks may overlap: the engine runs one
@@ -177,6 +184,9 @@ app.listen(config.port, config.host, () => {
     setInterval(() => s.sync(), 2_000).unref();
   }
   if (config.rpcUrl) setTimeout(() => void engine.restore().catch(() => undefined), 3_000);
+  // Every connection is tested shortly after start and every five minutes after.
+  setTimeout(() => void runChecks().catch(() => undefined), 6_000);
+  setInterval(() => void runChecks().catch(() => undefined), 300_000).unref();
 });
 
 async function shutdown(signal: string) {

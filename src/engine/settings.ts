@@ -173,10 +173,10 @@ export function validateSettings(input: unknown): CopySettings {
 }
 
 /**
- * Ready-made copies: one click in the editor fills everything in; the user only chooses the buy size.
+ * Ready-made copies: one click in the editor fills everything in, the buy size included (it can still be changed).
  *
- * Scharo (owner's spec, 27 Nov 2026): copy this wallet's every buy; fees 0.001 priority + 0.005 tip on buys and
- * sells; 100 % slippage; exit on a timer from our own confirmed buy, whatever the price: 40 % of the bag at +2 s,
+ * Scharo (owner's spec, 27 Nov 2026): buy 7 SOL when this wallet buys 1 SOL or more; fees 0.001 priority + 0.005 tip
+ * on buys, 0.001 + 0.001 on sells; 100 % slippage; exit on a timer from our own confirmed buy, whatever the price: 40 % of the bag at +2 s,
  * 30 % of the bag at +4 s, everything left at +6 s; sell everything at once if they sell their whole bag first;
  * no stop loss, no dead-coin exit; the same coin can be bought again once this exit has finished.
  */
@@ -187,12 +187,13 @@ export const PRESETS: { id: string; name: string; settings: Record<string, unkno
     settings: {
       name: 'Scharo',
       leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih',
-      minLeaderBuySol: 0,
+      buySol: 7,
+      minLeaderBuySol: 1,
       slippagePct: 100,
       priorityFeeSol: 0.001,
       tipSol: 0.005,
       sellPriorityFeeSol: 0.001,
-      sellTipSol: 0.005,
+      sellTipSol: 0.001,
       oncePerCoin: false,
       sell: {
         mirror: { enabled: true, mode: 'exit' },

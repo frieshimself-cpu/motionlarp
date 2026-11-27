@@ -129,6 +129,37 @@ Mainnet: a PumpSwap buy with platform fee and tip simulated cleanly.
   now, asks for a fixed number of tokens and may take up to the amount plus slippage: on one of the four coins
   it would have paid 0.0108 for the same buy, and at 100 % slippage it could take double.
 - **On the real server:** the push was live after about two minutes; `/api/config` serves the Scharo preset.
+- **Full simulated mainnet check after the buy change** (`npm run check:mainnet`, public RPC): pump.fun curve buy
+  with fee and tip, and sell: ok; PumpSwap buy and sell: ok; Jupiter-routed Raydium LaunchLab and Raydium CPMM,
+  buy and sell: ok; Meteora DBC buy: ok. Meteora DLMM found no sample in that run (it passed in the run before).
+  A pump.fun coin priced in another token is not traded by the native path: the site sends it through Jupiter,
+  and the check now skips such a coin when it looks for its native sample.
+
+## 27 Nov 2026 (later): the Helius link and the Jupiter key live on the server; preset numbers
+
+The owner's decision: the two keys are set on the server, permanently, and nowhere on the website.
+
+- **Where they live now:** `RPC_URL` and `JUPITER_API_KEY` in the server's `.env`. The website refuses to set
+  them (tests, and in a browser: a POST with a link is answered "set on the server, not on the website"); the
+  admin page has no box for them; the read-only **Status** tab shows only whether each connection answers.
+- **The one-time move** (`deploy/keys-to-env.sh`, run by the automatic updater): 9 tests run the real script
+  against throwaway folders (both values written, every other line kept, file readable by root only, a value
+  already in the file never replaced, nothing printed but names, nothing touched when there is nothing to move
+  or the app is down, a second run changes nothing). `src/export-connections.ts`, the tool it calls, is tested as
+  a real process against a real database the app has open.
+- **Rehearsed end to end here** on a stand-in for the server (a database holding a link and key saved the old
+  way, a `.env` without them, the built server running): before, `/api/config` reported
+  `keys: helius: saved, jupiter: saved`; the script wrote both into `.env` (mode 600, a copy of the old file kept
+  as `.env.before-keys`); after a restart it reported `helius: server, jupiter: server`; neither value appeared
+  in the script's output or the server logs. Not rehearsed: the two real `docker compose` calls (no Docker here).
+- **`deploy/set-keys.sh`** (to set or replace them by hand on the server), against the real network: a working
+  link was saved; a link that does not answer and a made-up Jupiter key were refused and nothing changed.
+- **Public status line:** `/api/config` now carries `keys` (where each comes from, never a value) and `health`
+  (names only), refreshed every five minutes, so the state of a server can be read without logging in.
+- **Scharo preset** changed to the owner's numbers: buy 7 SOL, only when they buy 1 SOL or more, buy fees
+  0.001 + 0.005 tip, sell fees 0.001 + 0.001, 100 % slippage; the timed exit and the full-exit rule unchanged.
+  The editor warns when a buy is above the site's "Max per buy" (such buys are skipped by the server).
+- 233 automated tests pass.
 
 ## Not yet verified
 

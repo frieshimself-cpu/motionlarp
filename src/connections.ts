@@ -1,4 +1,4 @@
-// The owner's Connections page: the Helius link and the Jupiter key are saved once and used for every user on the
+// The owner's Status page: the Helius link and the Jupiter key are set once in the server's file and used for every user on the
 // site. This runs a real request against each of them, so "connected" means it answered just now, not "it was saved".
 // Nothing here returns a key or a link: only what was tested and whether it worked.
 import { safeErrorMessage } from './log.js';
@@ -31,7 +31,7 @@ export interface ConnectionReport {
   checks: ConnectionCheck[];
 }
 
-const NO_LINK = 'no Helius link saved yet';
+const NO_LINK = 'the Helius link is not set on the server';
 
 async function timed<T>(fn: () => Promise<T>, timeoutMs: number): Promise<{ value: T; ms: number } | { error: string }> {
   const t0 = performance.now();
@@ -54,7 +54,7 @@ export async function checkConnections(p: ConnectionProbes, timeoutMs = 6_000): 
     const base = { id: 'rpc' as const, name: 'Helius RPC' };
     if (!p.rpcSet) return { ...base, ok: false, detail: NO_LINK };
     const r = await timed(p.rpc, timeoutMs);
-    if ('error' in r) return { ...base, ok: false, detail: /401|403|unauthor|forbidden|invalid api/i.test(r.error) ? 'Helius refused the link: the key in it is wrong or was deleted' : r.error };
+    if ('error' in r) return { ...base, ok: false, detail: /401|403|unauthor|forbidden|invalid api/i.test(r.error) ? 'Helius refused the link: the key in it is wrong or was deleted (RPC_URL in the server file)' : r.error };
     return { ...base, ok: true, detail: `answered in ${r.ms} ms (slot ${r.value})`, ms: r.ms };
   };
 
@@ -80,7 +80,7 @@ export async function checkConnections(p: ConnectionProbes, timeoutMs = 6_000): 
     const r = await timed(p.jupiter, timeoutMs);
     if ('error' in r) {
       const refused = /401|403|unauthor|forbidden|invalid/i.test(r.error);
-      return { ...base, ok: false, detail: refused && p.jupiterKeySet ? 'the key was refused: paste a new one from portal.jup.ag' : r.error };
+      return { ...base, ok: false, detail: refused && p.jupiterKeySet ? 'the key was refused: it is wrong or expired (JUPITER_API_KEY in the server file)' : r.error };
     }
     return { ...base, ok: true, detail: p.jupiterKeySet ? `real quote with your key in ${r.ms} ms` : `real quote in ${r.ms} ms, with no key (the free, slower lane)`, ms: r.ms };
   };

@@ -16,12 +16,14 @@ pump.fun trades around the clock: your buy size, your minimum, your exits.
     moment your buy is confirmed; a failed sell is retried at once without pushing the later steps back, and the
     last step always sells whatever is left in the wallet. Every sell is logged with its time after the buy, the
     tokens sold and the SOL received.
-- **Presets.** One click fills a whole copy. "Scharo": copies `wtb3G6oV…8ksih` with 0.001 SOL priority fee, 0.005
-  SOL tip, 100 % slippage; sells 40 % of the bag at +2 s, 30 % at +4 s, everything left at +6 s; sells everything
-  at once if that wallet sells its whole bag first; no stop loss, no dead coin. The user only sets the buy amount.
-  Presets live in `src/engine/settings.ts` (`PRESETS`).
   - **Stop loss levels**: e.g. −30 % sell half, −60 % sell the rest. Each fires once.
   - **Dead coin**: no trades for N seconds → sell everything.
+- **Presets.** One click fills a whole copy. "Scharo": buys 7 SOL when `wtb3G6oV…8ksih` buys 1 SOL or more;
+  buy fees 0.001 SOL priority + 0.005 tip, sell fees 0.001 + 0.001; 100 % slippage; sells 40 % of the bag at
+  +2 s, 30 % at +4 s, everything left at +6 s; sells everything at once if that wallet sells its whole bag first;
+  no stop loss, no dead coin. Every field can still be changed before saving. A buy above the site's
+  "Max per buy" is skipped (the editor says so), so the owner sets that limit to 7 SOL or more for this preset.
+  Presets live in `src/engine/settings.ts` (`PRESETS`).
 - **Sell now** button on every open position.
 - **License keys and an owner page.** A friend pastes the key you created and is in (no sign-up, no password); you manage keys, users, fees and
   settings at `/admin`.
@@ -73,22 +75,35 @@ Log in to the server and paste one line:
 bash <(curl -fsSL https://raw.githubusercontent.com/frieshimself-cpu/motionlarp/claude/ecstatic-mccarthy-q58vzz/deploy/install.sh)
 ```
 
-It installs Docker, downloads the site, asks for your **domain** and an **admin password**, starts everything
+It installs Docker, downloads the site, asks for your **domain**, an **admin password**, your **Helius link** and
+your **Jupiter key**, starts everything
 (HTTPS certificate included), and switches on automatic updates: every 2 minutes the server checks this branch
 for new code and, if there is any, rebuilds and restarts by itself (trades in flight finish first; open positions
 and their sell rules survive a restart). Running the line again later is safe: it keeps your settings.
 
 Everything else is done in the browser.
 
+### The Helius link and the Jupiter key: on the server, for good
+
+They live in the server's own file, `/root/motionlarp/.env`, as `RPC_URL=` and `JUPITER_API_KEY=`: set once, used
+for every user, readable by root only. The website, the admin page included, cannot show or change them, and
+updates and restarts never touch them. To set or replace them, on the server:
+
+```bash
+bash /root/motionlarp/deploy/set-keys.sh
+```
+
+It asks for each (what you type is not shown; Enter keeps the current one), tests it with a real request, writes
+it into the file and restarts the site. A server whose owner typed them into the admin page in the past needs
+nothing: the automatic updater moves them into the file by itself (`deploy/keys-to-env.sh`), once.
+
 ## The owner page: `https://your-domain/admin`
 
 Log in with the admin password. Only you have it; a user account is never an admin.
 
-- **Connections** (its own tab). The Helius RPC link and the Jupiter API key are saved here once and used for
-  every user; they are stored encrypted in the database, so they survive updates and restarts, and are shown again
-  only as "saved" (the link as its host and last 4 characters). Each is tested with a real request before it is
-  saved (a wrong one is refused and the old one stays), and the page re-tests all four pieces live: the RPC, the
-  Helius transaction stream, the Helius Sender region, and a real Jupiter quote with the key. A red row also
+- **Status** (its own tab, read-only). A real request to each thing the site trades through, sent when you open
+  it: the Helius RPC, the Helius transaction stream, the Helius Sender region, and a real Jupiter quote with the
+  key. Green means it answered just now. No key or link is shown and none can be typed there. A red row also
   shows as a banner on the Admin tab.
 - **Settings.** The platform fee and the wallet it is paid to, the most a single buy may spend, and the
   **Live trading** switch.
@@ -171,10 +186,11 @@ src/venues/, src/tx/   pump.fun + PumpSwap transaction building (ported from Vel
 src/store.ts           SQLite: accounts, encrypted wallets, copies, positions, fills, feed
 src/http/app.ts        the JSON API (users and admin) and the static site
 src/owner-settings.ts  what the owner saves on the admin page (encrypted, applied over the environment)
-src/connections.ts     the Connections page's live checks (RPC, stream, Sender, Jupiter)
+src/connections.ts     the Status page's live checks (RPC, stream, Sender, Jupiter)
+src/export-connections.ts  one-off: reads out keys once saved on the admin page, for deploy/keys-to-env.sh
 src/licenses.ts        license keys
 src/venues/jupiter.ts  Jupiter route for every coin outside pump.fun / PumpSwap
-deploy/                install.sh (one-command install), update.sh (automatic updates)
+deploy/                install.sh (one-command install), update.sh (automatic updates), set-keys.sh (Helius link + Jupiter key into .env)
 public/                the website (no framework, no build step)
 docs/                  design, plan, test record
 ```

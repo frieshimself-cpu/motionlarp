@@ -21,12 +21,12 @@ describe('connection checks (the owner\'s Connections page)', () => {
     expect(r.checks[2]!.detail).toContain('6 ms');
   });
 
-  it('no Helius link saved: the Helius rows are red and say so, without calling anything', async () => {
+  it('no Helius link on the server: the Helius rows are red and say so, without calling anything', async () => {
     let called = 0;
     const r = await checkConnections({ ...good, rpcSet: false, rpc: async () => { called++; return 1; }, sender: async () => { called++; return null; } });
     expect(called).toBe(0);
     expect(r.ok).toBe(false);
-    expect(r.checks.find((c) => c.id === 'rpc')).toMatchObject({ ok: false, detail: 'no Helius link saved yet' });
+    expect(r.checks.find((c) => c.id === 'rpc')).toMatchObject({ ok: false, detail: 'the Helius link is not set on the server' });
   });
 
   it('a failing check is red with a short reason, and never shows a key', async () => {
@@ -40,7 +40,7 @@ describe('connection checks (the owner\'s Connections page)', () => {
     expect(text).not.toContain('9e1b6213');
     expect(r.checks.find((c) => c.id === 'rpc')!.ok).toBe(false);
     expect(r.checks.find((c) => c.id === 'jupiter')).toMatchObject({ ok: false });
-    expect(r.checks.find((c) => c.id === 'jupiter')!.detail).toMatch(/key was refused/);
+    expect(r.checks.find((c) => c.id === 'jupiter')!.detail).toMatch(/key was refused.*server file/);
   });
 
   it('a check that hangs is cut off and reported, the others still answer', async () => {

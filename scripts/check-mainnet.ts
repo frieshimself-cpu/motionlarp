@@ -39,7 +39,10 @@ async function findBuy(program: string, wantVenue: 'pumpfun' | 'pumpswap') {
     const t = parseLeaderTrades(tx, payer).find((x) => x.side === 'buy' && x.venue === wantVenue && x.solLamports > 1_000_000n);
     if (!t) continue;
     try {
-      await pf.resolve(t.mint);
+      // Coins the native path does not trade itself (a curve priced in another token, …) go through Jupiter on
+      // the site and are covered by the Jupiter sections below: this section wants a coin the native path trades.
+      const pool = await pf.resolve(t.mint);
+      await pf.venueFor(pool).quoteBuy(pool, 10_000_000n);
       return t;
     } catch (err) {
       console.log(`(skipping ${t.mint.slice(0, 6)}…: ${err instanceof Error ? err.message : err})`);

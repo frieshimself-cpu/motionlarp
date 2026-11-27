@@ -7,6 +7,10 @@ set -u
 DIR="${MOTIONLARP_DIR:-/root/motionlarp}"
 export DEBIAN_FRONTEND=noninteractive
 
+# The Helius link and the Jupiter key belong in .env on this server (see keys-to-env.sh). First thing, so that
+# nothing below can keep it from running.
+if [ -x "$DIR/deploy/keys-to-env.sh" ]; then MOTIONLARP_DIR="$DIR" "$DIR/deploy/keys-to-env.sh" || true; fi
+
 chmod 600 "$DIR/.env" 2>/dev/null || true
 [ -f "$DIR/MASTER_KEY_BACKUP.txt" ] && chmod 600 "$DIR/MASTER_KEY_BACKUP.txt"
 

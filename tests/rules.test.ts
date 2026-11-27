@@ -157,10 +157,10 @@ describe('new copy options', () => {
   it('the Scharo preset is a valid copy with exactly the agreed settings', async () => {
     const { PRESETS } = await import('../src/engine/settings.js');
     const scharo = PRESETS.find((p) => p.name === 'Scharo')!;
-    const s = validateSettings({ ...scharo.settings, buySol: 1 });
+    const s = validateSettings(scharo.settings);
     expect(s).toMatchObject({
-      leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih', minLeaderBuySol: 0, slippagePct: 100, oncePerCoin: false,
-      priorityFeeSol: 0.001, tipSol: 0.005, sellPriorityFeeSol: 0.001, sellTipSol: 0.005,
+      leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih', buySol: 7, minLeaderBuySol: 1, slippagePct: 100, oncePerCoin: false,
+      priorityFeeSol: 0.001, tipSol: 0.005, sellPriorityFeeSol: 0.001, sellTipSol: 0.001,
       sell: { mirror: { enabled: true, mode: 'exit' }, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 4, percent: 30 }, { afterSec: 6, percent: 100 }], stopLoss: [], deadCoin: { enabled: false } },
     });
   });

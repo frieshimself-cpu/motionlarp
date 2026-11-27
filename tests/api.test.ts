@@ -81,7 +81,8 @@ describe('getting in', () => {
     const scharo = presets.find((p) => p.id === 'scharo')!;
     expect(scharo.name).toBe('Scharo');
     expect(scharo.settings).toMatchObject({
-      leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih', slippagePct: 100, priorityFeeSol: 0.001, tipSol: 0.005,
+      leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih', buySol: 7, minLeaderBuySol: 1, slippagePct: 100,
+      priorityFeeSol: 0.001, tipSol: 0.005, sellPriorityFeeSol: 0.001, sellTipSol: 0.001,
       sell: { timedOf: 'bag', mirror: { enabled: true, mode: 'exit' }, timed: [{ afterSec: 2, percent: 40 }, { afterSec: 4, percent: 30 }, { afterSec: 6, percent: 100 }], stopLoss: [], deadCoin: { enabled: false } },
     });
   });

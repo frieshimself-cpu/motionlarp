@@ -284,7 +284,7 @@ function rule(id, title, desc, on, body) {
 const OF = { left: "of what's left", bag: 'of the original bag' };
 
 function openEditor(copy, preset) {
-  // A preset fills everything except the buy amount, which stays yours to choose.
+  // A preset fills everything, the buy amount included; every field can still be changed before saving.
   const d = copy || { ...config.defaults, ...(preset ? structuredClone(preset.settings) : {}), sell: structuredClone((preset?.settings ?? config.defaults).sell) };
   const timedOf = d.sell.timedOf === 'bag' ? 'bag' : 'left';
   const mirrorMode = ['all', 'exit'].includes(d.sell.mirror.mode) ? d.sell.mirror.mode : 'same';
@@ -299,7 +299,7 @@ function openEditor(copy, preset) {
       ${!copy && presets.length ? `<div class="group preset-bar">
         <div class="title">One-click setup</div>
         <div class="presets">${presets.map((p) => `<button type="button" class="btn ${preset?.id === p.id ? 'primary' : ''}" data-use-preset="${esc(p.id)}">${esc(p.name)}</button>`).join('')}
-          <span class="dim" style="font-size:12.5px">${preset ? `<b>${esc(preset.name)}</b> is filled in below. Set your buy amount and press Start copying.` : 'Fills in the wallet, the fees and the sell rules for you.'}</span></div>
+          <span class="dim" style="font-size:12.5px">${preset ? `<b>${esc(preset.name)}</b> is filled in below. Check the buy amount and press Start copying.` : 'Fills in the wallet, the fees and the sell rules for you.'}</span></div>
       </div>` : ''}
       <div class="group">
         <div class="title">Who and how much</div>
@@ -310,7 +310,7 @@ function openEditor(copy, preset) {
           <div class="field"><label for="f-name">Nickname</label><input id="f-name" type="text" value="${esc(d.name)}" maxlength="40" placeholder="Optional"></div>
         </div>
         <div class="row2">
-          <div class="field"><label for="f-buy">Your buy</label><div class="unit"><input id="f-buy" type="number" min="0.001" step="any" value="${esc(d.buySol)}"><span>SOL</span></div><div class="hint">Site limit ${config.server.maxSolPerBuy} SOL per buy${state.feeBps ? ` · platform fee ${state.feeBps / 100}%` : ''}</div></div>
+          <div class="field"><label for="f-buy">Your buy</label><div class="unit"><input id="f-buy" type="number" min="0.001" step="any" value="${esc(d.buySol)}"><span>SOL</span></div><div class="hint" id="buy-hint"></div></div>
           <div class="field"><label for="f-min">Only when they buy at least</label><div class="unit"><input id="f-min" type="number" min="0" step="any" value="${esc(d.minLeaderBuySol)}"><span>SOL</span></div><div class="hint">Their smaller buys are skipped.</div></div>
         </div>
       </div>
@@ -380,6 +380,18 @@ function openEditor(copy, preset) {
     $$('#timed-rows .rest', form).forEach((el) => { el.textContent = OF[of]; });
   };
   hints();
+  // A buy above the site's limit is skipped by the server: say so here, before it is saved.
+  const buyHint = () => {
+    const max = state.server.maxSolPerBuy ?? config.server.maxSolPerBuy;
+    const over = Number($('#f-buy').value) > max;
+    const el = $('#buy-hint');
+    el.className = over ? 'hint down' : 'hint';
+    el.textContent = over
+      ? `Above the site limit of ${max} SOL per buy: these buys are skipped until the owner raises "Max per buy" on the admin page.`
+      : `Site limit ${max} SOL per buy${state.feeBps ? ` · platform fee ${state.feeBps / 100}%` : ''}`;
+  };
+  buyHint();
+  $('#f-buy').addEventListener('input', buyHint);
   $('#f-mirror-mode').addEventListener('click', hints);
   $('#f-timed-of').addEventListener('click', hints);
   $$('[data-use-preset]', form).forEach((b) => b.addEventListener('click', () => openEditor(undefined, presets.find((p) => p.id === b.dataset.usePreset))));

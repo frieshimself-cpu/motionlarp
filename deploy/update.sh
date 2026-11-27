@@ -9,7 +9,11 @@ flock -n 9 || exit 0
 git fetch --quiet origin
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse '@{u}')
-[ "$LOCAL" = "$REMOTE" ] && exit 0
+if [ "$LOCAL" = "$REMOTE" ]; then
+  # Nothing new. Until the Helius link and the Jupiter key are in .env, keep trying to move them there (a no-op after).
+  if [ -x deploy/keys-to-env.sh ]; then deploy/keys-to-env.sh || true; fi
+  exit 0
+fi
 echo "$(date -Is) updating $LOCAL -> $REMOTE"
 git pull --ff-only --quiet
 docker compose up -d --build

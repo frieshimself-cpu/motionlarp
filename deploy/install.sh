@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-command install for a fresh Ubuntu server:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/frieshimself-cpu/motionlarp/claude/ecstatic-mccarthy-q58vzz/deploy/install.sh)
-# Installs Docker, downloads the site, asks for the domain and an admin password, starts everything, and switches on
-# automatic updates. Everything else is set on the admin page (https://<domain>/admin).
+# Installs Docker, downloads the site, asks for the domain, an admin password, the Helius link and the Jupiter key,
+# starts everything, and switches on automatic updates. Fees, limits and license keys are set on the admin page.
 # Run it again any time to update: it keeps your settings and only pulls the new code and restarts.
 set -euo pipefail
 
@@ -65,7 +65,8 @@ MASTER_KEY=$MASTER_KEY
 PORT=3000
 DB_PATH=./data/motionlarp.db
 LOG_LEVEL=info
-# Everything else (Helius link, fee, max per buy, live trading) is set on the admin page: https://$DOMAIN/admin
+# The Helius link (RPC_URL) and the Jupiter key (JUPITER_API_KEY) are added below by deploy/set-keys.sh.
+# Fee, max per buy, live trading and license keys are set on the admin page: https://$DOMAIN/admin
 ENV
   # A copy of the master key the owner can move somewhere safe: without it, stored wallet keys are unreadable.
   printf '%s\n' "$MASTER_KEY" > "$DIR/MASTER_KEY_BACKUP.txt"
@@ -78,6 +79,13 @@ elif ! grep -q '^ADMIN_PASSWORD=..........' .env; then
   say "Admin password saved (your other settings are kept)"
 else
   say "Keeping your existing settings (.env)"
+fi
+
+# The Helius link and the Jupiter key live in this server's .env file: asked here once, never on the website.
+if [ -z "$DRY" ] && ! grep -Eq '^RPC_URL=.+' .env; then
+  say "Two more: your Helius link and your Jupiter key (what you type is not shown; Enter skips one for now)"
+  chmod +x "$DIR/deploy/set-keys.sh" 2>/dev/null || true
+  MOTIONLARP_DIR="$DIR" MOTIONLARP_RESTART=true bash "$DIR/deploy/set-keys.sh" || echo "    Not saved. Set them later with:  bash $DIR/deploy/set-keys.sh"
 fi
 
 # Updates install themselves: every 2 minutes the server checks for new code and, if there is any, rebuilds and
@@ -105,7 +113,8 @@ if [ -z "$DRY" ]; then
     say "Done."
     echo "    Your site:        https://$DOMAIN_NOW   (give it a minute for the padlock certificate)"
     echo "    Your owner page:  https://$DOMAIN_NOW/admin   (log in with the admin password you chose)"
-    echo "    There: paste your Helius link, set your fee, and create license keys for you and your friends."
+    echo "    There: set your fee and create license keys for you and your friends."
+    echo "    To change the Helius link or the Jupiter key later:  bash $DIR/deploy/set-keys.sh"
     [ -f MASTER_KEY_BACKUP.txt ] && echo "    Your master key is in $DIR/MASTER_KEY_BACKUP.txt — copy it somewhere safe, then delete that file."
   else
     say "Something stopped it. The last lines of the log:"
