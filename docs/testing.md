@@ -347,12 +347,23 @@ SOL (History and the profit use the exact amount); the admin's Live switch takes
 the Helius RPC lane's MEV Protect is unproven (Sender's is proven).
 
 
+## 27 Nov 2026, 05:40 UTC: real money on walletmotion.app itself
+
+The owner switched Live trading on. A copy on the test account followed our own leader wallet with the Scharo exit
+(0.02 SOL buy, fees 0.001 + 0.005 tip on the buy, 0.001 + 0.001 on each sell; 40 % at +2 s, 30 % at +4 s, the rest at
++6 s). The leader bought 0.006 SOL of a pump.fun curve coin:
+- our buy landed **2 slots (about 0.4 s) after the leader's** (slots 474436171 and 474436173), booked 1.2 s after the
+  leader's buy was sent; sells at **+2.2 s, +4.2 s, +6.3 s** after our buy, position closed; every transaction
+  finalized without error;
+- both lanes of the real server took every transaction (`sends`: Helius Sender 4/4, Helius RPC 4/4), with the server's
+  Helius key, the regional Sender (Frankfurt) and the Helius stream in live mode;
+- the profit shown (−0.0125 SOL, nearly all of it the fees of a 0.02 SOL test) is the trade's exact change; the wallet
+  changed by −0.0110 SOL because the last sell closed an empty coin account left by an earlier test (its rent came back).
+The two test copies were deleted afterwards.
+
 ## Not yet verified
 
-- **Real trades on the real server** (Helius RPC with the key, the regional Sender, the Helius stream in live
-  mode). Everything above ran this code for real elsewhere; on walletmotion.app it ran in test mode. It needs the
-  owner's "Live trading" switch. The status line in `/api/config` shows per-lane counters (`sends`) once it has.
-- The Helius RPC lane with `mev-protect=true` (no Helius key outside the server). Sender with it was proven.
+- The Helius RPC lane with `mev-protect=true` on its own (it carried the trades above together with Sender).
 - A real 7 SOL trade. 7 SOL buys are proven by simulation on 8 live coins (above); the largest real buy so far is
   0.02 SOL. On a curve with less than 7 SOL of coins left, our buy completes it and spends the whole amount
   (pump.fun's exact-spend buy); that case was not simulated.
