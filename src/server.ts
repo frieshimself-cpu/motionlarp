@@ -124,8 +124,11 @@ const app = createApp({
   trustProxy: config.trustProxy,
   feeBpsFor,
   maxCopiesPerUser: config.maxCopiesPerUser,
-  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: config.senderUrl === GLOBAL_SENDER && autoSender && senderRegion ? 'global (region dropped after failed sends)' : senderNote, feed: feedNote(), keys: keysNote(), health, sends: laneStats.text() }),
+  serverInfo: () => ({ version: process.env.COMMIT || 'dev', live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: config.senderUrl === GLOBAL_SENDER && autoSender && senderRegion ? 'global (region dropped after failed sends)' : senderNote, feed: feedNote(), keys: keysNote(), health, sends: laneStats.text() }),
 });
+
+// Every hour: forget old seen trades and trim each user's feed (the database must never fill the disk).
+setInterval(() => { try { store.prune(Date.now()); } catch (err) { log.warn('prune failed', { error: safeErrorMessage(err) }); } }, 3_600_000).unref();
 
 // Five times a second, so a timed sell goes out within 0.2 s of its time. Ticks may overlap: the engine runs one
 // price check per position at a time, and timed sells fire

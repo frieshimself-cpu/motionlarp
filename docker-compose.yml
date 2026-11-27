@@ -1,8 +1,15 @@
 # One command on a server: `docker compose up -d --build`. Caddy gets the HTTPS certificate by itself.
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        COMMIT: ${COMMIT:-unknown}
     restart: unless-stopped
+    # Logs are capped (5 x 20 MB): unlimited by default, they would fill the disk in weeks with a busy copied wallet.
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
     # In-flight trades finish before a stop or restart (live buys can take a while to confirm).
     stop_grace_period: 150s
     # Locked down: the app cannot write anywhere but its data volume, holds no Linux capabilities and cannot gain any.
@@ -21,6 +28,9 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
     ports: ["80:80", "443:443"]
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN in .env, e.g. copy.example.com}

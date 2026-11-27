@@ -9,3 +9,6 @@ data/
 scripts/tmp/
 # output of the last fuzz run (the shrunk cases worth keeping are in e2e/fuzz/cases/)
 e2e/fuzz/out/
+# written by deploy/update.sh on the server
+.deployed
+.failed

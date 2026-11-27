@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS positions (
 );
 CREATE INDEX IF NOT EXISTS positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS positions_copy_mint ON positions(copy_id, mint);
+CREATE INDEX IF NOT EXISTS positions_user_closed ON positions(user_id, status, closed_at);
 CREATE TABLE IF NOT EXISTS fills (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   position_id INTEGER NOT NULL,
@@ -131,6 +132,7 @@ CREATE TABLE IF NOT EXISTS fills (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS fills_position ON fills(position_id);
+CREATE INDEX IF NOT EXISTS fills_user ON fills(user_id);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
@@ -507,5 +509,18 @@ export class Store {
   /** True the first time a key is seen (a leader transaction is acted on once, across restarts). */
   markSeen(key: string): boolean {
     return this.run('INSERT OR IGNORE INTO seen (key, created_at) VALUES (?, ?)', key, Date.now()).changes === 1;
+  }
+
+  /**
+   * Keeps the database from growing until the disk is full (a full disk stops every booking): trades seen more than a
+   * day ago are forgotten (a restart never replays trades that old: buys older than 20 s are not copied), and each user
+   * keeps the newest 5,000 feed lines (History is read from positions and fills, not from the feed).
+   */
+  prune(now: number): void {
+    this.run('DELETE FROM seen WHERE created_at < ?', now - 24 * 3_600_000);
+    for (const r of this.all('SELECT user_id, COUNT(*) AS n FROM events GROUP BY user_id HAVING n > 5000')) {
+      const edge = this.get('SELECT id FROM events WHERE user_id = ? ORDER BY id DESC LIMIT 1 OFFSET 4999', r.user_id);
+      if (edge) this.run('DELETE FROM events WHERE user_id = ? AND id < ?', r.user_id, edge.id);
+    }
   }
 }
