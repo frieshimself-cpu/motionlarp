@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 346 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 349 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -272,6 +272,19 @@ bought: 8 of 8 pass, each spending 7.0775 SOL (7 + 0.07 fee + tip + priority fee
 7. A crash in the middle of a test buy could, after a restart with Live switched on, be restored as a real
    position and sell coins the wallet already held. A buy is now written down as test or live from the start,
    and a live buy that was never signed is marked failed.
+8. A transaction first seen in a block that is then dropped is pushed again, and an error seen only at
+   "processed" is not taken as final (the transaction can still land).
+9. The pages (checked in a real browser): Enter in the license-key box now gets you in (the login form used to
+   stay on screen); "0,05" in a number box is 0.05 SOL (an English-language Chrome saved it as 5 SOL); a box that
+   is not a number, or a required box left empty, is refused by name; the admin's Set fee box reads "0%" and
+   "0,5" correctly; a new key logs out every browser that got in with the old one.
+
+**Known, not changed yet** (from the reviews; none blocks the Scharo preset): a stop loss is measured against the
+buy cost with every fee in it, so a level tighter than the entry costs fires at once (the preset has no stop
+loss); a copy's profit line and History add test and real results together; a sell's feed line shows the quoted
+SOL (History and the profit use the exact amount); the admin's Live switch takes effect when Save is pressed;
+the Helius RPC lane's MEV Protect is unproven (Sender's is proven).
+
 
 ## Not yet verified
 
