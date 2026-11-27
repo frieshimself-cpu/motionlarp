@@ -5,13 +5,45 @@ import { plain } from '/figures.js';
 let config = null;
 let state = null;
 let newKey = null; // the key just created: shown once, until the page is left or another is made
-let timer = null;
+let timer = null; // the background refresh, every 5 s
+let connTimer = null; // the connection check, every 2 minutes
 let tab = 'admin';
 let conn = null; // the last connection report (null: not checked yet)
 let connBusy = false;
+/** What the last Save of the settings said: a refusal stays on through the background redraws until the next Save. */
+let settingsNote = { text: '', cls: 'muted' };
+
+/**
+ * The page's two clocks: started when the owner's page is shown (opened logged in, or after a login through the form,
+ * which used to start only the first), stopped by the password form. The connection check ran on after Log out and
+ * answered its 401 by drawing the password form again: a half-typed password was wiped two minutes later, and on the
+ * Status tab the old Status page was drawn first.
+ */
+function startTimers() {
+  stopTimers();
+  timer = setInterval(() => { if (!document.hidden) load(true); }, 5000);
+  // The connections are tested when the owner opens the page, and again every two minutes while it is open.
+  connTimer = setInterval(() => { if (!document.hidden) checkConnections(); }, 120_000);
+}
+function stopTimers() {
+  clearInterval(timer);
+  clearInterval(connTimer);
+  timer = null;
+  connTimer = null;
+}
+
+/** The password form is on the screen: the owner is logged out. */
+const onLogin = () => !!$('.auth', app);
+
+/** A request found the owner logged out: the password form, unless it is already on the screen (drawn again, it lost
+ *  what was being typed into it). */
+function loggedOut() {
+  stopTimers();
+  if (!onLogin()) renderLogin();
+}
 
 function renderLogin(error = '') {
-  clearInterval(timer);
+  stopTimers();
   app.innerHTML = `
     <section class="auth"><div class="auth-in">
       ${brandHtml(config.brand)}
@@ -29,8 +61,9 @@ function renderLogin(error = '') {
     e.preventDefault();
     try {
       await api('POST', '/api/admin/login', { password: $('#ap').value });
-      await load();
-      timer = setInterval(() => { if (!document.hidden) load(true); }, 5000);
+      state = await api('GET', '/api/admin/state');
+      render();
+      startTimers();
       checkConnections();
     } catch (err) { renderLogin(err.message); }
   });
@@ -47,7 +80,7 @@ const topbar = (s) => `
     </div></header>`;
 
 function bindTop() {
-  $('#admin-logout').addEventListener('click', async () => { await api('POST', '/api/admin/logout').catch(() => {}); newKey = null; renderLogin(); });
+  $('#admin-logout').addEventListener('click', async () => { stopTimers(); await api('POST', '/api/admin/logout').catch(() => {}); newKey = null; settingsNote = { text: '', cls: 'muted' }; renderLogin(); });
   $$('[data-tab]', app).forEach((b) => b.addEventListener('click', () => {
     tab = b.dataset.tab;
     render();
@@ -93,24 +126,90 @@ function renderConnections() {
 }
 
 async function checkConnections() {
-  if (connBusy) return;
+  if (connBusy || onLogin()) return;
   connBusy = true;
-  if (tab === 'connections' && !typingNow()) renderConnections();
+  if (tab === 'connections') redraw({ background: true });
   try {
     conn = await api('GET', '/api/admin/connections');
   } catch (err) {
-    if (err.status === 401) { connBusy = false; return renderLogin(); }
+    connBusy = false;
+    if (err.status === 401) return loggedOut();
     conn = { ok: false, checks: [{ id: 'rpc', name: 'Check', ok: false, detail: err.message }] };
   }
   connBusy = false;
-  if (!editingNow()) render();
+  if (!onLogin()) redraw({ background: true });
 }
 
-/** Someone is typing in a form: do not re-draw under them. */
-const typingNow = () => !!document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName) && app.contains(document.activeElement);
-/** Or has typed something and not sent it yet, in any form of the page (a name half typed into "Who is it for" was
- *  wiped by the next background refresh once the cursor left the box: only the Settings boxes were looked at). */
-const editingNow = () => typingNow() || $$('form input, form textarea', app).some((i) => (i.type === 'checkbox' ? i.checked !== i.defaultChecked : i.value !== i.defaultValue));
+// ── drawing the page again without losing what the owner is doing ───────
+// The page used to stop drawing while any box held unsent text, and its figures froze with no sign ("2" typed in
+// "Their fee", and the Users count stayed at 4 while a new user logged in). Now it is drawn as the figures come, and
+// what was typed and not sent goes into the new page: the values, the box being typed in with its cursor where it
+// was, and how far each table is scrolled.
+
+/** A control as it can be found again in the new page: by its id, or by its first data- attribute (the table's buttons). */
+function spot(el) {
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  const d = [...el.attributes].find((a) => a.name.startsWith('data-'));
+  return d ? `${el.tagName.toLowerCase()}[${d.name}="${CSS.escape(d.value)}"]` : null;
+}
+
+/** What is typed and not sent (not in `sent`, the form just sent, whose boxes come back empty), and where the cursor is. */
+function keepTyped(sent) {
+  const sentForm = sent ? $(sent, app) : null;
+  const inSent = (el) => !!sentForm && sentForm.contains(el);
+  const a = document.activeElement;
+  const focus = a && a !== document.body && app.contains(a) ? a : null;
+  const typed = $$('input, textarea', app)
+    .filter((el) => el.id && el !== focus && !inSent(el) && (el.type === 'checkbox' ? el.checked !== el.defaultChecked : el.value !== el.defaultValue))
+    .map((el) => ({ id: el.id, value: el.value, checked: el.checked }));
+  return { focus, keepBox: !!focus && /^(INPUT|TEXTAREA)$/.test(focus.tagName) && !inSent(focus), where: focus ? spot(focus) : null, typed, scroll: $$('.table-wrap', app).map((el) => el.scrollLeft) };
+}
+
+function putBack(k) {
+  for (const t of k.typed) {
+    const el = document.getElementById(t.id);
+    if (!el || !app.contains(el)) continue;
+    if (el.type === 'checkbox') el.checked = t.checked;
+    else el.value = t.value;
+  }
+  const fresh = k.where ? $(k.where, app) : null;
+  if (fresh && k.keepBox && fresh.tagName === k.focus.tagName && fresh.type === k.focus.type) {
+    // The box itself goes back (what is typed in it, and its cursor, even in a number box, which does not say where its
+    // cursor is); what it would start from is the server's latest.
+    if (fresh.type === 'checkbox') k.focus.defaultChecked = fresh.defaultChecked;
+    else k.focus.defaultValue = fresh.defaultValue;
+    fresh.replaceWith(k.focus);
+    k.focus.focus({ preventScroll: true });
+  } else if (fresh) fresh.focus({ preventScroll: true });
+  $$('.table-wrap', app).forEach((el, i) => { if (k.scroll[i]) el.scrollLeft = k.scroll[i]; });
+  // The live switch's words follow the switch, as when it is clicked.
+  const live = $('#set-live', app);
+  if (live && state?.settings && live.checked !== state.settings.liveTrading) $('#live-text').textContent = live.checked ? 'Live trading will be ON after saving' : 'Test mode';
+}
+
+// A background redraw waits while a button is held down (it would be replaced before it is let go, and the click lost)
+// or a word is being composed with an input method, and comes right after.
+let pressedAt = 0;
+let composing = false;
+let drawLater = false;
+const busyHand = () => composing || (pressedAt > 0 && Date.now() - pressedAt < 2000);
+function drawNow() {
+  if (!drawLater) return;
+  drawLater = false;
+  setTimeout(() => { if (!onLogin() && state) redraw({ background: true }); }, 0);
+}
+document.addEventListener('pointerdown', () => { pressedAt = Date.now(); }, true);
+for (const t of ['pointerup', 'pointercancel']) document.addEventListener(t, () => { pressedAt = 0; drawNow(); }, true);
+document.addEventListener('compositionstart', () => { composing = true; }, true);
+document.addEventListener('compositionend', () => { composing = false; drawNow(); }, true);
+
+/** Draws the page again from the latest data, keeping what the owner was doing (see above). */
+function redraw({ sent = null, background = false } = {}) {
+  if (background && busyHand()) { drawLater = true; return; }
+  const kept = keepTyped(sent);
+  render();
+  putBack(kept);
+}
 
 function render() {
   if (tab === 'connections') return renderConnections();
@@ -178,7 +277,7 @@ function render() {
               <div style="max-width:220px"><div class="unit"><input id="set-max" type="number" min="0.001" step="any" value="${esc(plain(st.maxSolPerBuy))}"><span>SOL</span></div></div></div>
             <div class="setting"><div class="what"><b>Live trading</b><span>On: every enabled copy on the site buys with real SOL. Off: no new real buys (copies are simulated); coins already bought with real SOL are still sold by their rules and with Sell now.</span></div>
               <div style="display:flex;align-items:center;gap:12px"><label class="switch"><input type="checkbox" id="set-live" ${st.liveTrading ? 'checked' : ''} aria-label="Live trading"><span></span></label><span id="live-text" class="${st.liveTrading ? 'up' : 'muted'}">${st.liveTrading ? 'Live trading is ON' : 'Test mode'}</span></div></div>
-            <div class="card-body" style="border-top:1px solid var(--border);display:flex;gap:12px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="submit">Save settings</button><span id="settings-msg" class="muted"></span></div>
+            <div class="card-body" style="border-top:1px solid var(--border);display:flex;gap:12px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="submit">Save settings</button><span id="settings-msg" class="${settingsNote.cls}">${esc(settingsNote.text)}</span></div>
           </form>
         </div>
       </div>
@@ -195,7 +294,7 @@ function bind() {
     try {
       const r = await api('POST', '/api/admin/licenses', { label, feePercent: fee === '' ? null : Number(fee) });
       newKey = { key: r.key, label };
-      await load();
+      await load(false, '#new-license');
     } catch (err) { toast(err.message, true); }
   });
   $('#copy-key')?.addEventListener('click', async () => {
@@ -235,19 +334,22 @@ function bind() {
   });
   $('#settings').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const msg = $('#settings-msg');
-    msg.className = 'muted';
-    msg.textContent = 'Saving…';
+    const note = (text, c) => {
+      settingsNote = { text, cls: c };
+      const msg = $('#settings-msg');
+      if (msg) { msg.className = c; msg.textContent = text; }
+    };
+    note('Saving…', 'muted');
     const body = { feePercent: Number($('#set-fee').value || 0), feeWallet: $('#set-wallet').value.trim(), liveTrading: $('#set-live').checked };
     // An empty "max per buy" keeps the current value.
     if ($('#set-max').value.trim()) body.maxSolPerBuy = Number($('#set-max').value);
     try {
       await api('POST', '/api/admin/settings', body);
+      settingsNote = { text: '', cls: 'muted' };
       toast('Settings saved');
-      await load();
+      await load(false, '#settings');
     } catch (err) {
-      msg.className = 'down';
-      msg.textContent = err.message;
+      note(err.message, 'down');
     }
   });
 }
@@ -260,15 +362,19 @@ async function waitForRestart() {
   }
 }
 
-async function load(quiet = false) {
+/**
+ * The latest figures, drawn at once, with what is typed and not sent kept (see redraw). `quiet`: the background
+ * refresh (it says nothing when it fails, and waits for a button being held down); `sent`: the form just sent, whose
+ * boxes come back empty.
+ */
+async function load(quiet = false, sent = null) {
   try {
     const next = await api('GET', '/api/admin/state');
-    // Do not re-draw under someone typing in a form, or over what they typed and have not sent yet.
-    const editing = editingNow();
+    if (onLogin()) return; // logged out meanwhile
     state = next;
-    if (!(quiet && editing)) render();
+    redraw({ sent, background: quiet });
   } catch (err) {
-    if (err.status === 401) return renderLogin();
+    if (err.status === 401) return loggedOut();
     if (!quiet) toast(err.message, true);
   }
 }
@@ -280,10 +386,8 @@ export async function bootAdmin(cfg) {
     try {
       state = await api('GET', '/api/admin/state');
       render();
-      timer = setInterval(() => { if (!document.hidden) load(true); }, 5000);
-      // The connections are tested when the owner opens the page, and again every two minutes while it is open.
+      startTimers();
       checkConnections();
-      setInterval(() => { if (!document.hidden) checkConnections(); }, 120_000);
       return;
     } catch (err) {
       if (err.status === 401 || err.status === 503) return renderLogin();
