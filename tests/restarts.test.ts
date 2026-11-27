@@ -749,6 +749,7 @@ describe('a sell from before a crash that is not settled yet', () => {
 
 describe('a trade whose outcome is unknown, on a slow chain or past its last block', () => {
   const bag = { ...none, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 900, percent: 100 }] };
+  const exitOnly = { ...none, mirror: { enabled: true, mode: 'exit' } };
   /** The executor tells the chain tip's slot, and a "not found" carries a slot as far along as the tip. */
   function slottedTip(s: ReturnType<typeof server>) {
     const chain = s.chain as unknown as { chainTip: () => Promise<{ height: number; slot: number }>; settleSell: (sig: string) => Promise<Record<string, unknown>> };
@@ -800,6 +801,151 @@ describe('a trade whose outcome is unknown, on a slow chain or past its last blo
     s.at(123_000); await sleep(30);
     expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 400_000n]);
     s.engine.stop();
+  });
+
+  it('a sell is not given up when a read of the chain tip fails on a slow chain: the highest tip read before stands in (the two-minute timer came back)', async () => {
+    const s = server(bag);
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'unknown-lost' : 'ok');
+    s.chain.height = 10;
+    s.at(2_000); void s.engine.tick(); await sleep(10); // the tip is read (10): its blockhash, valid up to 100, can land
+    const read = s.chain.blockHeight.bind(s.chain);
+    s.chain.blockHeight = async () => { throw new Error('429 Too Many Requests'); };
+    s.at(200_000); await sleep(30); // over three minutes on, every tip read fails
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n]); // not given up, not sold again
+    s.chain.blockHeight = read;
+    s.chain.landed.set('S1', { tokens: 400_000n, lamports: 400_000_000n }); s.chain.held -= 400_000n; // it lands
+    await sleep(30);
+    expect(s.store.fills(1).filter((f) => f.side === 'sell').map((f) => f.signature)).toEqual(['S1']);
+    expect(s.chain.sent).toHaveLength(1);
+    s.engine.stop();
+  });
+
+  it('a sell whose tip reads have all failed is given up only ten minutes after it was sent, not on a timer meant for an executor that cannot read the tip', async () => {
+    const s = server(bag);
+    s.chain.blockHeight = async () => { throw new Error('429 Too Many Requests'); };
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'unknown-lost' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(10);
+    s.at(300_000); await sleep(30);
+    expect(s.chain.sent).toHaveLength(1);
+    s.at(603_000); await sleep(30);
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 400_000n]);
+    s.engine.stop();
+  });
+
+  it('a sell whose outcome is unknown says so in the feed while it is read (the position waited minutes with nothing said)', async () => {
+    const s = server(bag);
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'unknown-lost' : 'ok');
+    s.chain.height = 10;
+    s.at(2_000); void s.engine.tick(); await sleep(10);
+    expect(s.feed().some((m) => /outcome is not known yet/.test(m) && /tried again/.test(m))).toBe(true);
+    expect(s.feed().some((m) => /failed/.test(m))).toBe(false); // not a failure: it may well have landed
+    s.engine.stop();
+  });
+
+  it('a sell left by a crash is not dropped when a read of the chain tip fails after three minutes (the 180 s timer came back)', async () => {
+    const s = server({ ...none, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 900, percent: 100 }] });
+    slottedTip(s);
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'gone' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(5);
+    s.crash();
+    s.chain.height = 80;
+    s.at(200_000); await s.engine.restore(); await s.engine.idle(); // the tip is read: 80, its blockhash (valid up to 100) can land
+    const chain = s.chain as unknown as { chainTip: () => Promise<unknown> };
+    chain.chainTip = async () => { throw new Error('fetch failed'); };
+    s.at(205_000); await s.engine.settleLeftovers(); await s.engine.idle(); await s.tick();
+    expect(s.store.sellsOut()).toHaveLength(1);
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n]);
+  });
+
+  it('a buy of unknown outcome is not marked failed when a read of the chain tip fails (its coins would stay unsold)', async () => {
+    const s = server(none);
+    const chain = s.chain as unknown as { chainTip: () => Promise<unknown> };
+    chain.chainTip = async () => ({ height: s.chain.height, slot: 1_000 + s.chain.height });
+    unknownBuy(s);
+    s.chain.height = 50;
+    await s.buy();
+    s.at(100_000); await s.engine.restore(); await s.engine.idle(); // the tip is read: 50
+    chain.chainTip = async () => { throw new Error('fetch failed'); };
+    s.at(200_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.position().status).toBe('opening');
+  });
+
+  it('a sell left by a crash is believed not found from exactly the slot its last block can have at the latest, not one slot earlier', async () => {
+    const s = server(exitOnly);
+    const chain = s.chain as unknown as { chainTip: () => Promise<{ height: number; slot: number }>; settleSell: (sig: string) => Promise<Record<string, unknown>> };
+    chain.chainTip = async () => ({ height: 112, slot: 1_112 }); // the block of height 101 (its last) has a slot no later than 1,112 - 11 = 1,101
+    let statusSlot = 1_100;
+    const settle = chain.settleSell.bind(s.chain);
+    chain.settleSell = async (sig: string) => { const r = await settle(sig); return r.state === 'not_found' ? { ...r, slot: statusSlot } : r; };
+    await s.buy();
+    s.chain.plan = () => 'gone';
+    void s.their('sell'); await sleep(5);
+    s.crash();
+    s.chain.plan = () => 'ok';
+    s.at(50_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(1); // a node at slot 1,100 may not have reached block 101
+    statusSlot = 1_101;
+    s.at(55_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(0);
+  });
+
+  it('the highest chain tip read stands in for a read that fails, or for a node that answers lower: a sell left by a crash is settled as soon as its status node has caught up', async () => {
+    const s = server(exitOnly);
+    const chain = s.chain as unknown as { chainTip: () => Promise<{ height: number; slot: number }>; settleSell: (sig: string) => Promise<Record<string, unknown>> };
+    let tip: (() => Promise<{ height: number; slot: number }>) = async () => ({ height: 140, slot: 1_140 });
+    chain.chainTip = () => tip();
+    let statusSlot = 1_050; // the status node is far behind
+    const settle = chain.settleSell.bind(s.chain);
+    chain.settleSell = async (sig: string) => { const r = await settle(sig); return r.state === 'not_found' ? { ...r, slot: statusSlot } : r; };
+    await s.buy();
+    s.chain.plan = () => 'gone';
+    void s.their('sell'); await sleep(5);
+    s.crash();
+    s.chain.plan = () => 'ok';
+    s.at(60_000); await s.engine.restore(); await s.engine.idle(); // the tip is read: 140
+    expect(s.store.sellsOut()).toHaveLength(1);
+    statusSlot = 1_140; // the status node has caught up; the tip read now fails
+    tip = async () => { throw new Error('fetch failed'); };
+    s.at(65_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(0);
+  });
+
+  it('a buy this process saw land, whose booking failed, is never marked failed on a "not found" (a lagging node; its coins would stay unsold)', async () => {
+    const s = server(none);
+    const chain = s.chain as unknown as { chainTip: () => Promise<unknown>; settleBuy: (sig: string) => Promise<unknown> };
+    chain.chainTip = async () => ({ height: s.chain.height, slot: 1_000 + s.chain.height });
+    let caughtUp = false;
+    chain.settleBuy = async () => (caughtUp ? { state: 'landed', tokens: 1_000_000n, lamports: SOL } : { state: 'not_found', slot: 1_000 + s.chain.height });
+    const insertFill = s.store.insertFill.bind(s.store);
+    let broken = true;
+    s.store.insertFill = (f) => { if (broken && f.side === 'buy') { broken = false; throw new Error('disk I/O error'); } return insertFill(f); };
+    await s.buy(); // it landed (B1, valid up to 100); its booking failed
+    expect(s.position()).toMatchObject({ status: 'opening', buySig: 'B1' });
+    s.chain.height = 140; // well past its last block, and the node says "not found" from the tip's slot
+    s.at(5_000); await s.engine.settleLeftovers(); await s.engine.idle();
+    expect(s.position().status).toBe('opening');
+    caughtUp = true;
+    s.at(10_000); await s.engine.settleLeftovers(); await s.engine.idle();
+    expect(s.position()).toMatchObject({ status: 'open', tokensHeld: 1_000_000n });
+  });
+
+  it('the settling pass reads the chain tip once, not once for every buy it settles', async () => {
+    const s = server(none);
+    const chain = s.chain as unknown as { chainTip: () => Promise<unknown> };
+    let reads = 0;
+    chain.chainTip = async () => { reads++; return { height: s.chain.height, slot: 1_000 + s.chain.height }; };
+    unknownBuy(s);
+    s.chain.height = 50;
+    await s.buy();
+    await s.buy(OTHER);
+    expect(s.store.activePositions().filter((p) => p.status === 'opening')).toHaveLength(2);
+    reads = 0;
+    s.at(20_000); await s.engine.restore(); await s.engine.idle();
+    expect(reads).toBe(1);
   });
 
   /** A buy whose outcome nobody could tell: signed (its blockhash valid up to height 100) and left "opening". */
@@ -1508,7 +1654,7 @@ describe('one write that fails does not stop the others', () => {
 });
 
 describe('what the third round of reviewers found', () => {
-  it('a sell left by a crash is dropped once the chain is well past it, though the node that reads its status is always some slots behind (it waited for the 180 s fallback)', async () => {
+  it('a sell left by a crash is dropped once the node that reads its status has certainly reached its last block, though that node is always some slots behind the tip (it waited for the 180 s fallback)', async () => {
     const s = server({ ...none, mirror: { enabled: true, mode: 'exit' } });
     const chain = s.chain as unknown as { chainTip: () => Promise<{ height: number; slot: number }>; settleSell: (sig: string) => Promise<Record<string, unknown>> };
     chain.chainTip = async () => ({ height: s.chain.height, slot: 1_000 + s.chain.height });
@@ -1519,13 +1665,33 @@ describe('what the third round of reviewers found', () => {
     void s.their('sell'); await sleep(5);
     s.crash();
     s.chain.plan = () => 'ok';
-    s.chain.height = 120; // past it and its margin, but the status node is behind the tip node
-    s.at(50_000); await s.engine.restore(); await s.engine.idle();
+    s.chain.height = 105; // past its last block (101), but the status node, 5 slots behind, may not have reached it
+    s.at(45_000); await s.engine.restore(); await s.engine.idle();
     expect(s.store.sellsOut()).toHaveLength(1);
-    s.chain.height = 132; // well past it
-    s.at(60_000); await s.engine.restore(); await s.engine.idle();
+    s.chain.height = 112; // past it and its margin; the status node, at the slot of block 107, has reached block 101
+    s.at(50_000); await s.engine.restore(); await s.engine.idle();
     expect(s.store.sellsOut()).toHaveLength(0);
     expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+
+  it('a "not found" from a node whose own slot shows it has not reached the sell\'s last block is not believed, however far past the chain is (a buy that landed was marked failed by a node far behind)', async () => {
+    const s = server({ ...none, mirror: { enabled: true, mode: 'exit' } });
+    const chain = s.chain as unknown as { chainTip: () => Promise<{ height: number; slot: number }>; settleSell: (sig: string) => Promise<Record<string, unknown>> };
+    chain.chainTip = async () => ({ height: s.chain.height, slot: 1_000 + s.chain.height });
+    const settle = chain.settleSell.bind(s.chain);
+    let behind = 100; // the status node: 100 slots behind the tip
+    chain.settleSell = async (sig: string) => { const r = await settle(sig); return r.state === 'not_found' ? { ...r, slot: 1_000 + s.chain.height - behind } : r; };
+    await s.buy();
+    s.chain.plan = () => 'gone';
+    void s.their('sell'); await sleep(5);
+    s.crash();
+    s.chain.plan = () => 'ok';
+    s.chain.height = 160; // 59 blocks past its last block: well past, but the node is at the slot of block 60
+    s.at(80_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(1);
+    behind = 0; // it has caught up
+    s.at(85_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(0);
   });
 
   it('a coin that kept trading while its price could not be written (a full disk longer than the dead-coin time) is not sold as dead once the disk is back', async () => {
