@@ -151,7 +151,13 @@ export class Exec implements Executor {
   warm(_mint: string): Promise<void> { return this.alive ? Promise.resolve() : NEVER; }
   settleBuy(signature: string, owner: string, mint: string) { return this.m.settleBuy(this, signature, owner, mint); }
   settleSell(signature: string, owner: string, mint: string) { return this.m.settleSell(this, signature, owner, mint); }
+  blockHeight() { return this.m.blockHeight(this); }
 }
+
+/** One block every 400 ms; a transaction's blockhash is valid for 150 blocks after it is signed (about a minute). A
+ *  sell lands within 30 s of being signed (planOp's L1) or never: none is ever found after its blockhash ran out. */
+const BLOCK_MS = 400;
+const VALID_BLOCKS = 150;
 
 export class Market {
   readonly price = new Map<string, bigint>();
@@ -395,6 +401,13 @@ export class Market {
     return Promise.resolve({ state: c.chainFailed ? 'failed' : 'not_found' });
   }
 
+  /** The chain's block height (it can be read only when the RPC answers). */
+  blockHeight(exec: Exec): Promise<number> {
+    if (!exec.alive) return NEVER;
+    if (this.planBal().fail || this.outage()) return Promise.reject(new Error('429 Too Many Requests'));
+    return Promise.resolve(Math.floor(this.sim.now / BLOCK_MS));
+  }
+
   /** What became of a sell of unknown outcome, from its own transaction (the engine asks before it sells again). */
   settleSell(exec: Exec, signature: string, _owner: string, _mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
     if (!exec.alive) return NEVER;
@@ -459,7 +472,10 @@ export class Market {
         call.signature = `S${call.id}`;
         call.sentAt = this.sim.now;
         this.signedSells.set(call.signature, call);
-        try { req.onSigned?.(call.signature); } catch { /* the real executor ignores it too */ }
+        // As the real executor: told with its blockhash's last valid height, the fee it carries (from the quote) and
+        // whether the market can pay for only part of it.
+        const info = { lastValidBlockHeight: Math.floor(this.sim.now / BLOCK_MS) + VALID_BLOCKS, feeLamports: fee0, marketShort: !!plan.part };
+        try { req.onSigned?.(call.signature, info); } catch { /* the real executor ignores it too */ }
       }
       const unknownLost = live && plan.unsure === 'lost';
       this.after(plan.L1, () => {
@@ -509,7 +525,7 @@ export class Market {
             if (exec.alive) res(plan.refineNull ? null : { lamports: net });
           });
         });
-        this.after(plan.L2, () => deliver({ ok: true, signature: call.signature!, tokens: sold, lamports: est, simulated: false, feeLamports: fee, confirmedAt: landedAt, refine }));
+        this.after(plan.L2, () => deliver({ ok: true, signature: call.signature!, tokens: sold, lamports: est, simulated: false, feeLamports: fee, confirmedAt: landedAt, refine, marketShort: !!plan.part }));
       });
     });
   }

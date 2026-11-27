@@ -48,7 +48,9 @@ export interface Position {
 }
 
 /** A sell of theirs we owe our share of: its rule, the percent of what we hold, and their transaction (the tag). */
-export interface OwedSell { reason: SellReason; percent: number; tag?: string }
+/** A partial sell written down until it is sold: their partial sell ("same share", by its transaction `tag`), or a stop
+ *  loss level that came due and has not gone out yet (by its `stage`). */
+export interface OwedSell { reason: SellReason; percent: number; tag?: string; stage?: number }
 
 export interface Fill {
   id: number;
@@ -82,6 +84,12 @@ export interface SellOut {
   /** What it asked for. */
   tokens: bigint;
   sentAt: number;
+  /** The block height up to which its blockhash is valid (not found once the chain is past it: it never landed). */
+  lastValid?: number;
+  /** The platform fee it carries (booked with it when it is settled from its own transaction). */
+  feeLamports?: bigint;
+  /** The market could pay for only part of what it asked (the rest is still to sell). */
+  marketShort?: boolean;
 }
 
 export type EventKind = 'buy' | 'sell' | 'skip' | 'error' | 'info';
@@ -204,7 +212,10 @@ CREATE TABLE IF NOT EXISTS sells_out (
   mint TEXT NOT NULL,
   sell_order TEXT NOT NULL,
   tokens INTEGER NOT NULL,
-  sent_at INTEGER NOT NULL
+  sent_at INTEGER NOT NULL,
+  last_valid INTEGER,
+  fee_lamports INTEGER,
+  market_short INTEGER
 );
 `;
 
@@ -282,7 +293,12 @@ export class Store {
     if (!posCols.includes('decimals')) this.db.exec('ALTER TABLE positions ADD COLUMN decimals INTEGER NOT NULL DEFAULT 6');
     if (!posCols.includes('exit_owed')) this.db.exec('ALTER TABLE positions ADD COLUMN exit_owed TEXT');
     if (!posCols.includes('owed_sells')) this.db.exec('ALTER TABLE positions ADD COLUMN owed_sells TEXT');
-    // (sells_out, added 27 Nov 2026, is created by SCHEMA above in a database that does not have it yet)
+    // (sells_out, added 27 Nov 2026, is created by SCHEMA above in a database that does not have it yet; a table
+    // made before its last three columns gets them)
+    const outCols = this.all('PRAGMA table_info(sells_out)').map((r) => String(r.name));
+    for (const col of ['last_valid', 'fee_lamports', 'market_short']) {
+      if (!outCols.includes(col)) this.db.exec(`ALTER TABLE sells_out ADD COLUMN ${col} INTEGER`);
+    }
   }
 
   private txDepth = 0;
@@ -603,13 +619,24 @@ export class Store {
   }
   // ── sells written down before they go out (see SellOut) ─────────────
   insertSellOut(s: SellOut): void {
-    this.run('INSERT OR REPLACE INTO sells_out (signature, position_id, user_id, mint, sell_order, tokens, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?)', s.signature, s.positionId, s.userId, s.mint, JSON.stringify(s.order), s.tokens, s.sentAt);
+    this.run(
+      'INSERT OR REPLACE INTO sells_out (signature, position_id, user_id, mint, sell_order, tokens, sent_at, last_valid, fee_lamports, market_short) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      s.signature, s.positionId, s.userId, s.mint, JSON.stringify(s.order), s.tokens, s.sentAt,
+      s.lastValid ?? null, s.feeLamports ?? null, s.marketShort === undefined ? null : s.marketShort ? 1 : 0,
+    );
   }
   sellsOut(): SellOut[] {
     return this.all('SELECT * FROM sells_out ORDER BY sent_at, signature').map((r) => ({
       signature: String(r.signature), positionId: num(r.position_id), userId: num(r.user_id), mint: String(r.mint),
       order: JSON.parse(String(r.sell_order)) as SellOrder, tokens: big(r.tokens), sentAt: num(r.sent_at),
+      ...(r.last_valid === null || r.last_valid === undefined ? {} : { lastValid: num(r.last_valid) }),
+      ...(r.fee_lamports === null || r.fee_lamports === undefined ? {} : { feeLamports: big(r.fee_lamports) }),
+      ...(r.market_short === null || r.market_short === undefined ? {} : { marketShort: num(r.market_short) === 1 }),
     }));
+  }
+  /** Whether a sell is still written down (its booking deletes it). */
+  hasSellOut(signature: string): boolean {
+    return this.all('SELECT 1 FROM sells_out WHERE signature = ?', signature).length > 0;
   }
   deleteSellOut(signature: string): void {
     this.run('DELETE FROM sells_out WHERE signature = ?', signature);

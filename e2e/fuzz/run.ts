@@ -336,9 +336,9 @@ class Run {
     this.instrument(this.engine, gen);
     for (const t of this.pos.values()) {
       t.bagActive.clear(); t.invoked.clear(); t.queueFlying = 0; t.queueActive = 0; t.reading = 0; t.fullExitSold.clear(); t.failed.clear(); t.overAsk.clear(); t.errorLines.clear();
-      // Stop loss levels are checked again after a restart (a level whose sell the stopping engine did not send fires
-      // if the price is still past it): what is due is counted afresh from here.
-      t.stopDue.clear();
+      // (A stop loss level that came due before the restart stays due: the new engine's first check uses the price
+      // the old one stored, and a level that comes due while a sell from before the restart is unsettled is held and
+      // sold after it. The levels are not counted afresh: one that never fires is flagged.)
       // The old engine's real sells it never booked stay on their way for the new one (it found them written down);
       // anything else it had out is gone with it (a test sell cut off was never sent anywhere).
       for (const [inv, f] of t.flying) {
@@ -346,9 +346,19 @@ class Run {
         else t.flying.delete(inv);
       }
     }
-    // src/server.ts: restore() 3 s after the start, then restore() + reconcile() every 30 s.
+    // src/server.ts: restore() 3 s after the start, then restore() + reconcile() every 30 s, and settleLeftovers()
+    // every 5 s while a sell left by the process before is not settled. A new process starts with no pass running
+    // (the flag is the old process's: its pass may wait forever on its dead executor, and every pass of the new one
+    // was skipped).
+    this.reconciling = false;
     const epoch = ++this.safetyEpoch;
     const engine = this.engine;
+    const leftovers = () => {
+      if (epoch !== this.safetyEpoch) return;
+      sim.schedule(5_000, leftovers);
+      if (engine.awaitingLeftovers()) void engine.settleLeftovers().catch((err) => this.problem('E1', 'leftovers-rejected', String(err)));
+    };
+    sim.schedule(5_000, leftovers);
     sim.schedule(3_000, () => { if (epoch === this.safetyEpoch) void engine.restore().catch((err) => this.problem('E1', 'restore-rejected', String(err))); });
     const safety = () => {
       if (epoch !== this.safetyEpoch) return;
@@ -916,10 +926,9 @@ class Run {
         else this.problem('O1', 'two-positions-one-coin', `user ${p.userId} has p${seen.get(k)} and p${p.id} active in ${short(p.mint)}`);
       }
       seen.set(k, p.id);
-      // Stop loss levels the last price check passed (the engine works from the same stored numbers).
-      // (not while it waits for a sell from before a restart: its rules wait, and then see the price of that moment)
-      const waiting = [...(this.pos.get(p.id)?.flying.values() ?? [])].some((f) => f.orphan);
-      if (p.status === 'open' && p.refValueLamports !== null && p.costLamports > 0n && !waiting) {
+      // Stop loss levels the last price check passed (the engine works from the same stored numbers), also while it
+      // waits for a sell from before a restart (a level that comes due then is held and sold once that is settled).
+      if (p.status === 'open' && p.refValueLamports !== null && p.costLamports > 0n) {
         const loss = (1 - Number(p.refValueLamports) / Number(p.costLamports)) * 100;
         const tr = this.pos.get(p.id);
         p.sell.stopLoss.forEach((l, i) => { if (loss >= l.lossPct && !p.firedStop.includes(i)) tr?.stopDue.add(i); });

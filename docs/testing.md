@@ -446,12 +446,52 @@ pass, so all 21 do:
 
 The fuzzer, the report's commands, before and after (seeds flagged): default mix 32 → **0** of 6,000; crash profile
 272 → **0** of 3,000; ghost 112 → **0**; outage 1 → **0**; slow-read 18 → **6** (the quoted coin count case kept as
-known, above); the five core profiles 0 of 3,000 before and after; the self-test catches every planted fault. The
+known, above); the five core profiles 0 of 3,000 before and after; the self-test catches every planted fault. (Part of
+the first two drops is the harness, not the engine, as a reviewer showed by adding only that one harness line to the old
+code: 11 of the 32 and 115 of the 272 were test-mode sells cut off by a crash, which sold nothing anywhere and are now
+counted as a note. The engine's own share is 21 → 0 and 157 → 0.) The
 harness learnt what the engine now does, each time with a check that it is written down: a stopped engine leaves the
 rest of a full exit to the next start (accepted only when it is in `exit_owed`); a new engine knows the real sells the
 old one left written down (they stay on their way until it settles them, a position waiting for one sends nothing
 until then, and stop loss levels are counted afresh after a restart, as the engine checks them again); a test sell cut
 off by a crash sold nothing anywhere.
+
+## 27 Nov 2026 (later): what the reviewers of those fixes found, fixed
+
+Three reviewers read the engine fixes above and ran their own probes; two more ran the site's every-button suite
+against the site fixes. What they found still open in the engine is fixed, each with a test that fails on the code
+before (`tests/restarts.test.ts`, the last 15 cases):
+- **The coins beyond a quote, found after the position was sold on the quote's count, are written down as owed before
+  their sell goes out.** Their first try failing (an RPC error) used to leave them in the wallet for good, although the
+  feed said "tried again every 30 s"; so did a crash while that sell was out. Now the settling pass sells them.
+- **Sell now while every coin is already in a sell of ours on its way** answers what happens instead of "Sold" with
+  nothing sold: the answer and the feed say the coins are in a sell being read from the chain (or sent just before the
+  restart), and sold right after if it did not go through.
+- **A sell left by the process before is dropped as soon as its blockhash has run out** (the chain is past its last
+  valid height and it was not found), about a minute after it was signed, instead of three minutes. The server reads
+  such a sell again every 5 s while there is one. The position's rules and Sell now wait for it meanwhile, so the wait
+  was up to three and a half minutes after a crash.
+- **A stop loss level or the dead-coin rule that comes due while a position waits for such a sell is held and sold
+  once it is settled**, as it waits behind a sell of ours that is out. The clock used to skip the position, and judged
+  the level again at the later price: one that had come back was never sold.
+- **A sale that landed but whose booking failed** (a database error, undone whole) is not a failed sale any more: it
+  is not retried and writes no failure line; it is booked from its own transaction within seconds. Their partial sell
+  ("same share") was sold a second time that way. Such an order is also never run again once it is no longer owed.
+- **An error after a booking was written** (its feed line) no longer leaves the sell to be booked a second time by the
+  next pass, and a booking that is undone no longer leaves its exact SOL to be added to the books later.
+- **A sell booked from its own transaction keeps its platform fee** (it was booked with none, so the fees shown were
+  short), and the safety pass runs one at a time (two at once settled one buy twice).
+- **"The market could pay for only part of it" is said only when the market capped the sell** (the executor says so);
+  a sell that took fewer coins for another reason is done, and the rest of the exit is sold right after.
+
+The fuzzer's fake chain learnt what the real executor now tells with each signature (its blockhash's last valid
+height, its fee, whether the market can pay for all of it); its check of stop loss levels no longer forgives a
+restart or a position waiting for a sell from before one (it found one more case that way, ghost seed 1916: a level
+held while the position waited, lost by a second restart after the price had come back; such a level is now written
+down as owed until it is sold); and its safety-pass flag starts fresh with each new process (a pass of the dead
+process could block every pass of the new one). On the final code, seeds flagged: default mix **0** of 6,000; crash,
+ghost, outage and the core profiles **0** of 3,000 each; slow-read **6** of 3,000 (the same six seeds, the known quoted
+coin count case); all 22 saved cases pass; the self-test catches every planted fault. `npm test`: 490 tests.
 
 ## Not yet verified
 

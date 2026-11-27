@@ -42,6 +42,20 @@ class Chain implements Executor {
   balanceHold: Promise<void> | null = null;
   solHold: Promise<void> | null = null;
   buys = 0;
+  /** What one coin is worth (lamports): what the price check values the bag at. */
+  price = 1_000n;
+  /** The chain's block height now, and the height up to which each sell's blockhash is valid (told with its signature). */
+  height = 0;
+  lastValid = 100;
+  /** The market can pay for at most this many coins per sell (the executor says so: marketShort). */
+  marketCap: bigint | null = null;
+  /** A sell takes at most this many coins for another reason (the wallet held fewer when the executor read it). */
+  underfill: bigint | null = null;
+  /** Sells are answered with the quote's SOL (2.5 % under), their exact SOL following when sellExact() is called. */
+  quoteLow = false;
+  private exactSells: (() => void)[] = [];
+  sellExact() { for (const f of this.exactSells.splice(0)) f(); }
+  async blockHeight() { return this.height; }
   async buy(req: TradeRequest & { lamports: bigint }): Promise<FillResult> {
     this.buys++;
     if (this.test) return { ok: true, signature: 'PAPER_B', tokens: this.receives, lamports: req.lamports, simulated: true };
@@ -54,19 +68,29 @@ class Chain implements Executor {
   async sell(req: Sell): Promise<FillResult> {
     const sig = `S${this.sent.length + 1}`;
     this.sent.push({ tokens: req.tokens, sig });
-    req.onSigned?.(sig);
+    // The platform fee rides in the transaction (1 SOL per 1,000,000 coins): told with the signature, as the real one is.
+    const fee = (req.tokens * 1_000n * BigInt(req.feeBps ?? 0)) / 10_000n;
+    const marketShort = this.marketCap !== null && this.marketCap < (req.tokens < this.held ? req.tokens : this.held);
+    req.onSigned?.(sig, { lastValidBlockHeight: this.lastValid, feeLamports: fee, marketShort });
     const outcome = await this.plan(this.sent.length, req);
     if (outcome === 'fail') { this.failed.add(sig); return { ok: false, error: 'boom' }; }
     if (!this.isLive(req)) return { ok: true, signature: `PAPER_${sig}`, tokens: req.tokens, lamports: req.tokens * 1_000n, simulated: true };
     if (outcome === 'unknown-lost') return { ok: false, error: 'sent, outcome unknown: confirmation unknown (RPC unreachable)', uncertain: true };
     if (outcome === 'gone') return new Promise<never>(() => undefined);
-    const tokens = req.tokens < this.held ? req.tokens : this.held;
+    let tokens = req.tokens < this.held ? req.tokens : this.held;
+    if (this.marketCap !== null && tokens > this.marketCap) tokens = this.marketCap;
+    if (this.underfill !== null && tokens > this.underfill) tokens = this.underfill;
     if (tokens <= 0n) { this.failed.add(sig); return { ok: false, error: 'the wallet holds none of this coin' }; }
     this.held -= tokens;
     this.landed.set(sig, { tokens, lamports: tokens * 1_000n });
     if (outcome === 'lost-answer') return new Promise<never>(() => undefined);
     if (outcome === 'unknown-landed') return { ok: false, error: 'sent, outcome unknown: confirmation unknown (RPC unreachable)', uncertain: true };
-    return { ok: true, signature: sig, tokens, lamports: tokens * 1_000n, simulated: false };
+    const exact = tokens * 1_000n;
+    if (this.quoteLow) {
+      const refine = new Promise<{ lamports: bigint } | null>((res) => { this.exactSells.push(() => res({ lamports: exact })); });
+      return { ok: true, signature: sig, tokens, lamports: exact - exact / 40n, simulated: false, feeLamports: fee, marketShort, refine };
+    }
+    return { ok: true, signature: sig, tokens, lamports: exact, simulated: false, feeLamports: fee, marketShort };
   }
   /** The RPC cannot be read (settleSell throws): an outcome stays unknown. */
   rpcDown = false;
@@ -78,7 +102,7 @@ class Chain implements Executor {
     if (l) return { state: 'landed', ...l };
     return this.failed.has(sig) ? { state: 'failed' } : { state: 'not_found' };
   }
-  async quoteSell(_m: string, tokens: bigint) { if (this.quoteHold) await this.quoteHold; return tokens * 1_000n; }
+  async quoteSell(_m: string, tokens: bigint) { if (this.quoteHold) await this.quoteHold; return tokens * this.price; }
   async solBalance() { if (this.solHold) await this.solHold; return 100n * SOL; }
   async tokenBalance() { if (this.balanceHold) await this.balanceHold; return this.held; }
   /** Test mode (the owner's Live switch off): trades are simulated. */
@@ -486,5 +510,269 @@ describe('databases written by earlier versions (owed sells)', () => {
     again.updatePosition(id, { owedSells: [{ reason: 'mirror', percent: 75, tag: 'L2' }] });
     expect(again.position(id)!.owedSells).toEqual([{ reason: 'mirror', percent: 75, tag: 'L2' }]);
     again.close();
+  });
+});
+
+// ── the reviewers of those fixes (27 Nov 2026): what they found still open ─────────────────────────────────────────
+describe('the coins beyond a quote, sold after the position was closed on the quote\'s count', () => {
+  it('the rest of a Sell now found by the exact count is tried again until it sells (its first try failed; the feed said "every 30 s")', async () => {
+    const s = server(none);
+    s.chain.booked = 1_000_000n; s.chain.receives = 1_100_000n; // the buy is handed back with the quote's count
+    await s.buy();
+    expect(await s.engine.sellNow(s.uid, 1)).toMatchObject({ ok: true });
+    await s.engine.idle();
+    expect(s.position().status).toBe('closed');
+    s.chain.plan = () => 'fail'; // the RPC fails the rest's first try
+    s.chain.exact({ lamports: SOL, tokens: 1_100_000n }); await sleep(5); await s.engine.idle();
+    expect(s.position()).toMatchObject({ status: 'open', tokensHeld: 100_000n });
+    expect(s.feed().some((m) => /tried again every 30 s until it sells/.test(m))).toBe(true);
+    s.chain.plan = () => 'ok';
+    s.at(30_000); await s.engine.restore(); await s.engine.idle(); // the settling pass
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([1_000_000n, 100_000n, 100_000n]);
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+
+  it('after a crash while that sell was out and it did not land, the next process sells them', async () => {
+    const s = server({ ...none, timed: [{ afterSec: 1, percent: 100 }] });
+    s.chain.booked = 1_000_000n; s.chain.receives = 1_100_000n;
+    await s.buy();
+    s.at(1_000); await s.tick(); // the timed exit sells the quote's count and closes
+    expect(s.position().status).toBe('closed');
+    s.chain.plan = () => 'gone';
+    s.chain.exact({ lamports: SOL, tokens: 1_100_000n }); await sleep(5); // opened again: the rest goes out, then the process dies
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([1_000_000n, 100_000n]);
+    s.crash();
+    s.chain.failed.add('S2'); // it did not land
+    s.chain.plan = () => 'ok';
+    s.at(40_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([1_000_000n, 100_000n, 100_000n]);
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+});
+
+describe('a sell from before a crash that is not settled yet', () => {
+  const exit = { ...none, mirror: { enabled: true, mode: 'exit' } };
+
+  it('Sell now while all of it is in that sell: the answer and the feed say so (it used to answer "Sold" with nothing sold)', async () => {
+    const s = server(exit);
+    await s.buy();
+    s.chain.plan = () => 'gone';
+    void s.their('sell'); await sleep(5); // their exit: our sell is signed and written down, and the process dies
+    s.crash();
+    s.chain.plan = () => 'ok';
+    const r = await s.engine.sellNow(s.uid, 1); await s.engine.idle();
+    expect(r).toMatchObject({ ok: true, note: expect.stringMatching(/sent just before the server restarted/) });
+    expect(s.feed().some((m) => /you pressed Sell now/.test(m) && /sent just before the server restarted/.test(m))).toBe(true);
+    expect(s.chain.sent).toHaveLength(1);
+  });
+
+  it('is dropped as soon as its blockhash has run out (it can never land), not three minutes after it was sent', async () => {
+    const s = server(exit);
+    await s.buy();
+    s.chain.plan = () => 'gone';
+    void s.their('sell'); await sleep(5);
+    s.crash();
+    s.chain.plan = () => 'ok';
+    s.chain.height = 60; // its blockhash is valid up to 100
+    s.at(10_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(1); // it may still land
+    s.chain.height = 101; // run out
+    s.at(45_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(0);
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([1_000_000n, 1_000_000n]); // their exit is sold now
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+
+  it('an error after its booking was written does not book it a second time on the next pass', async () => {
+    const s = server({ ...none, timed: [{ afterSec: 2, percent: 40 }, { afterSec: 600, percent: 100 }] });
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'lost-answer' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(5);
+    s.crash();
+    const addEvent = s.store.addEvent.bind(s.store);
+    let broken = true;
+    s.store.addEvent = (e) => { if (broken && e.kind === 'sell') { broken = false; throw new Error('disk I/O error'); } return addEvent(e); };
+    await s.engine.restore().catch(() => undefined); await s.engine.idle();
+    s.at(32_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.fills(1).filter((f) => f.side === 'sell')).toHaveLength(1);
+    expect(s.position()).toMatchObject({ tokensHeld: 600_000n, proceedsLamports: 400_000_000n });
+  });
+
+  it('a sell booked from its own transaction records its platform fee, as one booked at once does', async () => {
+    const s = server(exit, { feeBpsFor: () => 100 });
+    await s.buy();
+    s.chain.plan = () => 'lost-answer';
+    void s.their('sell'); await sleep(5);
+    s.crash();
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.store.fills(1).find((f) => f.side === 'sell')).toMatchObject({ signature: 'S1', feeLamports: 10_000_000n });
+    const t = server(exit, { feeBpsFor: () => 100 });
+    await t.buy();
+    t.chain.plan = () => 'unknown-landed'; // the RPC did not answer; its own transaction did
+    await t.their('sell'); await t.engine.idle();
+    expect(t.store.fills(1).find((f) => f.side === 'sell')).toMatchObject({ signature: 'S1', feeLamports: 10_000_000n });
+  });
+
+  it('a stop loss level that comes due while the position waits for it is sold once it is settled, though the price came back', async () => {
+    const s = server({ ...none, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 600, percent: 100 }], stopLoss: [{ lossPct: 30, percent: 100 }] });
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'gone' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(5);
+    s.crash();
+    s.chain.price = 500n; s.at(3_000); await s.tick(); // the coin halves meanwhile
+    expect(s.chain.sent).toHaveLength(1);
+    s.chain.price = 1_000n; s.at(5_000); await s.tick(); // and comes back
+    s.chain.failed.add('S1');
+    s.at(6_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 1_000_000n]);
+    expect(s.position()).toMatchObject({ status: 'closed', firedStop: [0] });
+  });
+});
+
+describe('a booking that fails after the sale landed', () => {
+  it('their partial sell ("same share") is sold once, not again by its retry once the safety pass books it', async () => {
+    const s = server({ ...none, mirror: { enabled: true, mode: 'same' } });
+    await s.buy();
+    const insertFill = s.store.insertFill.bind(s.store);
+    let broken = true;
+    s.store.insertFill = (f) => { if (broken && f.side === 'sell') { broken = false; throw new Error('disk I/O error'); } return insertFill(f); };
+    await s.engine.onLeaderTrade({ ...trade('sell', MINT, 1_000_000n), tokenAmount: 1_000_000n }); await s.engine.idle(); // they sold half of theirs
+    s.at(1_000); await s.tick(); s.at(2_000); await s.tick();
+    await s.engine.restore(); await s.engine.idle();
+    s.at(3_000); await s.tick();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([500_000n]);
+    expect(s.position()).toMatchObject({ tokensHeld: 500_000n, proceedsLamports: 500_000_000n, owedSells: [] });
+    expect(s.feed().some((m) => /failed/.test(m))).toBe(false); // it did not fail: it sold
+  });
+
+  it('a timed step of the bag: its exact SOL is not applied to a booking that was undone (the books and the fill agree)', async () => {
+    const s = server({ ...none, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 600, percent: 100 }] });
+    await s.buy();
+    s.chain.quoteLow = true;
+    const addEvent = s.store.addEvent.bind(s.store);
+    let broken = true;
+    s.store.addEvent = (e) => { if (broken && e.kind === 'sell') { broken = false; throw new Error('disk I/O error'); } return addEvent(e); };
+    s.at(2_000); await s.tick();
+    s.chain.sellExact(); await sleep(5);
+    await s.engine.restore(); await s.engine.idle();
+    const sells = s.store.fills(1).filter((f) => f.side === 'sell');
+    expect(sells).toHaveLength(1);
+    expect(s.position().proceedsLamports).toBe(sells[0]!.lamports);
+    expect(s.position()).toMatchObject({ tokensHeld: 600_000n, proceedsLamports: 400_000_000n });
+  });
+});
+
+describe('the safety pass', () => {
+  it('two passes at once settle a buy of unknown outcome once (one "recovered" line, one buy)', async () => {
+    const s = server(none);
+    const id = s.store.insertPosition({ userId: s.uid, copyId: 1, mint: MINT, mode: 'live', leaderSig: 'L', sell: validateSettings({ leader: LEADER, sell: none }).sell, copyName: 'c', leader: LEADER, now: 1_000_000 });
+    s.store.updatePosition(id, { buySig: 'B9' });
+    s.chain.held = 1_000_000n;
+    const hold = gate();
+    s.chain.balanceHold = hold.p;
+    const a = s.engine.restore();
+    const b = s.engine.restore(); // the 30 s pass while the start's pass still waits on a slow RPC
+    await sleep(5);
+    s.chain.balanceHold = null; hold.open();
+    await a; await b; await s.engine.idle();
+    expect(s.feed().filter((m) => /recovered/.test(m))).toHaveLength(1);
+  });
+});
+
+describe('a stop loss level whose sell was waiting when the engine stopped', () => {
+  it('is sold after the restart, though the price is no longer past it', async () => {
+    const s = server({ ...none, stopLoss: [{ lossPct: 20, percent: 25 }, { lossPct: 30, percent: 90 }] });
+    await s.buy();
+    const step = gate();
+    s.chain.plan = (n) => (n === 1 ? step.p.then(() => 'ok' as const) : 'ok');
+    s.chain.price = 500n; // the coin halves: both levels are due; the −20 % sell goes out, the −30 % waits behind it
+    s.at(2_000); void s.engine.tick(); await sleep(5);
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([250_000n]);
+    const r = s.restart(); step.open(); await r; // an update restarts the server meanwhile
+    expect(s.chain.sent).toHaveLength(1); // the stopping engine sends nothing
+    s.chain.price = 750n; // −25 %: the −30 % level is no longer passed
+    s.at(5_000); await s.engine.restore(); await s.engine.idle(); await s.tick();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([250_000n, 675_000n]);
+    expect(s.position().firedStop).toEqual([0, 1]);
+  });
+});
+
+describe('their partial sell heard while our buy\'s outcome is unknown', () => {
+  it('survives a restart before the buy is settled, and is sold once', async () => {
+    const s = server({ ...none, mirror: { enabled: true, mode: 'same' } });
+    const id = s.store.insertPosition({ userId: s.uid, copyId: 1, mint: MINT, mode: 'live', leaderSig: 'L', sell: validateSettings({ leader: LEADER, sell: { ...none, mirror: { enabled: true, mode: 'same' } } }).sell, copyName: 'c', leader: LEADER, now: 1_000_000 });
+    s.store.updatePosition(id, { buySig: 'B9' });
+    s.chain.held = 1_000_000n;
+    await s.engine.onLeaderTrade({ ...trade('sell', MINT, 1_000_000n), tokenAmount: 1_000_000n }); await s.engine.idle();
+    expect(s.chain.sent).toHaveLength(0); // kept: the buy is not settled
+    await s.restart();
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([500_000n]);
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent).toHaveLength(1);
+  });
+});
+
+describe('the feed line of a full exit that sold only part', () => {
+  const exit = { ...none, mirror: { enabled: true, mode: 'exit' } };
+
+  it('says the market could pay for only part when the market capped it (and the rest is sold later)', async () => {
+    const s = server(exit);
+    await s.buy();
+    s.chain.marketCap = 400_000n;
+    await s.their('sell'); await s.engine.idle();
+    expect(s.feed().some((m) => /could pay for only part/.test(m))).toBe(true);
+    s.chain.marketCap = null;
+    s.at(20_000); await s.tick();
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+
+  it('does not say so when the sell took fewer for another reason; the rest is sold right after', async () => {
+    const s = server(exit);
+    await s.buy();
+    s.chain.underfill = 400_000n;
+    s.chain.plan = (n) => { if (n > 1) s.chain.underfill = null; return 'ok'; }; // only the first sell takes fewer
+    await s.their('sell'); await s.engine.idle(); await s.tick();
+    expect(s.feed().some((m) => /could pay for only part/.test(m))).toBe(false);
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([1_000_000n, 600_000n]);
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+});
+
+describe('databases written by earlier versions (sells out)', () => {
+  it('a table of sells out without the blockhash, fee and market columns opens and gets them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ml-store-'));
+    const path = join(dir, 'old.db');
+    const first = new Store(path);
+    first.db.exec('DROP TABLE sells_out');
+    first.db.exec('CREATE TABLE sells_out (signature TEXT PRIMARY KEY, position_id INTEGER NOT NULL, user_id INTEGER NOT NULL, mint TEXT NOT NULL, sell_order TEXT NOT NULL, tokens INTEGER NOT NULL, sent_at INTEGER NOT NULL)');
+    first.db.prepare('INSERT INTO sells_out VALUES (?, ?, ?, ?, ?, ?, ?)').run('OLD', 1, 1, MINT, '{"reason":"mirror","percent":100}', 5, 7);
+    first.close();
+    const again = new Store(path);
+    expect(again.sellsOut()).toEqual([{ signature: 'OLD', positionId: 1, userId: 1, mint: MINT, order: { reason: 'mirror', percent: 100 }, tokens: 5n, sentAt: 7 }]);
+    again.insertSellOut({ signature: 'NEW', positionId: 1, userId: 1, mint: MINT, order: { reason: 'manual', percent: 100 }, tokens: 9n, sentAt: 8, lastValid: 300, feeLamports: 12n, marketShort: true });
+    expect(again.sellsOut()[1]).toMatchObject({ signature: 'NEW', lastValid: 300, feeLamports: 12n, marketShort: true });
+    again.close();
+  });
+});
+
+describe('a stop loss level held while a position waits for a sell from before a restart (fuzzer, ghost seed 1916)', () => {
+  it('survives a second restart, though the price came back and was stored in between', async () => {
+    const s = server({ ...none, stopLoss: [{ lossPct: 20, percent: 25 }, { lossPct: 30, percent: 90 }] });
+    await s.buy();
+    s.chain.rpcDown = true; // outcomes cannot be read
+    s.chain.plan = (n) => (n === 1 ? 'unknown-lost' : 'ok');
+    s.chain.price = 500n; // −50 %: the −20 % sell goes out (its outcome stays unknown), the −30 % waits behind it
+    s.at(2_000); void s.engine.tick(); await sleep(10);
+    await s.restart(); // an update: the first stays written down
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([250_000n]);
+    s.at(3_000); await s.tick(); // the new process waits for that sell: both levels are held
+    s.chain.price = 750n; s.at(5_000); await s.tick(); // the price comes back to −25 %, and is stored
+    await s.restart(); // another update before that sell is settled: what was held in memory is gone
+    s.chain.rpcDown = false; s.chain.failed.add('S1'); // it did not land
+    s.at(6_000); await s.engine.restore(); await s.engine.idle(); await s.tick(); await s.engine.restore(); await s.engine.idle();
+    // −20 %: sold (it is still passed); −30 %: it came due before, sold too, after it
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([250_000n, 250_000n, 675_000n]);
+    expect(s.position()).toMatchObject({ firedStop: [0, 1], owedSells: [] });
   });
 });

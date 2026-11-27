@@ -40,6 +40,10 @@ export type FillResult =
       /** Live fills return at confirmation with an estimate; this resolves later with the exact SOL read from the
        *  transaction (and the exact coins, for a buy handed back before they could be read). */
       refine?: Promise<{ lamports: bigint; tokens?: bigint } | null>;
+      /** A live sell: true when the market could pay for only part of what was asked (a curve short of SOL), so it
+       *  sold fewer coins and the rest is still to sell; false when it sold what it was asked for or what the wallet
+       *  held. Absent on test fills. */
+      marketShort?: boolean;
     }
   /** `uncertain`: the transaction went out and its fate could not be read (the RPC did not answer): it may have landed. */
   | { ok: false; error: string; uncertain?: boolean };
@@ -60,8 +64,9 @@ export interface TradeRequest {
   exit?: boolean;
   /** Simulate before sending (a retry: one that cannot work then costs nothing). */
   checkFirst?: boolean;
-  /** Told the transaction's signature the moment it is signed, before it is sent (so it can be written down). */
-  onSigned?: (signature: string) => void;
+  /** Told the transaction's signature the moment it is signed, before it is sent (so it can be written down), with
+   *  what it carries. */
+  onSigned?: (signature: string, info?: SignedInfo) => void;
   /** A sell of everything: when it empties the coin's token account, that account is closed in the same
    *  transaction and its rent (about 0.002 SOL) comes back. Never on a retry. */
   closeIfEmpty?: boolean;
@@ -69,6 +74,17 @@ export interface TradeRequest {
   curve?: CurveHint;
   /** When the copied wallet's trade was heard (for the copy's delay in the logs). */
   heardAt?: number;
+}
+
+/** What a signed transaction carries, told with its signature (a sell's is written down with it: if this process
+ *  never learns its outcome, the next one settles it from these). */
+export interface SignedInfo {
+  /** The block height up to which its blockhash is valid: once the chain is past it, it can never land. */
+  lastValidBlockHeight: number;
+  /** The platform fee it carries (lamports). */
+  feeLamports: bigint;
+  /** A sell the market could pay for only part of (see FillResult.marketShort). */
+  marketShort?: boolean;
 }
 
 export interface Executor {
@@ -89,6 +105,9 @@ export interface Executor {
   /** Optional: what became of a sell whose outcome was unknown, from its own transaction: landed (tokens sold, SOL
    *  received net of every fee), failed, or not found (yet). Throws when the RPC cannot be read. */
   settleSell?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }>;
+  /** Optional: the chain's block height now (a transaction not found once the chain is past its blockhash's last
+   *  valid height can never land). Throws when the RPC cannot be read. */
+  blockHeight?(): Promise<number>;
 }
 
 const FETCH_FILL_TRIES = 6;
@@ -295,6 +314,10 @@ export class ChainExecutor implements Executor {
     if (r.state !== 'landed') return r;
     if (r.tokens >= 0n) return { state: 'failed' };
     return { state: 'landed', tokens: -r.tokens, lamports: r.lamports };
+  }
+
+  async blockHeight(): Promise<number> {
+    return getConnection().getBlockHeight('confirmed');
   }
 
   /** A transaction's fate and, when it landed, the wallet's exact change in the coin and in SOL. */
@@ -526,7 +549,7 @@ export class ChainExecutor implements Executor {
       ? [...ixs.instructions, createCloseAccountInstruction(getAssociatedTokenAddressSync(new PublicKey(req.mint), req.wallet.publicKey, true, pool.tokenProgram), req.wallet.publicKey, req.wallet.publicKey, [], pool.tokenProgram)]
       : ixs.instructions;
     const tx = await this.nativeTx(req, all);
-    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'sell', selling, built.expectedOut - ixs.fee - this.txCost(req), held, ixs.fee);
+    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'sell', selling, built.expectedOut - ixs.fee - this.txCost(req), held, ixs.fee, undefined, selling < tokens);
   }
 
   private async jupiterSell(req: TradeRequest & { tokens: bigint }): Promise<FillResult> {
@@ -542,7 +565,7 @@ export class ChainExecutor implements Executor {
     const tokens = req.tokens > held ? held : req.tokens;
     if (tokens <= 0n) return { ok: false, error: 'the wallet holds none of this coin' };
     const built = await this.jupiterTx(req, req.mint, WSOL_MINT, tokens, feeOnSell);
-    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'sell', tokens, BigInt(built.quote.outAmount) - built.fee - this.txCost(req), held, built.fee, built.tip);
+    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'sell', tokens, BigInt(built.quote.outAmount) - built.fee - this.txCost(req), held, built.fee, built.tip, false);
   }
 
   /**
@@ -553,12 +576,13 @@ export class ChainExecutor implements Executor {
    * not be reached) does the wallet's balance decide, so a late landing is never left as orphaned coins. With
    * timed steps overlapping, another sell's balance change must not be mistaken for this one's.
    */
-  private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBeforeRead: bigint | null | Promise<bigint | null>, platformFee: bigint, tipCarried?: bigint): Promise<FillResult> {
+  private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBeforeRead: bigint | null | Promise<bigint | null>, platformFee: bigint, tipCarried?: bigint, marketShort?: boolean): Promise<FillResult> {
     // The tip the transaction really carries decides its lanes (a Jupiter route too big for it goes without).
     const tip = tipCarried ?? this.tip(req);
     const sendOpts = { exit: !!req.exit, simulateFirst: !!req.checkFirst };
     const mine = signatureOf(tx);
-    try { req.onSigned?.(mine); } catch { /* bookkeeping must not stop the trade */ }
+    const short = marketShort === undefined ? {} : { marketShort };
+    try { req.onSigned?.(mine, { lastValidBlockHeight, feeLamports: platformFee, ...short }); } catch { /* bookkeeping must not stop the trade */ }
     const t0 = Date.now();
     const sent = await sendTransaction(tx, true, tip, sendOpts);
     log.info('trade sent', { side, mint: req.mint, wallet: req.wallet.publicKey.toBase58(), signature: mine, ok: sent.ok, tip: Number(tip) / 1e9, priorityFee: req.priorityFeeSol, retry: !!req.checkFirst, ...(req.heardAt ? { msAfterHeard: t0 - req.heardAt } : {}), ...(sent.ok ? {} : { error: sent.error }) });
@@ -587,7 +611,7 @@ export class ChainExecutor implements Executor {
         if (s.state === 'landed') {
           const tokens = side === 'buy' ? s.tokens : -s.tokens;
           const lamports = side === 'buy' ? -s.lamports : s.lamports;
-          if (tokens > 0n) return { ok: true, signature: sent.signature, tokens, lamports, simulated: false, feeLamports: platformFee, confirmedAt: Date.now(), note: 'landed late; read from its own transaction' };
+          if (tokens > 0n) return { ok: true, signature: sent.signature, tokens, lamports, simulated: false, feeLamports: platformFee, confirmedAt: Date.now(), note: 'landed late; read from its own transaction', ...short };
         }
       }
       // Landed and failed: the program's own words say why (slippage, a finished curve, not enough SOL, …).
@@ -606,7 +630,7 @@ export class ChainExecutor implements Executor {
     const confirmedAt = Date.now();
     const exact = this.readFill(sent.signature, owner, req.mint, side);
     const refine = exact.then((r) => (r ? { lamports: r.lamports } : null));
-    const base = { ok: true as const, signature: sent.signature, simulated: false, feeLamports: platformFee, confirmedAt };
+    const base = { ok: true as const, signature: sent.signature, simulated: false, feeLamports: platformFee, confirmedAt, ...short };
     if (side === 'sell') return { ...base, tokens: expectedTokens, lamports: expectedLamports, refine };
     // A buy: the bag is what the wallet really received, read at once as the change in its balance; else from the
     // transaction itself. Neither may hold the position for more than a moment: then the quote stands in and the

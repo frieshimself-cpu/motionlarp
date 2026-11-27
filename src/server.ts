@@ -161,6 +161,13 @@ const safety = setInterval(() => {
   reconciling = true;
   Promise.all([engine.restore(), engine.reconcile()]).catch((err) => log.warn('safety check failed', { error: safeErrorMessage(err) })).finally(() => { reconciling = false; });
 }, 30_000);
+// A sell left by the process before (a crash, or a restart while its outcome was unknown) holds its position's rules
+// and Sell now until it is settled: read again every 5 s, so it is booked, or dropped once its blockhash has run out
+// (about a minute after it was signed), within seconds rather than on the next 30 s pass.
+const leftovers = setInterval(() => {
+  if (!config.rpcUrl || !engine.awaitingLeftovers()) return;
+  void engine.settleLeftovers().catch((err) => log.warn('settling a sell from before the restart failed', { error: safeErrorMessage(err) }));
+}, 5_000);
 
 // A fee transfer into an empty wallet fails (below the rent minimum) and takes the trade with it: without a funded
 // fee wallet the fee is switched off, loudly, rather than breaking every trade.
@@ -227,6 +234,7 @@ async function shutdown(signal: string) {
   shuttingDown = true;
   log.info('shutting down', { signal });
   clearInterval(safety);
+  clearInterval(leftovers);
   // No new copies from here on.
   watcher?.stop();
   stream?.stop();

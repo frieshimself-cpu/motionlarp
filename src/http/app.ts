@@ -488,7 +488,8 @@ export function createApp(deps: AppDeps): Server {
     if (sellMatch && method === 'POST') {
       const r = await deps.engine.sellNow(uid, Number(sellMatch[1]));
       if (!r.ok) throw new HttpError(r.error === 'no open position with that id' ? 404 : 502, r.error ?? 'sell failed');
-      return json(res, 200, { ok: true });
+      // (note: the press sold nothing itself, everything being on its way already; the page shows it instead of "Sold")
+      return json(res, 200, { ok: true, ...(r.note ? { note: r.note } : {}) });
     }
 
     // ── reads ──
