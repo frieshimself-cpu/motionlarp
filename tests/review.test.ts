@@ -66,18 +66,24 @@ describe('review findings', () => {
     expect(ex.sells).toEqual([25_000n]);
   });
 
-  it("#3 live: two copies holding the same coin each sell only their own tokens", async () => {
+  it("#3 live: a sell takes only the position's own tokens, never other coins of that mint the user holds in the wallet", async () => {
     const ex = new Ex(); ex.live = true;
     const { store, uid, engine, adv } = setup(ex);
     store.createCopy(uid, validateSettings({ leader: L1, mode: 'live', buySol: 0.1, minLeaderBuySol: 1, sell: { mirror: { enabled: false }, timed: [{ afterSec: 5, percent: 100 }] } }));
-    store.createCopy(uid, validateSettings({ leader: L2, mode: 'live', buySol: 0.1, minLeaderBuySol: 1, sell: { mirror: { enabled: true } } }));
-    await engine.onLeaderTrade(trade()); await engine.onLeaderTrade(trade({ leader: L2 })); await engine.idle();
+    await engine.onLeaderTrade(trade()); await engine.idle();
+    ex.held += 70_000n; // the user also holds some of this coin, bought by hand
     adv(6000); await engine.tick(); await engine.idle();
     expect(ex.sells).toEqual([100_000n]);
-    expect(store.activePositions(uid).map((p) => p.tokensHeld)).toEqual([100_000n]);
-    await engine.onLeaderTrade(trade({ leader: L2, side: 'sell', tokensBefore: 2_000_000n, tokenAmount: 1_000_000n, tokensAfter: 1_000_000n }));
-    await engine.idle();
-    expect(ex.sells).toEqual([100_000n, 50_000n]);
+    expect(ex.held).toBe(70_000n);
+  });
+
+  it('#3 one position per coin per user: a second copy does not buy a coin the user already holds', async () => {
+    const ex = new Ex(); ex.live = true;
+    const { store, uid, engine } = setup(ex);
+    store.createCopy(uid, validateSettings({ leader: L1, mode: 'live', buySol: 0.1, minLeaderBuySol: 1 }));
+    store.createCopy(uid, validateSettings({ leader: L2, mode: 'live', buySol: 0.1, minLeaderBuySol: 1 }));
+    await engine.onLeaderTrade(trade()); await engine.onLeaderTrade(trade({ leader: L2 })); await engine.idle();
+    expect(store.activePositions(uid)).toHaveLength(1);
   });
 
   it('#5 an old leader sell is still mirrored (only old buys are ignored)', async () => {

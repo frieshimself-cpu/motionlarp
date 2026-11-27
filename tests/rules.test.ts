@@ -122,3 +122,46 @@ describe('trading fees per copy', () => {
     expect(() => validateSettings({ ...base, ...patch })).toThrow(new RegExp(word, 'i'));
   });
 });
+
+describe('timed sells as shares of the ORIGINAL bag', () => {
+  const timed = [{ afterSec: 2, percent: 40 }, { afterSec: 4, percent: 30 }, { afterSec: 6, percent: 100 }];
+  const bag = (over: Partial<PositionView> = {}) => pos({ timed, timedOf: 'bag' }, over);
+  it('40 % of the bag at 2 s, 30 % of the bag at 4 s, then everything left at 6 s', () => {
+    expect(dueSells(bag(), 1999)).toEqual([]);
+    expect(dueSells(bag(), 2000)).toEqual([{ reason: 'timed', percent: 40, stage: 0, basis: 'bag' }]);
+    expect(dueSells(bag({ firedTimed: [0] }), 4000)).toEqual([{ reason: 'timed', percent: 30, stage: 1, basis: 'bag' }]);
+    expect(dueSells(bag({ firedTimed: [0, 1] }), 6000)).toEqual([{ reason: 'timed', percent: 100, stage: 2, basis: 'bag', everything: true }]);
+  });
+  it('a later step is due on its own clock even while an earlier one has not finished', () => {
+    expect(dueSells(bag(), 4100).map((o) => o.stage)).toEqual([0, 1]);
+    expect(dueSells(bag(), 6100).map((o) => o.stage)).toEqual([0, 1, 2]);
+  });
+  it('the last step sells everything whatever percent it carries', () => {
+    const p = pos({ timed: [{ afterSec: 2, percent: 40 }, { afterSec: 6, percent: 30 }], timedOf: 'bag' }, { firedTimed: [0] });
+    expect(dueSells(p, 6000)[0]).toMatchObject({ everything: true });
+  });
+  it('the default stays "of what is left"', () => {
+    expect(dueSells(pos({ timed }), 2000)).toEqual([{ reason: 'timed', percent: 40, stage: 0 }]);
+  });
+});
+
+describe('new copy options', () => {
+  const base = { leader: LEADER, buySol: 0.1 };
+  it('timed sells can be of the original bag', () => {
+    expect(validateSettings({ ...base, sell: { timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }] } }).sell.timedOf).toBe('bag');
+    expect(validateSettings(base).sell.timedOf).toBe('left');
+  });
+  it('"sell when they sell" has a third mode: only when they sell everything', () => {
+    expect(validateSettings({ ...base, sell: { mirror: { enabled: true, mode: 'exit' } } }).sell.mirror.mode).toBe('exit');
+  });
+  it('the Scharo preset is a valid copy with exactly the agreed settings', async () => {
+    const { PRESETS } = await import('../src/engine/settings.js');
+    const scharo = PRESETS.find((p) => p.name === 'Scharo')!;
+    const s = validateSettings({ ...scharo.settings, buySol: 1 });
+    expect(s).toMatchObject({
+      leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih', minLeaderBuySol: 0, slippagePct: 100, oncePerCoin: false,
+      priorityFeeSol: 0.001, tipSol: 0.005, sellPriorityFeeSol: 0.001, sellTipSol: 0.005,
+      sell: { mirror: { enabled: true, mode: 'exit' }, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 4, percent: 30 }, { afterSec: 6, percent: 100 }], stopLoss: [], deadCoin: { enabled: false } },
+    });
+  });
+});

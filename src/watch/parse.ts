@@ -38,6 +38,8 @@ export interface LeaderTrade {
   venue: 'pumpfun' | 'pumpswap' | 'other';
   slot: number;
   blockTime: number | null;
+  /** The coin's decimals, when the transaction's balances carried them (pump.fun coins: 6). */
+  decimals?: number;
 }
 
 export function accountKeys(tx: RawTransaction): string[] {
@@ -66,11 +68,13 @@ export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTra
   const before = new Map<string, bigint>();
   const after = new Map<string, bigint>();
   const ownedAccounts = new Set<number>();
+  const decimalsOf = new Map<string, number>();
   for (const [list, into] of [[meta.preTokenBalances ?? [], before], [meta.postTokenBalances ?? [], after]] as const) {
     for (const b of list) {
       if (b.owner !== leader) continue;
       ownedAccounts.add(b.accountIndex);
       into.set(b.mint, (into.get(b.mint) ?? 0n) + BigInt(b.uiTokenAmount.amount));
+      if (typeof b.uiTokenAmount.decimals === 'number') decimalsOf.set(b.mint, b.uiTokenAmount.decimals);
     }
   }
   for (const i of ownedAccounts) if (i !== leaderIdx) sol += lamportDelta(i);
@@ -111,6 +115,7 @@ export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTra
       venue,
       slot: tx.slot,
       blockTime: tx.blockTime,
+      ...(decimalsOf.has(mint) ? { decimals: decimalsOf.get(mint)! } : {}),
     });
   }
   return trades;

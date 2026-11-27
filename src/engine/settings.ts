@@ -5,10 +5,19 @@ export interface TimedSell { afterSec: number; percent: number }
 export interface StopLossLevel { lossPct: number; percent: number }
 
 export interface SellSettings {
-  /** Sell when the copied wallet sells: the same share of our bag ('same') or everything ('all'). */
-  mirror: { enabled: boolean; mode: 'same' | 'all' };
-  /** After N seconds, sell P % of what is still held. Sorted by time. */
+  /**
+   * Sell when the copied wallet sells: the same share of our bag ('same'), everything on any sell ('all'), or
+   * everything only once they have sold their whole bag ('exit': their partial sells are ignored).
+   */
+  mirror: { enabled: boolean; mode: 'same' | 'all' | 'exit' };
+  /** After N seconds (counted from our own confirmed buy), sell P %. Sorted by time. */
   timed: TimedSell[];
+  /**
+   * What a timed sell's % is a share of. 'left': what is still held at that moment. 'bag': the tokens the buy
+   * received; each step then runs on its own clock without waiting for the one before, and the last step sells
+   * whatever is left in the wallet.
+   */
+  timedOf: 'left' | 'bag';
   /** At −L % (price per token against what we paid), sell P % of what is still held. Each fires once. */
   stopLoss: StopLossLevel[];
   /** No trades in the coin for N seconds → sell everything. */
@@ -57,6 +66,7 @@ export function defaultSettings(): Omit<CopySettings, 'leader'> & { leader: stri
     sell: {
       mirror: { enabled: true, mode: 'same' },
       timed: [],
+      timedOf: 'left',
       stopLoss: [],
       deadCoin: { enabled: false, idleSec: 120 },
     },
@@ -118,7 +128,8 @@ export function validateSettings(input: unknown): CopySettings {
 
   const s = obj(i.sell);
   const m = obj(s.mirror);
-  const mirror = { enabled: bool(m.enabled, d.sell.mirror.enabled), mode: m.mode === 'all' ? ('all' as const) : ('same' as const) };
+  const mirror = { enabled: bool(m.enabled, d.sell.mirror.enabled), mode: m.mode === 'all' ? ('all' as const) : m.mode === 'exit' ? ('exit' as const) : ('same' as const) };
+  const timedOf = s.timedOf === 'bag' ? ('bag' as const) : ('left' as const);
 
   const timedIn = Array.isArray(s.timed) ? s.timed : [];
   if (timedIn.length > LIMITS.maxStages) throw new SettingsError(`at most ${LIMITS.maxStages} timed sells`);
@@ -157,6 +168,39 @@ export function validateSettings(input: unknown): CopySettings {
     sellPriorityFeeSol,
     sellTipSol,
     oncePerCoin: bool(i.oncePerCoin, d.oncePerCoin),
-    sell: { mirror, timed, stopLoss, deadCoin },
+    sell: { mirror, timed, timedOf, stopLoss, deadCoin },
   };
 }
+
+/**
+ * Ready-made copies: one click in the editor fills everything in; the user only chooses the buy size.
+ *
+ * Scharo (owner's spec, 27 Nov 2026): copy this wallet's every buy; fees 0.001 priority + 0.005 tip on buys and
+ * sells; 100 % slippage; exit on a timer from our own confirmed buy, whatever the price: 40 % of the bag at +2 s,
+ * 30 % of the bag at +4 s, everything left at +6 s; sell everything at once if they sell their whole bag first;
+ * no stop loss, no dead-coin exit; the same coin can be bought again once this exit has finished.
+ */
+export const PRESETS: { id: string; name: string; settings: Record<string, unknown> }[] = [
+  {
+    id: 'scharo',
+    name: 'Scharo',
+    settings: {
+      name: 'Scharo',
+      leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih',
+      minLeaderBuySol: 0,
+      slippagePct: 100,
+      priorityFeeSol: 0.001,
+      tipSol: 0.005,
+      sellPriorityFeeSol: 0.001,
+      sellTipSol: 0.005,
+      oncePerCoin: false,
+      sell: {
+        mirror: { enabled: true, mode: 'exit' },
+        timedOf: 'bag',
+        timed: [{ afterSec: 2, percent: 40 }, { afterSec: 4, percent: 30 }, { afterSec: 6, percent: 100 }],
+        stopLoss: [],
+        deadCoin: { enabled: false, idleSec: 120 },
+      },
+    },
+  },
+];

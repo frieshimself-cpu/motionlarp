@@ -37,6 +37,8 @@ export interface Position {
   sell: SellSettings;
   copyName: string;
   leader: string;
+  /** The coin's decimals (for showing token amounts); 6 on pump.fun. */
+  decimals: number;
 }
 
 export interface Fill {
@@ -109,7 +111,8 @@ CREATE TABLE IF NOT EXISTS positions (
   last_change_at INTEGER NOT NULL,
   sell TEXT NOT NULL,
   copy_name TEXT NOT NULL,
-  leader TEXT NOT NULL
+  leader TEXT NOT NULL,
+  decimals INTEGER NOT NULL DEFAULT 6
 );
 CREATE INDEX IF NOT EXISTS positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS positions_copy_mint ON positions(copy_id, mint);
@@ -193,6 +196,7 @@ function toPosition(r: Row): Position {
     sell: JSON.parse(String(r.sell)) as SellSettings,
     copyName: String(r.copy_name),
     leader: String(r.leader),
+    decimals: r.decimals === undefined || r.decimals === null ? 6 : num(r.decimals),
   };
 }
 
@@ -225,6 +229,8 @@ export class Store {
     if (!fillCols.includes('fee_lamports')) this.db.exec('ALTER TABLE fills ADD COLUMN fee_lamports INTEGER NOT NULL DEFAULT 0');
     const userCols = this.all('PRAGMA table_info(users)').map((r) => String(r.name));
     if (!userCols.includes('disabled')) this.db.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
+    const posCols = this.all('PRAGMA table_info(positions)').map((r) => String(r.name));
+    if (!posCols.includes('decimals')) this.db.exec('ALTER TABLE positions ADD COLUMN decimals INTEGER NOT NULL DEFAULT 6');
   }
 
   private all(sql: string, ...params: unknown[]): Row[] {
@@ -401,10 +407,10 @@ export class Store {
   }
 
   // ── positions and fills ───────────────────────────────────────────────
-  insertPosition(p: { userId: number; copyId: number; mint: string; mode: 'paper' | 'live'; leaderSig: string; sell: SellSettings; copyName: string; leader: string; now: number }): number {
+  insertPosition(p: { userId: number; copyId: number; mint: string; mode: 'paper' | 'live'; leaderSig: string; sell: SellSettings; copyName: string; leader: string; now: number; decimals?: number }): number {
     return this.run(
-      'INSERT INTO positions (user_id, copy_id, mint, mode, status, opened_at, leader_sig, last_change_at, sell, copy_name, leader) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      p.userId, p.copyId, p.mint, p.mode, 'opening', p.now, p.leaderSig, p.now, JSON.stringify(p.sell), p.copyName, p.leader,
+      'INSERT INTO positions (user_id, copy_id, mint, mode, status, opened_at, leader_sig, last_change_at, sell, copy_name, leader, decimals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      p.userId, p.copyId, p.mint, p.mode, 'opening', p.now, p.leaderSig, p.now, JSON.stringify(p.sell), p.copyName, p.leader, p.decimals ?? 6,
     ).lastInsertRowid;
   }
   updatePosition(id: number, patch: PositionPatch): void {
@@ -431,6 +437,15 @@ export class Store {
   activePosition(copyId: number, mint: string): Position | undefined {
     const r = this.get("SELECT * FROM positions WHERE copy_id = ? AND mint = ? AND status IN ('opening','open') ORDER BY id DESC LIMIT 1", copyId, mint);
     return r && toPosition(r);
+  }
+  /** A user's open (or opening) position in a coin, whichever of their copies holds it. */
+  activePositionOfUser(userId: number, mint: string): Position | undefined {
+    const r = this.get("SELECT * FROM positions WHERE user_id = ? AND mint = ? AND status IN ('opening','open') ORDER BY id DESC LIMIT 1", userId, mint);
+    return r && toPosition(r);
+  }
+  /** The exact SOL of a fill, once read from its confirmed transaction. */
+  updateFillLamports(fillId: number, lamports: bigint): void {
+    this.run('UPDATE fills SET lamports = ? WHERE id = ?', lamports, fillId);
   }
   openingPositions(): Position[] {
     return this.all("SELECT * FROM positions WHERE status = 'opening' ORDER BY id").map(toPosition);

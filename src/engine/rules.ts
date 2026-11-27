@@ -12,6 +12,10 @@ export interface SellOrder {
   stage?: number;
   /** Distinguishes two orders of the same kind (e.g. the leader selling twice). */
   tag?: string;
+  /** 'bag': the percent is a share of the tokens the buy received, not of what is held now. */
+  basis?: 'bag';
+  /** Sell whatever is in the wallet (the last step of a bag-based timed exit). */
+  everything?: boolean;
 }
 
 export interface PositionView {
@@ -40,9 +44,14 @@ export function dueSells(p: PositionView, now: number): SellOrder[] {
   const out: SellOrder[] = [];
 
   const timed = p.sell.timed.map((t, stage) => ({ ...t, stage })).sort((a, b) => a.afterSec - b.afterSec);
+  const ofBag = p.sell.timedOf === 'bag';
+  const lastStage = timed[timed.length - 1]?.stage;
   for (const t of timed) {
     if (p.firedTimed.includes(t.stage)) continue;
-    if (now >= p.openedAt + t.afterSec * 1000) out.push({ reason: 'timed', percent: t.percent, stage: t.stage });
+    if (now < p.openedAt + t.afterSec * 1000) continue;
+    if (!ofBag) out.push({ reason: 'timed', percent: t.percent, stage: t.stage });
+    // Of the bag: every step runs on its own clock; the last one empties the wallet whatever its percent says.
+    else out.push({ reason: 'timed', percent: t.percent, stage: t.stage, basis: 'bag', ...(t.stage === lastStage ? { everything: true } : {}) });
   }
 
   const loss = lossPercent(p);

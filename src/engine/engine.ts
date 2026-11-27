@@ -26,6 +26,21 @@ export interface EngineDeps {
   feeBpsFor?: (userId: number) => number;
   /** Leader trades older than this are not copied (e.g. caught up after downtime). */
   staleSec?: number;
+  /** Pauses between tries of a bag-based timed step (the first retry is immediate). */
+  fastRetryMs?: number[];
+}
+
+/** A step of a bag-based timed exit that fails is retried at once, then with these short pauses (about a minute in all). */
+const FAST_RETRY_MS = [0, 250, 250, 500, 500, 1_000, 1_000, 2_000, 2_000, 4_000, 4_000, 8_000, 8_000, 15_000, 15_000];
+
+/** 1234567 base units at 6 decimals → "1.23" ; large amounts as K / M / B. */
+export function fmtTokens(amount: bigint, decimals: number): string {
+  const v = Number(amount) / 10 ** decimals;
+  const short = (n: number) => String(Number(n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2)));
+  if (v >= 1e9) return `${short(v / 1e9)}B`;
+  if (v >= 1e6) return `${short(v / 1e6)}M`;
+  if (v >= 1e3) return `${short(v / 1e3)}K`;
+  return short(v);
 }
 
 /** An automatic sell that fails is retried after these pauses, then given up (Sell now stays available). */
@@ -101,7 +116,10 @@ export class Engine {
       for (const p of this.deps.store.activePositions()) {
         if (p.leader !== t.leader || p.mint !== t.mint || !p.sell.mirror.enabled) continue;
         const share = soldShare(t);
-        const percent = p.sell.mirror.mode === 'all' || share >= 0.995 ? 100 : share * 100;
+        const soldOut = share >= 0.995 || t.tokensAfter === 0n;
+        // 'exit': only their full exit counts; a partial sell of theirs changes nothing for us.
+        if (p.sell.mirror.mode === 'exit' && !soldOut) continue;
+        const percent = p.sell.mirror.mode !== 'same' || soldOut ? 100 : share * 100;
         const order: SellOrder = { reason: 'mirror', percent, tag: t.signature };
         const key = this.orderKey(p.id, order);
         this.inFlight.add(key);
@@ -130,14 +148,15 @@ export class Engine {
     };
     const minLamports = BigInt(Math.round(s.minLeaderBuySol * 1e9));
     if (t.solLamports < minLamports) return skip(`they bought ${fmtSol(t.solLamports)}, under your ${fmtSol(minLamports)} minimum`);
-    if (store.activePosition(copy.id, t.mint)) return skip('already holding this coin');
+    // One position per coin per user: not bought again (by this or another of their copies) until it has been exited.
+    if (store.activePositionOfUser(copy.userId, t.mint)) return skip('already holding this coin');
     if (s.oncePerCoin && store.hasTraded(copy.id, t.mint)) return skip('already traded this coin (buy once per coin is on)');
     const maxBuy = typeof this.deps.maxSolPerBuy === 'function' ? this.deps.maxSolPerBuy() : this.deps.maxSolPerBuy;
     if (s.buySol > maxBuy) return skip(`${s.buySol} SOL is above the server limit of ${maxBuy} SOL per buy`);
     const wallet = this.deps.walletFor(copy.userId);
     if (!wallet) return skip('no wallet imported yet');
 
-    const id = store.insertPosition({ userId: copy.userId, copyId: copy.id, mint: t.mint, mode: 'live', leaderSig: t.signature, sell: s.sell, copyName: s.name, leader: t.leader, now: this.now() });
+    const id = store.insertPosition({ userId: copy.userId, copyId: copy.id, mint: t.mint, mode: 'live', leaderSig: t.signature, sell: s.sell, copyName: s.name, leader: t.leader, now: this.now(), decimals: t.decimals ?? 6 });
     return this.enqueue(id, () => this.buy(id, copy, wallet, t));
   }
 
@@ -165,11 +184,18 @@ export class Engine {
         store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label} failed: ${friendlyError(fill.error)}`, mint: t.mint, signature: t.signature });
         return;
       }
-      const now = this.now();
+      // Timed sells count from the moment OUR buy was confirmed, not from when the copied wallet bought.
+      const now = fill.confirmedAt ?? this.now();
       this.solCache.delete(wallet.publicKey.toBase58());
       // The position is live only if the buy really went on-chain (a copy flipped to Live on a test server is paper).
       store.updatePosition(id, { mode: fill.simulated ? 'paper' : 'live', status: 'open', tokensBought: fill.tokens, tokensHeld: fill.tokens, costLamports: fill.lamports, openedAt: now, lastChangeAt: now, refValueLamports: fill.lamports, buySig: fill.signature });
-      store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
+      const fillId = store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
+      // The exact SOL spent is read from the confirmed transaction afterwards; the position does not wait for it.
+      void fill.refine?.then((exact) => {
+        if (!exact) return;
+        store.updateFillLamports(fillId, exact.lamports);
+        store.updatePosition(id, { costLamports: exact.lamports });
+      }).catch(() => undefined);
       store.addEvent({
         userId: copy.userId, copyId: copy.id, kind: 'buy',
         message: `Bought ${fmtSol(fill.lamports)} of ${label} — they bought ${fmtSol(t.solLamports)}${fill.simulated ? ' (test)' : ''}`,
@@ -227,8 +253,142 @@ export class Engine {
     for (const order of dueSells(view, now)) {
       if (order.reason === 'dead_coin' && now - (this.quoteOkAt.get(view.id) ?? 0) > QUOTE_FRESH_MS) continue;
       if (this.retries.has(this.orderKey(view.id, order))) continue; // waiting for its retry time
-      this.run(view.id, order);
+      if (order.basis === 'bag') this.runBagStep(view.id, order);
+      else this.run(view.id, order);
     }
+  }
+
+  // ── timed exit of the original bag: every step on its own clock ───────
+  private readonly loose = new Set<Promise<void>>();
+  /** Tokens of a position that a sell in flight is about to sell (so overlapping steps never sell them twice). */
+  private readonly reserved = new Map<number, Map<string, bigint>>();
+
+  private reservedExcept(positionId: number, key: string): bigint {
+    let sum = 0n;
+    for (const [k, v] of this.reserved.get(positionId) ?? []) if (k !== key) sum += v;
+    return sum;
+  }
+
+  /** Sent at its own time whether or not earlier steps are confirmed; never queued behind them. */
+  private runBagStep(positionId: number, order: SellOrder): void {
+    const key = this.orderKey(positionId, order);
+    if (this.inFlight.has(key)) return;
+    this.inFlight.add(key);
+    const job: Promise<void> = this.bagStep(positionId, order, key)
+      .catch((err) => log.warn('timed step failed', { position: positionId, error: safeErrorMessage(err) }))
+      .finally(() => { this.inFlight.delete(key); this.loose.delete(job); });
+    this.loose.add(job);
+  }
+
+  private async bagStep(positionId: number, order: SellOrder, key: string): Promise<void> {
+    const { store, executor } = this.deps;
+    const stage = order.stage ?? 0;
+    const pauses = this.deps.fastRetryMs ?? FAST_RETRY_MS;
+    const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    let failures = 0;
+    for (;;) {
+      const p = store.position(positionId);
+      if (!p || p.status !== 'open' || p.firedTimed.includes(stage)) return;
+      const label = `${shortMint(p.mint)} (${p.copyName})`;
+      const wallet = this.deps.walletFor(p.userId);
+      const live = p.mode === 'live';
+      let error = '';
+      let tokens = 0n;
+      try {
+        if (!wallet) throw new Error('no wallet');
+        if (live && !executor.isLive({ live: true })) throw new Error('the site is in test mode: a live position can only be sold once live trading is back on');
+        const owner = wallet.publicKey.toBase58();
+        if (order.everything) {
+          // The last step: whatever the wallet holds now (live), in-flight earlier steps included, as specified.
+          // In test mode the books stand in for the wallet, minus what overlapping steps are already selling.
+          tokens = live ? await executor.tokenBalance(owner, p.mint) : p.tokensHeld - this.reservedExcept(p.id, key);
+          if (tokens <= 0n) {
+            if (!live && this.reservedExcept(p.id, key) > 0n) { await pause(20); continue; } // overlapping steps finish first
+            const fresh = store.position(p.id);
+            if (fresh && fresh.status === 'open') store.updatePosition(p.id, { status: 'closed', tokensHeld: 0n, closedAt: this.now(), firedTimed: [...new Set([...fresh.firedTimed, stage])] });
+            return;
+          }
+        } else {
+          const want = portion(p.tokensBought, order.percent); // a share of the ORIGINAL bag
+          const free = p.tokensHeld - this.reservedExcept(p.id, key);
+          tokens = want < free ? want : free;
+          if (tokens <= 0n) { store.updatePosition(p.id, { firedTimed: [...new Set([...p.firedTimed, stage])] }); return; }
+        }
+        const copy = store.copy(p.copyId);
+        const sentAt = this.now();
+        const mine = this.reserved.get(p.id) ?? new Map<string, bigint>();
+        mine.set(key, tokens);
+        this.reserved.set(p.id, mine);
+        let fill: Awaited<ReturnType<Executor['sell']>>;
+        try {
+          fill = await executor.sell({
+            wallet, mint: p.mint, tokens, slippagePct: copy?.settings.slippagePct ?? 25,
+            priorityFeeSol: copy?.settings.sellPriorityFeeSol ?? copy?.settings.priorityFeeSol ?? 0.0005,
+            tipSol: copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0, live, feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0,
+          });
+        } finally {
+          mine.delete(key);
+          if (!mine.size) this.reserved.delete(p.id);
+        }
+        if (fill.ok) {
+          // The wallet's balance after the last step tells whether the bag is really empty (a failed read keeps our books).
+          const after = live && order.everything ? await executor.tokenBalance(owner, p.mint).catch(() => null) : null;
+          this.settleSell(p.id, order, fill, sentAt, after);
+          return;
+        }
+        error = fill.error;
+      } catch (err) {
+        error = safeErrorMessage(err);
+      }
+      // Failed: retry at once, then after short pauses. Later steps are untouched: they run on their own clocks.
+      const why = order.everything ? 'final timed sell' : `timed sell of ${fmtPct(order.percent)} of the bag`;
+      if (failures === 0) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${friendlyError(error)} — retrying`, mint: p.mint });
+      if (failures >= pauses.length) {
+        const fresh = store.position(p.id);
+        if (fresh) store.updatePosition(p.id, { firedTimed: [...new Set([...fresh.firedTimed, stage])] });
+        store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Gave up on the ${why} of ${label} after ${failures + 1} failed tries: ${friendlyError(error)}.${order.everything ? ' Use Sell now.' : ' The last step sells what is left.'}`, mint: p.mint });
+        return;
+      }
+      await pause(pauses[failures]!);
+      failures++;
+    }
+  }
+
+  /** Books a finished sell. Synchronous from the re-read on, so overlapping sells cannot corrupt the position. */
+  private settleSell(positionId: number, order: SellOrder, fill: Extract<Awaited<ReturnType<Executor['sell']>>, { ok: true }>, sentAt: number, walletAfter: bigint | null): void {
+    const { store } = this.deps;
+    const p = store.position(positionId);
+    if (!p) return;
+    const sold = fill.tokens > p.tokensHeld ? p.tokensHeld : fill.tokens;
+    // A test fill for tokens the books no longer hold is not money: count only what was really still there.
+    const lamports = fill.simulated && fill.tokens > 0n && sold < fill.tokens ? (fill.lamports * sold) / fill.tokens : fill.lamports;
+    let left = p.tokensHeld - sold;
+    if (walletAfter !== null && walletAfter < left) left = walletAfter;
+    const closed = left === 0n;
+    store.updatePosition(p.id, {
+      tokensHeld: left,
+      proceedsLamports: p.proceedsLamports + lamports,
+      ...(closed && p.status === 'open' ? { status: 'closed' as const, closedAt: this.now() } : {}),
+      ...this.markDone(p, order),
+    });
+    if (sold === 0n && fill.simulated) return; // nothing was left for this step in test mode: no fill, no feed line
+    const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
+    void fill.refine?.then((exact) => {
+      if (!exact) return;
+      const now = store.position(p.id);
+      store.updateFillLamports(fillId, exact.lamports);
+      if (now) store.updatePosition(p.id, { proceedsLamports: now.proceedsLamports + (exact.lamports - lamports) });
+    }).catch(() => undefined);
+    store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, lamports, sentAt, fill.simulated, closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
+  }
+
+  /** "Sold 40% of the bag of X (copy) for 0.4 SOL — +2.0s after buy · 412K tokens (test). Position closed." */
+  private sellMessage(p: Position, order: SellOrder, tokens: bigint, lamports: bigint, sentAt: number, simulated: boolean, closed: boolean): string {
+    const label = `${shortMint(p.mint)} (${p.copyName})`;
+    const what = order.everything ? 'the rest' : order.basis === 'bag' ? `${fmtPct(order.percent)} of the bag` : order.percent >= 100 ? 'all' : fmtPct(order.percent);
+    const after = `+${((sentAt - p.openedAt) / 1000).toFixed(1)}s after buy`;
+    const why = order.basis === 'bag' ? after : `${REASON_TEXT[order.reason](order, p)} · ${after}`;
+    return `Sold ${what} of ${label} for ${fmtSol(lamports)} — ${why} · ${fmtTokens(tokens, p.decimals)} tokens${simulated ? ' (test)' : ''}${closed ? '. Position closed.' : ''}`;
   }
 
   // ── selling ───────────────────────────────────────────────────────────
@@ -295,6 +455,7 @@ export class Engine {
       // (copies saved before sell fees existed fall back to their buy fees)
       const priorityFeeSol = copy?.settings.sellPriorityFeeSol ?? copy?.settings.priorityFeeSol ?? 0.0005;
       const tipSol = copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0;
+      const sentAt = this.now();
       const fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0 });
       if (!fill.ok) return this.sellFailed(p, order, label, fill.error);
 
@@ -314,13 +475,15 @@ export class Engine {
         ...(closed ? { status: 'closed' as const, closedAt: this.now() } : {}),
         ...this.markDone(p, order),
       });
-      store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
-      const what = order.percent >= 100 ? 'all' : fmtPct(order.percent);
-      store.addEvent({
-        userId: p.userId, copyId: p.copyId, kind: 'sell',
-        message: `Sold ${what} of ${label} for ${fmtSol(fill.lamports)} — ${REASON_TEXT[order.reason](order, p)}${fill.simulated ? ' (test)' : ''}${closed ? '. Position closed.' : ''}`,
-        mint: p.mint, signature: fill.simulated ? null : fill.signature,
-      });
+      const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
+      const booked = fill.lamports;
+      void fill.refine?.then((exact) => {
+        if (!exact) return;
+        const cur = store.position(p.id);
+        store.updateFillLamports(fillId, exact.lamports);
+        if (cur) store.updatePosition(p.id, { proceedsLamports: cur.proceedsLamports + (exact.lamports - booked) });
+      }).catch(() => undefined);
+      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, fill.lamports, sentAt, fill.simulated, closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
       return { ok: true };
     } catch (err) {
       return this.sellFailed(p, order, label, safeErrorMessage(err));
@@ -420,6 +583,6 @@ export class Engine {
 
   /** Resolves when every queued buy and sell has finished (tests, shutdown). */
   async idle(): Promise<void> {
-    while (this.queues.size > 0) await Promise.all([...this.queues.values()]);
+    while (this.queues.size > 0 || this.loose.size > 0) await Promise.all([...this.queues.values(), ...this.loose]);
   }
 }

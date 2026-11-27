@@ -29,7 +29,13 @@ import { parseLeaderTrades, WSOL_MINT } from '../watch/parse.js';
 
 export type FillResult =
   /** lamports: buy = SOL spent, platform fee included; sell = SOL received, platform fee taken off. */
-  | { ok: true; signature: string; tokens: bigint; lamports: bigint; simulated: boolean; note?: string; feeLamports?: bigint }
+  | {
+      ok: true; signature: string; tokens: bigint; lamports: bigint; simulated: boolean; note?: string; feeLamports?: bigint;
+      /** When the transaction was seen confirmed (the clock for timed sells starts here). */
+      confirmedAt?: number;
+      /** Live fills return at confirmation with an estimate; this resolves later with the exact SOL read from the transaction. */
+      refine?: Promise<{ lamports: bigint } | null>;
+    }
   | { ok: false; error: string };
 
 export interface TradeRequest {
