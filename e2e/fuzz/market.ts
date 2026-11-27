@@ -221,11 +221,19 @@ const lam = (sol: number) => BigInt(Math.round(Math.max(0, sol || 0) * 1e9));
 export class Exec implements Executor {
   /** False once the engine it belongs to is gone: its pending and future calls never return. */
   alive = true;
-  /** The last chain tip this engine was handed (when it arrived), and the last status read of each sell it made, with
-   *  the tip it had been handed just before it sent that read (the engine reads the tip, then the status: the harness
-   *  pairs a verdict with the two reads it acted on, to count which of the engine's rules gave it). */
+  /** The last chain tip this engine was handed (when it arrived; null: the read failed), the highest it has been handed
+   *  so far (the engine goes by the highest tip it has read: a read that fails, or a node a little behind, does not
+   *  lower it), and the last status read of each sell it made, with the highest tip it had been handed when it sent
+   *  that read (the engine reads the tip before the status: the harness pairs a verdict with the reads it acted on, to
+   *  count which of the engine's rules gave it). */
   lastTip?: TipRead;
+  highTip?: { height: number; slot?: number };
   readonly reads = new Map<string, StatusAnswer & { tip?: TipRead['tip']; planted?: boolean }>();
+  /** A chain tip handed to the engine now (null: the read failed). */
+  handTip(tip: TipRead['tip'], at: number): void {
+    this.lastTip = { at, tip };
+    if (tip && (!this.highTip || tip.height > this.highTip.height)) this.highTip = tip;
+  }
   constructor(readonly m: Market, readonly gen: number) {}
   isLive(req: { live: boolean; exit?: boolean }): boolean { return this.m.isLive(req); }
   buy(req: TradeRequest & { lamports: bigint }): Promise<FillResult> { return this.m.buy(this, req); }
@@ -710,14 +718,14 @@ export class Market {
         if ((plan.L ?? 0) >= 4_000) this.counts.slowReads++;
         if (this.slowAt(this.sim.now)) this.counts.readsInSlow++;
         if (down) {
-          exec.lastTip = { at: this.sim.now, tip: null };
+          exec.handTip(null, this.sim.now);
           this.hooks.tipRead(null, 0, sentAt, this.sim.now);
           return reject(new Error('429 Too Many Requests'));
         }
         if (plan.behind) this.counts.tipBehind++;
         const height = this.height() - (plan.behind ?? 0);
         const tip = { height, slot: this.slotAt(height) };
-        exec.lastTip = { at: this.sim.now, tip };
+        exec.handTip(tip, this.sim.now);
         this.hooks.tipRead(tip, plan.behind ?? 0, sentAt, this.sim.now);
         resolve({ ...tip });
       });
@@ -743,8 +751,8 @@ export class Market {
     const c = this.signedSells.get(signature);
     const plan: StatusPlan = c ? this.planStatus() : {};
     const sentAt = this.sim.now;
-    // The tip the engine was handed just before it sent this read (it reads the tip first, then the status).
-    const tip = exec.lastTip?.at === sentAt ? exec.lastTip.tip : undefined;
+    // The highest tip the engine had been handed when it sent this read (it reads the tip first, then the status).
+    const tip = exec.highTip ?? null;
     return new Promise((resolve, reject) => {
       this.after(plan.L ?? 0, () => {
         if (!exec.alive) return; // (the engine is gone: nobody is waiting)
@@ -752,7 +760,7 @@ export class Market {
         if (down) return reject(new Error('429 Too Many Requests'));
         if (!c) return resolve({ state: 'not_found', slot: this.slotAt(this.processedHeight()) });
         const answer = this.statusAnswer(c, plan, sentAt);
-        exec.reads.set(signature, { ...answer, ...(tip !== undefined ? { tip } : {}) });
+        exec.reads.set(signature, { ...answer, tip });
         this.hooks.sellSettled(c, answer);
         if (answer.state === 'processed') return reject(new Error('seen in a block, not confirmed yet'));
         if (answer.state === 'landed') { c.settled = true; return resolve({ state: 'landed', tokens: c.sold!, lamports: c.exact! }); }

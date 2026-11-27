@@ -176,11 +176,12 @@ interface Track {
 const START = 1_800_000_000_000;
 const SOL = 1_000_000_000n;
 /** The engine's rule for "it never landed" (src/engine/engine.ts, neverLands), mirrored only to count which of its
- *  branches gave each verdict: "not found" believed this many blocks past the last block a sell could land in from a
- *  node at least as far along as the tip read before it (NOT_FOUND_MARGIN_BLOCKS), from any node WELL_PAST_BLOCKS past
- *  it; anything else that drops a sell not found is a time limit (for a sell left behind: 180 s after it was sent when
- *  the tip cannot be read, SELL_OUT_EXPIRES_MS; ten minutes whatever it says, NOT_FOUND_GIVE_UP_MS). Whether a verdict
- *  was right is judged by the chain, never by this copy. */
+ *  branches gave each verdict: a "not found" that tells its node's slot believed this many blocks past the last block a
+ *  sell could land in (NOT_FOUND_MARGIN_BLOCKS) from a node that has reached the slot that block can have at the latest
+ *  (the highest tip's slot less the blocks since); one without a slot, WELL_PAST_BLOCKS past it; anything else that
+ *  drops a sell not found is a time limit (ten minutes whatever the tip says, NOT_FOUND_GIVE_UP_MS; for a sell left
+ *  behind 180 s after it was sent when the height cannot be known, SELL_OUT_EXPIRES_MS). Whether a verdict was right is
+ *  judged by the chain, never by this copy. */
 const NOT_FOUND_MARGIN_BLOCKS = 10;
 const SELL_OUT_EXPIRES_MS = 180_000;
 const NOT_FOUND_GIVE_UP_MS = 600_000;
@@ -488,8 +489,12 @@ class Run {
     if (read.state !== 'not_found') return 'other';
     const last = lastValid !== undefined ? lastValid + LAST_BLOCK_PAST_VALID : undefined;
     const tip = read.tip;
-    if (last !== undefined && tip && tip.height > last + WELL_PAST_BLOCKS) return 'wellPast';
-    if (last !== undefined && tip && tip.slot !== undefined && read.slot !== undefined && tip.height > last + NOT_FOUND_MARGIN_BLOCKS && read.slot >= tip.slot) return 'slotted';
+    if (last !== undefined && tip) {
+      // (a status that tells its node's slot: believed once that node has reached the slot the last block can have at the
+      // latest, the tip's slot less the blocks since, and the tip is the margin past it; without a slot, well past it)
+      if (tip.slot !== undefined && read.slot !== undefined) { if (tip.height > last + NOT_FOUND_MARGIN_BLOCKS && read.slot >= tip.slot - (tip.height - last)) return 'slotted'; }
+      else if (tip.height > last + WELL_PAST_BLOCKS) return 'wellPast';
+    }
     return 'time';
   }
 
@@ -500,7 +505,7 @@ class Run {
     const tip = now?.tip;
     const last = lastValid !== undefined ? lastValid + LAST_BLOCK_PAST_VALID : undefined;
     const node = !now ? '' : now.fork ? `a node on a minority fork (the main fork's last ${now.fork} block${now.fork === 1 ? '' : 's'} unseen)` : now.lag ? `a node ${now.lag} blocks behind` : 'an up-to-date node';
-    return `${tip ? `tip read before it at height ${tip.height} (slot ${tip.slot ?? '?'})` : tip === null ? 'the tip read before it FAILED' : 'no tip read before it'}${last !== undefined ? `, its last block ${last}` : ''}${now ? `, status from ${node}${now.slot !== undefined ? ` (slot ${now.slot})` : ' (no slot)'}` : ', no status read at that moment'}; the chain at ${this.market.height()} confirmed, ${this.market.processedHeight()} produced`;
+    return `${tip ? `the highest tip read before it at height ${tip.height} (slot ${tip.slot ?? '?'})` : 'no tip read before it (every read failed)'}${last !== undefined ? `, its last block ${last}` : ''}${now ? `, status from ${node}${now.slot !== undefined ? ` (slot ${now.slot})` : ' (no slot)'}` : ', no status read at that moment'}; the chain at ${this.market.height()} confirmed, ${this.market.processedHeight()} produced`;
   }
 
   /** A sell that the chain may still put in a block: sent, neither landed nor failed, and the last block it can land in
@@ -542,7 +547,7 @@ class Run {
     const c = this.sellCallOf(sig);
     const RULE: Record<OrphanFate, string> = {
       booked: 'booked', slotted: `${NOT_FOUND_MARGIN_BLOCKS} blocks past its last block, from a node at least as far along as the tip`, wellPast: `${WELL_PAST_BLOCKS} blocks past its last block, from any node`,
-      fallback: `not found ${((this.sim.now + this.skew - o.sentAt) / 1000).toFixed(1)} s after it was sent, by none of the tip's rules (a time limit: ${SELL_OUT_EXPIRES_MS / 1000} s when the tip cannot be read, ${NOT_FOUND_GIVE_UP_MS / 1000} s whatever it says)`, failed: 'it failed on chain', planted: 'by the self-test\'s planted rule',
+      fallback: `not found ${((this.sim.now + this.skew - o.sentAt) / 1000).toFixed(1)} s after it was sent, by none of the tip's rules (a time limit: ${NOT_FOUND_GIVE_UP_MS / 1000} s whatever the tip says, ${SELL_OUT_EXPIRES_MS / 1000} s when the height cannot be known)`, failed: 'it failed on chain', planted: 'by the self-test\'s planted rule',
       other: this.exec.reads.get(sig)?.at === this.sim.now ? 'by none of the engine\'s rules, as the chain stood' : 'without a read of it (nothing could be learnt about it)',
     };
     const text = `${RULE[fate]}; ${this.readsText(sig, o.lastValid)}`;
@@ -681,9 +686,10 @@ class Run {
    *    is believed (the slot check is gone); 'early-drop' also NOT_FOUND_MARGIN_BLOCKS higher than it is (the margin is
    *    gone too: dropped as soon as the chain is past the last block the sell could land in);
    *  - 'status-first': the tip as the chain is STATUS_FIRST_BLOCKS later, at that block's slot (an engine that reads the
-   *    status first and the tip after it, when a slow status read has let the chain move on);
-   *  - 'margin-free': a "not found" at a slot at least the tip's is turned into "failed" once the tip read before it is
-   *    past the last block the sell could land in (dropped without the margin, the slot check kept);
+   *    status first and the tip after it, when a slow tip read has let the chain move on);
+   *  - 'margin-free': a "not found" that passes the engine's slot check (its node has reached the slot the sell's last
+   *    block can have at the latest: the tip's slot less the blocks since) is turned into "failed" once the highest tip
+   *    the engine has read is past the last block the sell could land in (dropped without the margin);
    *  - 'slotless-believed': a "not found" without a slot is handed over with the tip's slot (believed as from a node as
    *    far along as the tip);
    *  - 'give-up-120s': a sell of unknown outcome (not one left behind) still not found 120 s after it was sent is
@@ -693,19 +699,24 @@ class Run {
     const sab = this.sc.sabotage;
     if (sab === 'early-drop' || sab === 'slot-blind' || sab === 'status-first') {
       const real = exec.chainTip.bind(exec);
-      exec.chainTip = () => real().then((t) => {
-        const tip = sab === 'status-first'
-          ? { height: t.height + STATUS_FIRST_BLOCKS, slot: this.market.slotAt(t.height + STATUS_FIRST_BLOCKS) }
-          : { height: t.height + (sab === 'early-drop' ? NOT_FOUND_MARGIN_BLOCKS : 0), slot: 0 };
-        exec.lastTip = { at: this.sim.now, tip };
-        return tip;
-      });
+      exec.chainTip = () => {
+        // (the engine is handed this tip, not the real one: the harness's record of the highest tip goes by it)
+        const before = exec.highTip;
+        return real().then((t) => {
+          const tip = sab === 'status-first'
+            ? { height: t.height + STATUS_FIRST_BLOCKS, slot: this.market.slotAt(t.height + STATUS_FIRST_BLOCKS) }
+            : { height: t.height + (sab === 'early-drop' ? NOT_FOUND_MARGIN_BLOCKS : 0), slot: 0 };
+          exec.highTip = before;
+          exec.handTip(tip, this.sim.now);
+          return tip;
+        });
+      };
     }
     if (sab === 'margin-free' || sab === 'slotless-believed' || sab === 'give-up-120s') {
       const real = exec.settleSell.bind(exec);
       exec.settleSell = (signature, owner, mint) => {
-        // (the tip the engine was handed just before it sent this read, and whether the sell is one left behind)
-        const tip: TipRead['tip'] | undefined = exec.lastTip?.at === this.sim.now ? exec.lastTip.tip : undefined;
+        // (the highest tip the engine had been handed when it sent this read, and whether the sell is one left behind)
+        const tip: TipRead['tip'] = exec.highTip ?? null;
         const leftBehind = !!(this.engine as unknown as { orphans?: Map<string, unknown> }).orphans?.has(signature);
         const c = this.sellCallOf(signature);
         return real(signature, owner, mint).then((r) => {
@@ -713,7 +724,7 @@ class Run {
           const last = c.lastValid + LAST_BLOCK_PAST_VALID;
           // (the read the harness counts the verdict by is marked: the engine was told something else)
           const mark = <T>(changed: T): T => { const rd = exec.reads.get(signature); if (rd?.at === this.sim.now) rd.planted = true; return changed; };
-          if (sab === 'margin-free' && tip?.slot !== undefined && r.slot !== undefined && r.slot >= tip.slot && tip.height > last) return mark({ state: 'failed' as const });
+          if (sab === 'margin-free' && tip?.slot !== undefined && r.slot !== undefined && tip.height > last && r.slot >= tip.slot - (tip.height - last)) return mark({ state: 'failed' as const });
           if (sab === 'slotless-believed' && r.slot === undefined && tip?.slot !== undefined) return mark({ state: 'not_found' as const, slot: tip.slot });
           if (sab === 'give-up-120s' && !leftBehind && c.uncertain && this.sim.now - c.t0 > 120_000) return mark({ state: 'failed' as const });
           return r;
