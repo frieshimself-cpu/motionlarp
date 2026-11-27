@@ -628,6 +628,21 @@ The fuzzer on this code, seeds flagged: default mix 0 of 3,000; crash, ghost and
 partial 0 of 1,500 each; dbfault 1 of 2,000 (seed 1411, the known quoted coin count case); all saved cases pass; the
 self-test catches every planted fault. `npm test`: 567 tests.
 
+**The fuzzer runs the drop rule the server runs** (e2e/fuzz only; nothing in src/ changed). Its fake chain had no
+slots, so only the 30-block rule ever dropped a sell left behind by a crash, and no sale ever landed near the end of its
+blockhash. Now every block has a slot (about one in ten skipped) and the engine is handed the tip with its slot, as the
+real executor does: a sell left behind is dropped 10 blocks past the last block it could land in when the "not found"
+came from a node at least as far along, 30 blocks past from any node, or after 180 s. A new profile, `lag` (6 % of the
+default mix, drawn on its own so every other seed is what it was), adds status reads from a node up to 25 blocks
+behind the tip, sales that land in the last blocks their blockhash allows (its last valid height −3 to +1), sells that
+never land told "expired" only once their blockhash has run out, and more crashes. Seeds flagged on this code: default
+mix 0 of 2,000, lag 0 of 2,000 (and 0 of 8,000 more), crash 0 of 1,500, ghost 0 of 1,500; all saved cases pass. In the
+lag run 2,382 sells were left behind: 1,554 had landed and all were booked; dropped as never landed, 109 by the 10-block
+rule, 313 by the 30-block rule, none by the 180 s fallback (it needs the tip unreadable when the sell is first read,
+180 s after it was sent: once in the 8,000 more); 406 had failed on chain. None that had landed was dropped. The
+self-test plants two weaker rules (dropped as soon as the chain is past the sell's last block; believed from a node
+behind the tip) and catches both: 21 and 7 of 150 lag seeds, 0 without.
+
 ## Not yet verified
 
 - A crash or a restart with a real sell out on the real server: the settling of sells written down before a crash is
