@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 623 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 628 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -780,6 +780,25 @@ seed 142: a sell of unknown outcome given up 127 s after it was sent, the chain 
 seed 5: a sell left behind dropped at 180 s, landed 8 s later and never booked). A change to the drop rules needs a
 `--profile lag` and a `--profile slow` run: in the default mix lag is 6 % of the seeds and slow periods 4 %, so the
 default mix alone catches such a change only at large seed counts.
+
+**The checkers of that model** (one on its faithfulness, one planting regressions) found gaps, closed as follows. In the
+real code (2cdd0b4, live since 19:42 UTC after a 1.5 s gap): the wait for a trade's confirmation (`src/tx/confirm.ts`)
+called it expired as soon as the chain passed its last valid height, on the word of a node on a short fork of its own
+(its slot past the tip's, the last block not seen), and 30 blocks past whatever the node said, a sighting at
+"processed" included; the engine took that for a plain failure, its rule sold again, and the first sale, if it landed,
+was never booked. It now decides by the engine's own rule, which lives in one place (`src/chain/landing.ts`): "not
+found" is final only from a node that has certainly reached the last block the trade could land in, ten blocks past
+it, and a trade seen in a block is never called expired; within the ten blocks it reads the tip at the usual pace
+(every ten polls). A sell that did not land is retried about 4 s later than before (the failure path only). A unit test
+now pins the order the engine reads the tip and the status in (nothing caught a status read before the tip: the
+self-test's "status first" plant hands the engine a tip 15 blocks later, which a real reordering does not). Four
+planted regressions of the confirmation each fail at least one test; the fuzzer on 2cdd0b4: default, lag and slow 0 of
+1,000 each. In the fuzzer (being done): the fake executor answering later than the real one can (it gives up at 150 s),
+forks too shallow (1-3 blocks) to test the 10-block margin, buys never settled by the tip rules, the executor's own
+"expired" decided from perfect knowledge, and a false flag (lag seeds 3014 and 12069: a "same share" sell that landed
+after a crash and was booked from its own transaction was never marked done). Until then the margin, the last block
+and the 30-block rule are guarded by the unit tests (`tests/restarts.test.ts`, `tests/send.test.ts`), not by the
+fuzzer's runs. `npm test`: 628 tests.
 
 ## Not yet verified
 
