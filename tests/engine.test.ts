@@ -395,3 +395,20 @@ describe('trading fees per copy reach the trade', () => {
     expect(ex.sells[0]).toMatchObject({ priorityFeeSol: 0.0001, tipSol: 0.0005 });
   });
 });
+
+describe('one switch decides real or test: the site owner\'s', () => {
+  it('site live: every copy trades for real, whatever its old per-copy setting said', async () => {
+    ex.live = true;
+    addCopy({ mode: 'paper', sell: { mirror: { enabled: false } } });
+    await engine.onLeaderTrade(trade()); await engine.idle();
+    expect(ex.buys[0]!.live).toBe(true);
+    expect(open()[0]!.mode).toBe('live');
+  });
+  it('site in test mode: every copy is simulated, whatever its old per-copy setting said', async () => {
+    ex.live = false;
+    addCopy({ mode: 'live', sell: { mirror: { enabled: false } } });
+    await engine.onLeaderTrade(trade()); await engine.idle();
+    expect(open()[0]!.mode).toBe('paper');
+    expect(feed()[0]).toMatch(/\(test\)/);
+  });
+});

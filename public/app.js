@@ -151,11 +151,10 @@ function renderCopy(c) {
   const color = hue(c.leader);
   const initials = (c.name || c.leader).replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '··';
   const pnl = c.stats.pnlSol;
-  const live = c.mode === 'live';
   return `<div class="row ${c.enabled ? '' : 'paused'}">
     <div class="avatar" style="background:${color}">${esc(initials)}</div>
     <div class="info">
-      <div class="name">${esc(c.name)} ${live ? `<span class="pill ${state.server.live ? 'live' : 'test'}">${state.server.live ? 'LIVE' : 'LIVE · server in test'}</span>` : '<span class="pill test">TEST</span>'}</div>
+      <div class="name">${esc(c.name)} ${state.server.live ? '<span class="pill live">LIVE</span>' : '<span class="pill test">TEST</span>'}</div>
       <div class="meta"><a href="${solscanAcct(c.leader)}" target="_blank" rel="noopener" class="mono">${esc(short(c.leader))}</a> · buy <b>${c.buySol}</b> SOL when they buy ≥ <b>${c.minLeaderBuySol}</b> SOL · ${esc(feeText(c))} SOL · slippage ${c.slippagePct}%</div>
       <div class="meta">${c.stats.open} open · ${c.stats.closed} closed · <span class="${cls(pnl)}">${signed(pnl, 3)} SOL</span></div>
       <div class="tags">${sellTags(c.sell)}</div>
@@ -271,8 +270,6 @@ function rule(id, title, desc, on, body) {
     <div class="body">${body}</div></div>`;
 }
 
-const FEE_PRESETS = { eco: [0.0001, 0], fast: [0.001, 0.001], turbo: [0.003, 0.005] };
-
 function openEditor(copy) {
   const d = copy || { ...config.defaults, sell: structuredClone(config.defaults.sell) };
   const live = state.server.live;
@@ -297,7 +294,7 @@ function openEditor(copy) {
       </div>
 
       <div class="group">
-        <div class="title">Trading fees <span class="presets"><button type="button" class="btn small ghost" data-fee="eco">Eco</button><button type="button" class="btn small ghost" data-fee="fast">Fast</button><button type="button" class="btn small ghost" data-fee="turbo">Turbo</button></span></div>
+        <div class="title">Trading fees</div>
         <div class="row4">
           <div class="field"><label for="f-prio">Buy priority fee</label><div class="unit"><input id="f-prio" type="number" min="0" max="0.1" step="any" value="${esc(d.priorityFeeSol)}"><span>SOL</span></div></div>
           <div class="field"><label for="f-tip">Buy tip</label><div class="unit"><input id="f-tip" type="number" min="0" max="0.5" step="any" value="${esc(d.tipSol ?? 0)}"><span>SOL</span></div></div>
@@ -329,13 +326,8 @@ function openEditor(copy) {
       </div>
 
       <div class="group" style="margin-bottom:0">
-        <div class="title">Mode</div>
-        <div class="seg" id="f-mode">
-          <button type="button" data-v="paper" class="${d.mode !== 'live' ? 'on' : ''}">Test — nothing is sent</button>
-          <button type="button" data-v="live" class="${d.mode === 'live' ? 'on' : ''}">Live — real SOL</button>
-        </div>
-        <div class="hint">${live ? 'Live copies spend real SOL from your wallet.' : 'The site is in test mode: Live copies are still only simulated until the owner turns live trading on.'}</div>
-        <label style="display:flex;align-items:center;gap:10px;margin:14px 0 0;color:var(--text);font-size:13.5px"><span class="switch"><input type="checkbox" id="f-once" ${d.oncePerCoin ? 'checked' : ''}><span></span></span>Buy each coin only once</label>
+        <label style="display:flex;align-items:center;gap:10px;margin:0;color:var(--text);font-size:13.5px"><span class="switch"><input type="checkbox" id="f-once" ${d.oncePerCoin ? 'checked' : ''}><span></span></span>Buy each coin only once</label>
+        <div class="hint" style="margin-top:10px">${live ? 'The site is live: this copy trades with real SOL from your wallet.' : 'The site is in test mode: trades are simulated, nothing is sent.'}</div>
       </div>
       <div id="form-err"></div>
     </div>
@@ -346,7 +338,6 @@ function openEditor(copy) {
     </form>`);
   const form = $('#copy-form');
   const seg = (el) => $$('button', el).forEach((b) => b.addEventListener('click', () => $$('button', el).forEach((x) => x.classList.toggle('on', x === b))));
-  seg($('#f-mode'));
   seg($('#f-mirror-mode'));
   $$('[data-rule] [data-on]', form).forEach((cb) => cb.addEventListener('change', () => cb.closest('.rule').classList.toggle('off', !cb.checked)));
   form.addEventListener('click', (e) => {
@@ -358,10 +349,6 @@ function openEditor(copy) {
     if (t.dataset.preset) {
       const [parts, every] = t.dataset.preset.split('@');
       $('#timed-rows').innerHTML = parts.split(',').map((p, i) => stageRow('timed', Number(every) * (i + 1), p)).join('');
-    }
-    if (t.dataset.fee) {
-      const [prio, tip] = FEE_PRESETS[t.dataset.fee];
-      $('#f-prio').value = prio; $('#f-sprio').value = prio; $('#f-tip').value = tip; $('#f-stip').value = tip;
     }
   });
   $('#cancel').addEventListener('click', closeModal);
@@ -380,7 +367,6 @@ function openEditor(copy) {
       leader: leaders[0] ?? '',
       name: nick,
       enabled: copy ? copy.enabled : true,
-      mode: $('#f-mode .on').dataset.v,
       buySol: Number($('#f-buy').value),
       minLeaderBuySol: Number($('#f-min').value || 0),
       slippagePct: Number($('#f-slip').value),
@@ -396,7 +382,7 @@ function openEditor(copy) {
         deadCoin: { enabled: on('dead'), idleSec: Number($('#f-idle').value) },
       },
     };
-    if (body.mode === 'live' && !(copy && copy.mode === 'live') && !confirm(`Live mode buys ${body.buySol} SOL with your real wallet every time ${body.name || 'this wallet'} buys. Continue?`)) return;
+    if (live && !copy && !confirm(`The site is live: this buys ${body.buySol} SOL with your real wallet every time ${leaders.length > 1 ? 'one of these wallets' : body.name || 'this wallet'} buys. Continue?`)) return;
     let done = 0;
     try {
       if (copy) await api('PUT', `/api/copies/${copy.id}`, body);

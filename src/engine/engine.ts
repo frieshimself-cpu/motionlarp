@@ -137,7 +137,7 @@ export class Engine {
     const wallet = this.deps.walletFor(copy.userId);
     if (!wallet) return skip('no wallet imported yet');
 
-    const id = store.insertPosition({ userId: copy.userId, copyId: copy.id, mint: t.mint, mode: s.mode, leaderSig: t.signature, sell: s.sell, copyName: s.name, leader: t.leader, now: this.now() });
+    const id = store.insertPosition({ userId: copy.userId, copyId: copy.id, mint: t.mint, mode: 'live', leaderSig: t.signature, sell: s.sell, copyName: s.name, leader: t.leader, now: this.now() });
     return this.enqueue(id, () => this.buy(id, copy, wallet, t));
   }
 
@@ -148,7 +148,7 @@ export class Engine {
     const label = `${shortMint(t.mint)} (${s.name})`;
     try {
       const feeBps = this.deps.feeBpsFor?.(copy.userId) ?? 0;
-      if (executor.isLive({ live: s.mode === 'live' })) {
+      if (executor.isLive({ live: true })) {
         const platformFee = (lamports * BigInt(Math.floor(feeBps))) / 10_000n;
         const need = lamports + platformFee + BigInt(Math.round(this.deps.feeReserveSol * 1e9));
         const have = await this.solBalance(wallet.publicKey.toBase58());
@@ -158,7 +158,7 @@ export class Engine {
           return;
         }
       }
-      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: s.mode === 'live', feeBps });
+      const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: true, feeBps });
       if (!fill.ok) {
         store.updatePosition(id, { status: 'failed', closedAt: this.now() });
         store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: 0n, lamports, signature: null, simulated: false, error: fill.error });

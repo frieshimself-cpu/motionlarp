@@ -61,7 +61,7 @@ export const brandHtml = (name) => `<a class="brand" href="/">${LOGO}<span>${esc
 
 export function modePill(server) {
   if (server.mode === 'offline') return '<span class="pill off" title="No RPC connection set yet">OFFLINE</span>';
-  return server.live ? '<span class="pill live" title="Copies set to Live trade with real SOL">LIVE</span>' : '<span class="pill test" title="Everything is simulated; nothing is sent">TEST MODE</span>';
+  return server.live ? '<span class="pill live" title="Copies trade with real SOL">LIVE</span>' : '<span class="pill test" title="Everything is simulated; nothing is sent">TEST MODE</span>';
 }
 
 export function openModal(html) {

@@ -111,7 +111,7 @@ function render() {
               <div><label for="set-wallet">Paid to wallet</label><input id="set-wallet" type="text" autocomplete="off" spellcheck="false" value="${esc(st.feeWallet)}" placeholder="Wallet address (must hold ≥ 0.001 SOL)"></div></div></div>
             <div class="setting"><div class="what"><b>Max per buy</b><span>No single copy buy may spend more than this.</span></div>
               <div style="max-width:220px"><div class="unit"><input id="set-max" type="number" min="0.001" step="any" value="${esc(st.maxSolPerBuy)}"><span>SOL</span></div></div></div>
-            <div class="setting"><div class="what"><b>Live trading</b><span>Off: everything is simulated. On: copies set to Live trade real SOL.</span></div>
+            <div class="setting"><div class="what"><b>Live trading</b><span>Off: everything is simulated. On: every enabled copy on the site trades real SOL.</span></div>
               <div style="display:flex;align-items:center;gap:12px"><label class="switch"><input type="checkbox" id="set-live" ${st.liveTrading ? 'checked' : ''} aria-label="Live trading"><span></span></label><span id="live-text" class="${st.liveTrading ? 'up' : 'muted'}">${st.liveTrading ? 'Live trading is ON' : 'Test mode'}</span></div></div>
             <div class="card-body" style="border-top:1px solid var(--border);display:flex;gap:12px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="submit">Save settings</button><span id="settings-msg" class="muted"></span></div>
           </form>
@@ -167,7 +167,7 @@ function bind() {
     if (!box.hidden) $('input', box).focus();
   }));
   $('#set-live').addEventListener('change', (e) => {
-    if (e.target.checked && !confirm('Turn live trading ON? Copies set to Live will then buy and sell with real SOL.')) e.target.checked = false;
+    if (e.target.checked && !confirm('Turn live trading ON? Every enabled copy on the site will then buy and sell with real SOL.')) e.target.checked = false;
     $('#live-text').textContent = e.target.checked ? 'Live trading will be ON after saving' : 'Test mode';
   });
   $('#settings').addEventListener('submit', async (e) => {

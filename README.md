@@ -85,8 +85,8 @@ Log in with the admin password. Only you have it; a user account is never an adm
 
 ## Fees
 
-- **Trading fees, set per copy by each user:** priority fee and tip, separately for buys and sells, plus slippage,
-  with Eco / Fast / Turbo presets. The priority fee goes to the network; a tipped trade is also sent through
+- **Trading fees, set per copy by each user:** priority fee and tip, separately for buys and sells, plus slippage.
+  The priority fee goes to the network; a tipped trade is also sent through
   Helius Sender (Jito and staked connections at once): a tip of 0.001 SOL or more uses every fast lane, a smaller
   one (from 0.000005 SOL) the lighter lane.
 - **Platform fee, set by you on the admin page:** a % of every copy buy and sell, sent to your fee wallet inside
@@ -97,11 +97,11 @@ Log in with the admin password. Only you have it; a user account is never an adm
 ## Going live
 
 1. Run copies in test mode first and read the activity feed and history.
-2. Fund a **fresh** wallet with a little SOL, import it, set one copy to Live with a small buy (0.01–0.02 SOL).
+2. Fund a **fresh** wallet with a little SOL, import it, and keep one copy with a small buy (0.01–0.02 SOL).
 3. On the admin page turn **Live trading** on and save.
 4. Watch the first live buys and sells on Solscan (the feed links each one).
 
-Both switches are needed for a real trade: Live trading on the admin page **and** the copy set to Live.
+One switch decides: with Live trading on, every enabled copy on the site trades real SOL; off, everything is simulated.
 
 ## How the private keys are protected
 
