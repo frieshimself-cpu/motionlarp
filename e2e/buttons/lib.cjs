@@ -195,6 +195,81 @@ const BADTEXT_SRC = `(() => {
   return out.slice(0, 40);
 })()`;
 
+/**
+ * Inside the screen is not enough (third review): what runs out of its own box. An element, or a line of text, drawn
+ * past the card, the editor, a sell rule, a step row, a switch group, a tag, a pill or a button it belongs to (a
+ * button past its card); a number drawn under its unit label ("100" read "10%", the % over the last 0) or cut by its
+ * box; a figure cut with "…". What a box clips or scrolls (a table that scrolls sideways) is judged at that box.
+ */
+const BOXES_SRC = `(() => {
+  const BOX = '.card, .modal-card, .rule, .stage, .seg, .tag, .pill, .btn, .topbar-in, .auth-in';
+  const vw = document.documentElement.clientWidth;
+  const roots = [document.querySelector('#app'), document.querySelector('#modal:not([hidden])')].filter(Boolean);
+  const st = (el) => getComputedStyle(el);
+  const clips = (e) => { const s = st(e); return s.overflowX !== 'visible' || s.overflowY !== 'visible'; };
+  const clipperBelow = (el, stop) => { for (let e = el.parentElement; e && e !== stop && e !== document.body; e = e.parentElement) if (clips(e)) return e; return null; };
+  const shown = (el) => el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true }) && (() => { const r = el.getBoundingClientRect(); return r.width >= 1 && r.height >= 1; })();
+  const nm = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\\s+/).join('.') : '');
+  const txt = (el) => ((el.innerText || el.value || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+  const out = [];
+  const reported = new Set();
+  for (const root of roots) {
+    for (const el of root.querySelectorAll('*')) {
+      if (!shown(el)) continue;
+      const box = el.parentElement && el.parentElement.closest(BOX);
+      if (!box || !root.contains(box) || clipperBelow(el, box)) continue;
+      let parentOut = false;
+      for (let p = el.parentElement; p && p !== box; p = p.parentElement) if (reported.has(p)) { parentOut = true; break; }
+      const r = el.getBoundingClientRect();
+      const b = box.getBoundingClientRect();
+      const over = { left: b.left - r.left, right: r.right - b.right, top: b.top - r.top, bottom: r.bottom - b.bottom };
+      if (over.left > 1 || over.right > 1 || over.top > 1.5 || over.bottom > 1.5) {
+        reported.add(el);
+        if (!parentOut) out.push({ kind: 'out of its box', el: nm(el), text: txt(el), box: nm(box), x: [Math.round(r.left), Math.round(r.right)], boxX: [Math.round(b.left), Math.round(b.right)] });
+      }
+    }
+    // Lines of text past their box.
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const p = n.parentElement;
+      if (!n.nodeValue.trim() || !p || reported.has(p) || !p.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+      const box = p.closest(BOX);
+      if (!box || !root.contains(box) || clips(p) || (box !== p && clipperBelow(p, box))) continue;
+      const range = document.createRange();
+      range.selectNodeContents(n);
+      const b = box.getBoundingClientRect();
+      for (const r of range.getClientRects()) {
+        if (r.width < 1) continue;
+        const o = Math.max(b.left - r.left, r.right - b.right);
+        if (o > 1.5) { out.push({ kind: 'text out of its box', el: nm(p), text: n.nodeValue.trim().slice(0, 60), box: nm(box), x: [Math.round(r.left), Math.round(r.right)], boxX: [Math.round(b.left), Math.round(b.right)] }); break; }
+      }
+    }
+    // A number box's value against its unit label, and against its own box.
+    const ctx = document.createElement('canvas').getContext('2d');
+    for (const input of root.querySelectorAll('.unit > input')) {
+      if (!shown(input) || !input.value) continue;
+      const label = input.parentElement.querySelector(':scope > span');
+      const s = st(input);
+      ctx.font = s.fontStyle + ' ' + s.fontWeight + ' ' + s.fontSize + ' ' + s.fontFamily;
+      const w = ctx.measureText(input.value).width;
+      const r = input.getBoundingClientRect();
+      const start = r.left + parseFloat(s.borderLeftWidth) + parseFloat(s.paddingLeft);
+      const end = r.right - parseFloat(s.borderRightWidth) - parseFloat(s.paddingRight);
+      if (start + w > end + 1) out.push({ kind: 'value cut by its box', el: nm(input), text: input.value, room: Math.round(end - start), needs: Math.round(w) });
+      if (label && shown(label)) {
+        const l = label.getBoundingClientRect();
+        if (Math.min(start + w, end) > l.left + 0.5) out.push({ kind: 'value under its unit', el: nm(input), text: input.value + ' / ' + label.textContent, valueEnds: Math.round(Math.min(start + w, end)), unitStarts: Math.round(l.left) });
+      }
+    }
+    // A figure cut with "…".
+    for (const el of root.querySelectorAll('*')) {
+      if (!shown(el) || el.classList.contains('who')) continue;
+      if (st(el).textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth + 1) out.push({ kind: 'cut with an ellipsis', el: nm(el), text: txt(el), shows: el.clientWidth, needs: el.scrollWidth });
+    }
+  }
+  return { viewport: vw, problems: out.slice(0, 12), count: out.length };
+})()`;
+
 const INVENTORY_SRC = `(() => {
   const describe = ${DESCRIPTOR_SRC};
   const out = [];
@@ -207,15 +282,17 @@ const INVENTORY_SRC = `(() => {
   return [...new Set(out)];
 })()`;
 
-/** Looks at the screen as it stands: sideways overflow, bad texts, and what controls it has. */
+/** Looks at the screen as it stands: sideways overflow, what runs out of its own box, bad texts, and what controls it
+ *  has. */
 async function screenCheck(page, book, screen, opts = {}) {
-  let layout, bad, inv;
+  let layout, bad, inv, boxes;
   try {
-    [layout, bad, inv] = await Promise.all([page.evaluate(LAYOUT_SRC), page.evaluate(BADTEXT_SRC), page.evaluate(INVENTORY_SRC)]);
+    [layout, bad, inv, boxes] = await Promise.all([page.evaluate(LAYOUT_SRC), page.evaluate(BADTEXT_SRC), page.evaluate(INVENTORY_SRC), page.evaluate(BOXES_SRC)]);
   } catch (err) {
     book.note(`screenCheck ${screen} could not run`, String(err).slice(0, 200));
     return;
   }
+  book.ok(`${screen}: nothing runs out of its card or box; no number under its unit, cut, or cut short with "…"`, boxes.count === 0, boxes);
   for (const d of inv) { if (!book.inventory.has(d)) book.inventory.set(d, new Set()); book.inventory.get(d).add(screen); }
   const offenders = layout.offenders.filter((o) => !(opts.ignoreInside || []).some((re) => re.test(o.inside || '')));
   if (offenders.length || layout.pageScrollWidth > layout.viewport + 1) {
@@ -278,4 +355,4 @@ async function until(fn, { timeout = 8000, every = 100, what = 'condition' } = {
   }
 }
 
-module.exports = { Book, instrument, planDialog, apiCalls, screenCheck, shown, signOf, solStr, solNum, matches, agoMatches, sleep, until };
+module.exports = { Book, instrument, planDialog, apiCalls, screenCheck, LAYOUT_SRC, BOXES_SRC, shown, signOf, solStr, solNum, matches, agoMatches, sleep, until };

@@ -46,8 +46,11 @@ h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
 .nav button { background: none; border: 0; padding: 0 12px; color: var(--muted); font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .nav button:hover { color: var(--text); }
 .nav button.on { color: var(--text); border-bottom-color: var(--accent); }
-.topbar .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-.who { color: var(--muted); font-size: 13px; }
+.topbar .right { margin-left: auto; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.who { color: var(--muted); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 641 to 760 px: the bar keeps one row without the site's name and the user's ("Log out" ran past a 641 px screen, and
+   with a 16-letter name it did up to 666 px); a long name is cut in the bar rather than pushing the buttons off. */
+@media (max-width: 760px) { .who, .topbar .brand span:not(.logo) { display: none; } }
 /* A phone: the bar did not fit in one row (its right end, "Log out" included, ran 45 px past a 390 px screen and
    widened the whole page), and it hid the logo with the name, on the login pages too. Now the logo and the buttons on
    the right share the first row, the tabs get the second, and only the bar drops the site's name (and the user's). */
@@ -71,12 +74,21 @@ h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .card-head h2 { font-size: 14px; }
+/* A head's title gives way first; its buttons or its pill go under it, at the right, only when not even the title's
+   longest word fits beside them (below 295 px "New copy" ran past its card and the screen, and on the Status tab "Not
+   set on the server" past its card below 290 px). */
+.card-head { flex-wrap: wrap; }
+.card-head > h2 { flex: 1 1 0; }
+.card-head > :last-child:not(:first-child) { margin-left: auto; }
+.card-head .actions { flex-wrap: wrap; justify-content: flex-end; }
 .card-head .sub { color: var(--dim); font-size: 12.5px; font-weight: 400; margin-left: 8px; }
 .card-body { padding: 16px; }
 .card-body.flush { padding: 0; }
 .stat { padding: 14px 16px; }
 .stat .label { color: var(--muted); font-size: 12px; font-weight: 500; }
-.stat .value { font: 600 22px/1.2 var(--mono); margin-top: 6px; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A figure is never cut short: it was drawn "+0.269 S…" on a 320 px phone and "+0.26…" at 280 px (a digit gone). On a
+   narrow card the figure is smaller, and "SOL" goes under the number when it does not fit beside it. */
+.stat .value { font: 600 clamp(15px, 5.6vw, 22px)/1.2 var(--mono); margin-top: 6px; letter-spacing: -.02em; }
 .stat .value small { font-size: 13px; color: var(--dim); font-weight: 500; }
 .stat .foot { color: var(--dim); font-size: 12px; margin-top: 2px; }
 .up { color: var(--green); }
@@ -115,8 +127,10 @@ textarea.secret { -webkit-text-security: disc; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .row4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 @media (max-width: 600px) { .row2 { grid-template-columns: 1fr; } .row4 { grid-template-columns: 1fr 1fr; } }
+/* Below 320 px the four fees go under each other: two by two, "0.0005" was cut to "0.000" by its "SOL". */
+@media (max-width: 319px) { .row4 { grid-template-columns: 1fr; } }
 
-.seg { display: inline-flex; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 9px; padding: 3px; gap: 2px; }
+.seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 9px; padding: 3px; gap: 2px; }
 .seg button { border: 0; background: transparent; padding: 6px 12px; border-radius: 7px; cursor: pointer; color: var(--muted); font-weight: 600; font-size: 13px; }
 .seg button.on { background: var(--surface-3); color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
 
@@ -149,12 +163,16 @@ tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-family: var(--mono); white-space: nowrap; }
 tbody tr:hover { background: rgba(255, 255, 255, .015); }
 .t-days td:first-child { white-space: nowrap; }
-.t-closed td:nth-child(2) { overflow-wrap: anywhere; }
+/* In the table a copy's name keeps its words whole: with overflow-wrap: anywhere the table squeezed the Copy column
+   below its longest word, and from 641 to 857 px every "Scharo" was drawn "Scha" / "ro". */
+@media (min-width: 761px) { .t-closed td:nth-child(2) { overflow-wrap: break-word; } }
 /* History on a phone: no table wider than the screen (at 390 px each day took three lines, "Fri, / Nov / 27", and the
    money columns started off the screen, behind a sideways scroll). A day is one line, real or test beside it and its
    profit at the right end, its trades and winners under it; a closed position is a block: the coin and its P/L, then
-   the copy, when it closed, its cost and what came back, then its sells. The column names go into the rows. */
-@media (max-width: 640px) {
+   the copy, when it closed, its cost and what came back, then its sells. The column names go into the rows. Up to 760
+   px: the closed positions' table needs about 700 px, and from 641 px it scrolled sideways with the Closed column out
+   of sight. */
+@media (max-width: 760px) {
   .t-days, .t-days tbody, .t-closed, .t-closed tbody { display: block; }
   .t-days thead, .t-closed thead { display: none; }
   .t-days tr, .t-closed tr { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
@@ -254,14 +272,36 @@ tbody tr:hover { background: rgba(255, 255, 255, .015); }
 .rule.off .body { display: none; }
 .stage { display: grid; grid-template-columns: auto 104px auto 104px 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 13px; color: var(--muted); }
 .stage input { padding: 7px 10px; }
+/* The unit is drawn inside the box, at its right: the box keeps room for it (the step boxes kept 10 px, and on a narrow
+   phone "100" read "10%", the % over the last 0, and "30" ran under "sec"). */
+.stage .unit > input { padding-right: 30px; }
+.stage .unit > span { right: 9px; }
 @media (max-width: 560px) { .stage { grid-template-columns: auto 1fr auto 1fr auto; } .stage .rest { display: none; } }
+/* Below 351 px a step takes two lines, "After [box] sec" over "sell [box] %", its ✕ beside both: on one line each box
+   had about 50 px for its number and its unit. */
+@media (max-width: 350px) {
+  .stage[data-row] { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .stage[data-row] > :nth-child(1) { grid-area: 1 / 1; }
+  .stage[data-row] > :nth-child(2) { grid-area: 1 / 2; }
+  .stage[data-row] > :nth-child(3) { grid-area: 2 / 1; }
+  .stage[data-row] > :nth-child(4) { grid-area: 2 / 2; }
+  .stage[data-row] > [data-remove] { grid-area: 1 / 3 / 3 / 4; }
+}
+/* Dead coin: "No trades for [box] → sell everything" on one line where it fits; below 421 px the last words go under
+   it (they ran past the rule's border below 337 px, and past the screen below 288). */
+.stage.idle { grid-template-columns: auto 120px auto; }
+@media (max-width: 420px) { .stage.idle { grid-template-columns: auto minmax(0, 120px); } .stage.idle > :last-child { grid-column: 1 / -1; } }
 .presets { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .err { color: #ff9aa9; background: rgba(245, 84, 109, .08); border: 1px solid rgba(245, 84, 109, .25); border-radius: 9px; padding: 9px 12px; font-size: 13px; margin-top: 12px; }
 .note { color: #f5cf8a; background: rgba(243, 181, 74, .06); border: 1px solid rgba(243, 181, 74, .2); border-radius: 9px; padding: 10px 12px; font-size: 12.5px; }
 .ok-note { color: #9be9cf; background: rgba(47, 214, 161, .06); border: 1px solid rgba(47, 214, 161, .22); border-radius: 9px; padding: 12px 14px; font-size: 13px; }
 .keybox { font: 600 17px var(--mono); letter-spacing: .04em; color: #fff; word-break: break-all; margin: 6px 0 10px; }
 
-.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 30; background: var(--surface-3); border: 1px solid var(--border-strong); padding: 10px 16px; border-radius: 10px; box-shadow: 0 10px 40px rgba(0, 0, 0, .5); max-width: calc(100% - 32px); font-size: 13.5px; overflow-wrap: anywhere; }
+/* A box placed at left: 50% has only the right half of the screen to grow in: on a phone a long message (Sell now's
+   notes are some 170 characters) became a column half the screen wide and 40 % of its height. Now it is as wide as
+   its words up to 560 px, and on a phone it takes the screen's width, 16 px in from each side. */
+.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 30; background: var(--surface-3); border: 1px solid var(--border-strong); padding: 10px 16px; border-radius: 10px; box-shadow: 0 10px 40px rgba(0, 0, 0, .5); width: max-content; max-width: min(560px, calc(100vw - 32px)); font-size: 13.5px; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .toast { left: 16px; right: 16px; bottom: 16px; transform: none; width: auto; max-width: none; } }
 .toast.bad { border-color: rgba(245, 84, 109, .5); color: #ffb1bd; }
 
 .wallet { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }

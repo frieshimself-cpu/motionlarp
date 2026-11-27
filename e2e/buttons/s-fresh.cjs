@@ -64,7 +64,7 @@ async function freshUser(env) {
     book.eq('login: a good key typed in small letters with spaces around it gets in', r.status, 200);
     const d = await ui.readDash(page);
     book.eq('first visit: the account is named after the key, shown as text (its markup is not run)', { who: d.top.who, html: d.top.whoHtml.includes('<i>') }, { who: K.fresh.label, html: false });
-    book.eq('first visit: who is shown only where there is room for it', d.top.whoShown, !vp.mobile);
+    book.eq('first visit: who is shown only where there is room for it (above 760 px)', d.top.whoShown, vp.viewport.width > 760);
     book.eq('first visit: the site says it is offline and shows the fee', d.top.pills.map((p) => p.text), ['OFFLINE', 'Fee 1%']);
     book.eq('first visit: Dashboard is the open tab', d.top.nav, [{ text: 'Dashboard', on: true }, { text: 'History', on: false }]);
     book.eq('first visit: the four cards of an empty account', d.stats.map((s) => [s.label, s.value, s.foot]), [
@@ -370,7 +370,7 @@ async function freshUser(env) {
     const row = d.copies.find((c) => c.id === saved.id);
     book.eq(`${label}: its line on the dashboard (who, buy, minimum, fees, slippage)`, row.meta[0], `${X.short(leader)} · buy ${want.buySol} SOL when they buy ≥ ${want.minLeaderBuySol} SOL · ${X.feeText(want)} SOL · slippage ${want.slippagePct}%`);
     book.eq(`${label}: its sell rules as tags`, row.tags, X.sellTags(want.sell));
-    book.eq(`${label}: its counters start at nothing, switch on, marked TEST, links to the wallet`, { stats: row.meta[1], on: row.on, pill: row.pill, href: row.leaderHref, paused: row.paused }, { stats: '0 open · 0 closed · 0 SOL', on: true, pill: 'TEST', href: `https://solscan.io/account/${leader}`, paused: false });
+    book.eq(`${label}: its counters start at nothing, switch on, marked TEST, links to the wallet`, { stats: row.meta[1], on: row.on, pill: row.pill, href: row.leaderHref, paused: row.paused }, { stats: 'test: 0 open · 0 closed · 0 SOL', on: true, pill: 'TEST', href: `https://solscan.io/account/${leader}`, paused: false });
     await ui.openEdit(page, saved.id);
     const ed = await ui.readEditor(page);
     book.eq(`${label}: re-opened, the editor is in "edit" form`, { title: ed.title, submit: ed.submit, hasDelete: ed.hasDelete, tag: ed.leaderTag, presetBar: ed.presetBar }, { title: `Edit ${name}`, submit: 'Save changes', hasDelete: true, tag: 'INPUT', presetBar: null });
