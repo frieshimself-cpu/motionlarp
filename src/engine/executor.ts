@@ -34,8 +34,9 @@ export type FillResult =
       ok: true; signature: string; tokens: bigint; lamports: bigint; simulated: boolean; note?: string; feeLamports?: bigint;
       /** When the transaction was seen confirmed (the clock for timed sells starts here). */
       confirmedAt?: number;
-      /** Live fills return at confirmation with an estimate; this resolves later with the exact SOL read from the transaction. */
-      refine?: Promise<{ lamports: bigint } | null>;
+      /** Live fills return at confirmation with an estimate; this resolves later with the exact SOL read from the
+       *  transaction (and the exact coins, for a buy handed back before they could be read). */
+      refine?: Promise<{ lamports: bigint; tokens?: bigint } | null>;
     }
   /** `uncertain`: the transaction went out and its fate could not be read (the RPC did not answer): it may have landed. */
   | { ok: false; error: string; uncertain?: boolean };
@@ -84,6 +85,16 @@ export interface Executor {
 }
 
 const FETCH_FILL_TRIES = 6;
+/** How long a landed buy waits for its exact coin count before it is handed back with the quote: its timed exit
+ *  counts from the confirmation, so a slow or refused read must not hold it (it held it 15 s to a minute). */
+const BUY_READ_MS = 1_000;
+
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout')), ms);
+    p.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+  });
+}
 /**
  * Native-route refusals that mean "not a coin this route can trade": use Jupiter instead. Not 'migrating' (a curve
  * complete, its PumpSwap pool not there yet): nothing can trade such a coin for those seconds, Jupiter included, and
@@ -555,17 +566,19 @@ export class ChainExecutor implements Executor {
     const refine = exact.then((r) => (r ? { lamports: r.lamports } : null));
     const base = { ok: true as const, signature: sent.signature, simulated: false, feeLamports: platformFee, confirmedAt };
     if (side === 'sell') return { ...base, tokens: expectedTokens, lamports: expectedLamports, refine };
-    // A buy: the bag is what the wallet really received, read at once as the change in its balance.
+    // A buy: the bag is what the wallet really received, read at once as the change in its balance; else from the
+    // transaction itself. Neither may hold the position for more than a moment: then the quote stands in and the
+    // exact coins and SOL follow (refine).
+    const deadline = Date.now() + BUY_READ_MS;
     if (balanceBefore !== null) {
-      try {
-        const after = await this.tokenBalance(owner, req.mint);
-        if (after > balanceBefore) return { ...base, tokens: after - balanceBefore, lamports: expectedLamports, refine };
-      } catch {
-        // fall through to the transaction itself
-      }
+      const after = await within(this.tokenBalance(owner, req.mint), BUY_READ_MS).catch(() => null);
+      if (after !== null && after > balanceBefore) return { ...base, tokens: after - balanceBefore, lamports: expectedLamports, refine };
     }
-    const r = await exact;
-    return { ...base, tokens: r?.tokens ?? expectedTokens, lamports: r?.lamports ?? expectedLamports, ...(r ? {} : { note: 'landed; fill estimated from the quote' }) };
+    // (the transaction read started at the confirmation: it shares the same moment)
+    const r = await within(exact, Math.max(0, deadline - Date.now())).catch(() => undefined);
+    if (r) return { ...base, tokens: r.tokens, lamports: r.lamports };
+    if (r === null) return { ...base, tokens: expectedTokens, lamports: expectedLamports, note: 'landed; fill estimated from the quote' };
+    return { ...base, tokens: expectedTokens, lamports: expectedLamports, refine: exact.then((x) => (x ? { lamports: x.lamports, tokens: x.tokens } : null)), note: 'landed; coins estimated from the quote until the exact figure is read' };
   }
 
   /** What our confirmed transaction really did: tokens moved and SOL spent / received, fees included. */

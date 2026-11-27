@@ -58,6 +58,9 @@ const RETRY_MS = [250, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const MAX_SELL_TRIES = RETRY_MS.length + 1;
 /** Dead coin needs a recent successful quote: an RPC outage is not "no trades". */
 const QUOTE_FRESH_MS = 15_000;
+/** A position no rule needs a price for (no stop loss, no dead coin) is priced this often: only the value shown uses
+ *  it, and every price check costs requests the trades need. */
+const IDLE_PRICE_MS = 30_000;
 
 export function shortMint(mint: string): string {
   return `${mint.slice(0, 4)}…${mint.slice(-4)}`;
@@ -237,6 +240,12 @@ export class Engine {
         if (!exact) return;
         store.updateFillLamports(fillId, exact.lamports);
         store.updatePosition(id, { costLamports: exact.lamports });
+        // The buy was handed back with the quote's coin count (the exact one could not be read at once): corrected.
+        const now = store.position(id);
+        if (exact.tokens !== undefined && exact.tokens !== fill.tokens && now && now.status === 'open') {
+          const held = now.tokensHeld + (exact.tokens - fill.tokens);
+          store.updatePosition(id, { tokensBought: exact.tokens, tokensHeld: held > 0n ? held : 0n });
+        }
       }).catch(() => undefined);
       store.addEvent({
         userId: copy.userId, copyId: copy.id, kind: 'buy',
@@ -270,7 +279,9 @@ export class Engine {
   private async tickOne(p: Position): Promise<void> {
     const now = this.now();
     this.fireDue(p, now);
-    if (this.quoting.has(p.id) || now - (this.lastQuoteAt.get(p.id) ?? 0) < this.deps.priceMs) return;
+    const needsPrice = p.sell.stopLoss.length > 0 || p.sell.deadCoin.enabled;
+    const every = needsPrice ? this.deps.priceMs : Math.max(this.deps.priceMs, IDLE_PRICE_MS);
+    if (this.quoting.has(p.id) || now - (this.lastQuoteAt.get(p.id) ?? 0) < every) return;
     this.lastQuoteAt.set(p.id, now);
     this.quoting.add(p.id);
     try {
@@ -380,6 +391,10 @@ export class Engine {
           // The last step: whatever the wallet holds now (live), in-flight earlier steps included, as specified.
           // In test mode the books stand in for the wallet, minus what overlapping steps are already selling.
           tokens = live ? await this.walletTokens(owner, p.mint) : p.tokensHeld - this.reservedExcept(p.id, key);
+          // The wallet read can take a moment (a "zero" is read again): if the position was closed meanwhile, what the
+          // wallet holds now may be the next position's coins. Nothing is sold for this one then.
+          const still = store.position(p.id);
+          if (!still || still.status !== 'open') return;
           if (tokens <= 0n) {
             if (!live && this.reservedExcept(p.id, key) > 0n) { await pause(20); continue; } // overlapping steps finish first
             const fresh = store.position(p.id);
@@ -415,13 +430,14 @@ export class Engine {
         if (fill.ok) {
           // The wallet's balance after the last step tells whether the bag is really empty (a failed read keeps our books).
           const after = live && order.everything ? await executor.tokenBalance(owner, p.mint).catch(() => null) : null;
-          // The last step stays owed (not done) when it sold only part (the market could not pay for all of it), or
-          // while another step is still out: if that one fails for good, the last step sells what it left.
+          // The last step is done only when the position is empty: it sold only part (the market could not pay for
+          // all of it), or another step was out when it sold and has since failed or sold only part of its share,
+          // and the last step sells what is left (at the slow pace when the market was short, the curve needs
+          // buyers to fill up again).
           const partial = !!order.everything && fill.tokens < tokens;
-          const othersOut = !!order.everything && this.reservedExcept(p.id, key) > 0n;
-          this.settleSell(p.id, order, fill, sentAt, after, partial || othersOut, partial);
+          this.settleSell(p.id, order, fill, sentAt, after, !!order.everything, partial);
           this.solCache.delete(owner); // the wallet's SOL just changed
-          const now = partial || othersOut ? store.position(p.id) : null;
+          const now = order.everything ? store.position(p.id) : null;
           if (!now || now.status !== 'open' || now.tokensHeld <= 0n) return;
           await pause(partial ? this.deps.slowRetryMs ?? SLOW_RETRY_MS : pauses[0] ?? 0);
           failures = 0;

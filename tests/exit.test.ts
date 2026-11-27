@@ -767,3 +767,33 @@ describe('a full exit leaves nothing behind when an overlapping sell fills only 
     expect(open()).toHaveLength(0);
   });
 });
+
+describe('more overlaps found by the timing fuzzer', () => {
+  it('live: the last step does not sell the coins of the next position when its own closed while it was reading the wallet', async () => {
+    ex.live = true;
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: false, mode: 'same' }, timedOf: 'bag', timed: [{ afterSec: 2, percent: 100 }], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } } }));
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    const p1 = open()[0]!.id;
+    const start = ex.balanceReads;
+    ex.balanceHook = (n) => {
+      if (n === start + 1) ex.held = 0n; // a node one block behind says "nothing": read again
+      if (n === start + 2) { // meanwhile the position was closed by another sell and the next buy of the coin landed
+        store.updatePosition(p1, { status: 'closed', tokensHeld: 0n, closedAt: clock });
+        ex.held = 1_000_000n;
+      }
+    };
+    await at(2);
+    expect(ex.sells).toHaveLength(0); // the new coins were not sold under the old position
+  });
+
+  it('test mode: an earlier step between its retries when the last step sells, which then sells only part, leaves nothing behind', async () => {
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: false, mode: 'same' }, timedOf: 'bag', timed: [{ afterSec: 2, percent: 90 }, { afterSec: 3, percent: 100 }], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } } }));
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let firstTries = 0;
+    ex.plan = (_n, req) => (req.closeIfEmpty || ++firstTries > 2 ? 'ok' : 'fail'); // the 90 % step fails twice
+    ex.sellCap = (_n, req) => (!req.closeIfEmpty && firstTries > 2 ? req.tokens / 10n : null); // then sells a tenth
+    clock = 1_003_000; await engine.tick(); await engine.idle(); // both due together
+    expect(ex.sells.reduce((a, s) => a + s.tokens, 0n)).toBe(BAG);
+    expect(open()).toHaveLength(0);
+  });
+});
