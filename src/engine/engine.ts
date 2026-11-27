@@ -169,7 +169,10 @@ export class Engine {
     const wallet = this.deps.walletFor(copy.userId);
     if (!wallet) return skip('no wallet imported yet');
 
-    const id = store.insertPosition({ userId: copy.userId, copyId: copy.id, mint: t.mint, mode: 'live', leaderSig: t.signature, sell: s.sell, copyName: s.name, leader: t.leader, now: this.now(), decimals: t.decimals ?? 6 });
+    // Written down as what it will really be: with Live trading off it is a test buy, so a crash in the middle of it
+    // can never be restored as a real position (and then sell coins the wallet already held, for real).
+    const mode = this.deps.executor.isLive({ live: true }) ? 'live' : 'paper';
+    const id = store.insertPosition({ userId: copy.userId, copyId: copy.id, mint: t.mint, mode, leaderSig: t.signature, sell: s.sell, copyName: s.name, leader: t.leader, now: this.now(), decimals: t.decimals ?? 6 });
     return this.enqueue(id, () => this.buy(id, copy, wallet, t));
   }
 
@@ -636,8 +639,14 @@ export class Engine {
         store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
         continue;
       }
+      // A buy's signature is written down before it is sent: a live buy without one was never sent. It failed, and
+      // the wallet's own coins of that mint (bought by hand, or by another tool) are never taken for it.
+      if (!p.buySig) {
+        store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
+        continue;
+      }
       try {
-        if (p.buySig && executor.settleBuy) {
+        if (executor.settleBuy) {
           // Its own transaction says what happened: exact coins and cost, or that it failed.
           const r = await executor.settleBuy(p.buySig, wallet.publicKey.toBase58(), p.mint);
           if (r.state === 'landed') {

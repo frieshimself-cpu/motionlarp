@@ -373,7 +373,7 @@ describe('found by the review of 27 Nov 2026 (reading the wallet, overlapping se
   it('live: a buy whose fate could not be read is not thrown away: it waits and is settled from the wallet', async () => {
     ex.live = true;
     scharo();
-    ex.buy = async () => { ex.held += 500_000n; return { ok: false, error: 'sent, outcome unknown: confirmation unknown (RPC unreachable)', uncertain: true }; };
+    ex.buy = async (req) => { req.onSigned?.('SIGU'); ex.held += 500_000n; return { ok: false, error: 'sent, outcome unknown: confirmation unknown (RPC unreachable)', uncertain: true }; };
     await engine.onLeaderTrade(buyTrade()); await engine.idle();
     expect(store.openingPositions()).toHaveLength(1);
     expect(feed().some((f) => /not known yet/.test(f))).toBe(true);
@@ -537,6 +537,39 @@ describe('a sell of everything that the market could pay only part of (a mayhem 
     expect(feed().some((l) => /could pay for only part/.test(l))).toBe(true);
     clock += 60_000; await engine.tick(); await engine.idle();
     expect(ex.sells.map((s) => s.tokens)).toEqual([600_000n, 400_000n]);
+    expect(open()).toHaveLength(0);
+  });
+});
+
+describe('a crash in the middle of a buy (found by reading Velo\'s history)', () => {
+  it('with Live trading off the buy is written down as a test buy: after a restart it never turns into real sells of coins the wallet already held', async () => {
+    ex.live = false;
+    scharo();
+    ex.buy = () => new Promise(() => undefined); // the server dies while the test buy is in flight
+    void engine.onLeaderTrade(buyTrade());
+    await sleep(5);
+    expect(store.openingPositions()[0]).toMatchObject({ mode: 'paper' });
+    ex.live = true; // the owner switches Live on before the restart
+    ex.held = 5_000_000n; // the user's own coins of that mint
+    const after = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1], slowRetryMs: 1, zeroRecheckMs: 1 });
+    await after.restore();
+    for (const sec of [2, 4, 6]) { clock = 1_000_000 + sec * 1000; await after.tick(); await after.idle(); }
+    expect(store.openingPositions()).toHaveLength(0);
+    expect(open()).toHaveLength(0);
+    expect(ex.sells).toHaveLength(0);
+  });
+
+  it('a live buy that was never signed (no signature written down) was never sent: it fails, the wallet\'s own coins are not taken for it', async () => {
+    ex.live = true;
+    scharo();
+    ex.buy = () => new Promise(() => undefined); // dies before signing
+    void engine.onLeaderTrade(buyTrade());
+    await sleep(5);
+    expect(store.openingPositions()[0]).toMatchObject({ mode: 'live', buySig: null });
+    ex.held = 5_000_000n;
+    const after = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1], slowRetryMs: 1, zeroRecheckMs: 1 });
+    await after.restore();
+    expect(store.openingPositions()).toHaveLength(0);
     expect(open()).toHaveLength(0);
   });
 });

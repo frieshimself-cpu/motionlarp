@@ -180,10 +180,13 @@ describe('review findings', () => {
     const s = store.copy(copy)!.settings;
     const paper = store.insertPosition({ userId: uid, copyId: copy, mint: 'Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA', mode: 'paper', leaderSig: 'a', sell: s.sell, copyName: 'x', leader: L1, now: 1 });
     const live = store.insertPosition({ userId: uid, copyId: copy, mint: MINT, mode: 'live', leaderSig: 'b', sell: s.sell, copyName: 'x', leader: L1, now: 1 });
+    store.updatePosition(live, { buySig: 'SIGNED-AND-SENT' }); // it was signed (and so maybe sent)
+    const unsent = store.insertPosition({ userId: uid, copyId: copy, mint: 'So11111111111111111111111111111111111111112', mode: 'live', leaderSig: 'c', sell: s.sell, copyName: 'x', leader: L1, now: 1 });
     ex.held = 77_000n;
     await mk().restore();
     expect(store.position(paper)!.status).toBe('failed');
     expect(store.position(live)).toMatchObject({ status: 'open', tokensHeld: 77_000n, costLamports: SOL / 10n });
+    expect(store.position(unsent)!.status).toBe('failed'); // never signed, never sent: the wallet's coins are not taken for it
   });
 
   it('#5 reconcile: a followed wallet that holds none of our coin any more → sell all; unknown balance → nothing', async () => {
