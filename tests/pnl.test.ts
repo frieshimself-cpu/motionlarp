@@ -144,3 +144,90 @@ describe('days across a change of the clocks', () => {
     expect(liveDays(pnlSummary(store, u, 60, NOV27))).toEqual(['2026-10-18']);
   });
 });
+
+// Third review (finding N4): what only the reviewers' own probes covered. Zones whose offset is not a whole hour (:45,
+// :30, and a change of the clocks by 30 minutes), the exact second of a change (and of the local midnights around it,
+// where a day is 23 or 25 hours long, or starts at 01:00), and the offsets cache reaching back for an account older than
+// the one that asked first. Each trade's day is checked against the date Intl itself prints for its closing time.
+describe('days in zones of quarter and half hours, at the exact second of a change, and for an older account', () => {
+  const S = 1000;
+  const localDate = (zone: string, t: number) => new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t));
+  /** Trades closed at `times`, viewed from `zone` at `now`: the days listed, and the days Intl puts them on. */
+  const check = (zone: string, times: number[], now: number) => {
+    const { store, u, close } = setup();
+    for (const t of times) close('live', t, SOL, SOL + 1n);
+    const want = new Map<string, number>();
+    for (const t of times) want.set(localDate(zone, t), (want.get(localDate(zone, t)) ?? 0) + 1);
+    const p = pnlSummary(store, u, 0, now, zone);
+    expect(p.days.map((d) => [d.date, d.trades]), zone).toEqual([...want].sort((a, b) => (a[0] < b[0] ? 1 : -1)));
+    return { p, want };
+  };
+
+  it('Kathmandu (UTC+5:45): 18:14:59 UTC is 23:59:59 on the 26th there, 18:15:00 UTC is already the 27th', () => {
+    const before = Date.UTC(2026, 10, 26, 18, 14, 59);
+    const { p } = check('Asia/Kathmandu', [before, before + S, before - 6 * 3_600_000, before + 6 * 3_600_000], Date.UTC(2026, 10, 27, 12, 0));
+    expect(p.days.map((d) => d.date)).toEqual(['2026-11-27', '2026-11-26']);
+    expect(p.live.todaySol).toBe(2e-9); // the two of the 27th
+  });
+
+  it('Chatham (UTC+12:45, +13:45 in summer) and St John\'s (UTC−3:30, −2:30 in summer), around each change of 2026 and its midnights', () => {
+    for (const [zone, changes] of [['Pacific/Chatham', [Date.UTC(2026, 3, 4, 14), Date.UTC(2026, 8, 26, 14)]], ['America/St_Johns', [Date.UTC(2026, 2, 8, 5, 30), Date.UTC(2026, 10, 1, 4, 30)]]] as const) {
+      const times: number[] = [];
+      for (const c of changes) for (const d of [-25, -24, -23, -13, -12, -11, -1, 0, 1, 11, 12, 13, 23, 24, 25]) for (const s of [-1, 0, 1]) times.push(c + d * 3_600_000 + s * S);
+      check(zone, times, Date.UTC(2026, 10, 27, 12, 0));
+    }
+  });
+
+  it('Lord Howe Island (clocks move by 30 minutes): the second before and the second of each change, and the midnights next to it', () => {
+    const zone = 'Australia/Lord_Howe';
+    // 4 Apr 15:00 UTC: 02:00 at +11 becomes 01:30 at +10:30. 3 Oct 15:30 UTC: 02:00 at +10:30 becomes 02:30 at +11.
+    const times: number[] = [];
+    for (const c of [Date.UTC(2026, 3, 4, 15, 0), Date.UTC(2026, 9, 3, 15, 30)]) {
+      for (const d of [-1, 0, 1]) times.push(c + d * S);
+      // The local midnights before and after, each by the offset it had (13:00 or 13:30 UTC), to the second.
+      for (const m of [c - 2 * 3_600_000, c - 2.5 * 3_600_000, c + 22 * 3_600_000, c + 21.5 * 3_600_000]) for (const d of [-1, 0, 1]) times.push(m + d * S);
+    }
+    const { want } = check(zone, times, Date.UTC(2026, 10, 27, 12, 0));
+    expect(want.size).toBeGreaterThanOrEqual(5);
+  });
+
+  it('the exact second of a change: Berlin (the hour from 02:00 comes twice) and Santiago (the change is at midnight)', () => {
+    // Berlin, 25 Oct 01:00 UTC: 03:00 summer time becomes 02:00 winter time; 23:00 UTC that evening is midnight.
+    const berlin = Date.UTC(2026, 9, 25, 1, 0);
+    const { p: pb } = check('Europe/Berlin', [berlin - S, berlin, berlin + S, Date.UTC(2026, 9, 24, 21, 59, 59), Date.UTC(2026, 9, 24, 22), Date.UTC(2026, 9, 25, 22, 59, 59), Date.UTC(2026, 9, 25, 23)], Date.UTC(2026, 9, 25, 12));
+    expect(pb.days.map((d) => [d.date, d.trades])).toEqual([['2026-10-26', 1], ['2026-10-25', 5], ['2026-10-24', 1]]);
+    // Santiago, 5 Apr 03:00 UTC: midnight at −3 becomes 23:00 of the 4th at −4 (the hour before midnight comes twice);
+    // 6 Sep 04:00 UTC: midnight at −4 becomes 01:00 of the 6th at −3 (the 6th starts at 01:00).
+    const apr = Date.UTC(2026, 3, 5, 3, 0);
+    const sep = Date.UTC(2026, 8, 6, 4, 0);
+    const { p: ps } = check('America/Santiago', [apr - S, apr, apr + 3_600_000 - S, apr + 3_600_000, sep - S, sep, sep + S], Date.UTC(2026, 10, 27, 12, 0));
+    expect(ps.days.map((d) => [d.date, d.trades])).toEqual([['2026-09-06', 2], ['2026-09-05', 1], ['2026-04-05', 1], ['2026-04-04', 3]]);
+    // "Today", asked at the second before and the second of the change, by a page whose offset is stale (0): the zone
+    // decides, at the second (the trade of 23:59:59 on the 5th is today until midnight, which is 01:00 on the 6th).
+    const { store, u, close } = setup();
+    close('live', sep - S, SOL, 2n * SOL);
+    expect(pnlSummary(store, u, 0, sep - S, 'America/Santiago').live.todaySol).toBe(1);
+    expect(pnlSummary(store, u, 0, sep, 'America/Santiago').live.todaySol).toBe(0);
+  });
+
+  it('an account older than the one whose page asked first: the offsets are worked out back to its first trade', () => {
+    const zone = 'Europe/Paris'; // asked by no other test here: the cache starts with the newer account
+    const { store, close } = setup();
+    const newer = store.createUser('newer', 'x');
+    const newerCopy = store.createCopy(newer, validateSettings({ leader: LEADER, buySol: 0.1 }));
+    const closeFor = (uid: number, copy: number, t: number) => {
+      const id = store.insertPosition({ userId: uid, copyId: copy, mint: `m${Math.random()}`, mode: 'live', leaderSig: 'x', sell: validateSettings({ leader: LEADER, buySol: 0.1 }).sell, copyName: 'c', leader: LEADER, now: t - 60_000 });
+      store.updatePosition(id, { mode: 'live', status: 'closed', costLamports: SOL, proceedsLamports: 2n * SOL, closedAt: t });
+    };
+    closeFor(newer, newerCopy, Date.UTC(2026, 10, 20, 23, 30)); // 21 Nov 00:30 in Paris (winter time)
+    const now = Date.UTC(2026, 10, 27, 12, 0);
+    expect(pnlSummary(store, newer, 60, now, zone).days.map((d) => d.date)).toEqual(['2026-11-21']);
+    // The older account (the store's first user), with trades in summer time and before the change of March.
+    close('live', Date.UTC(2026, 6, 14, 22, 30), SOL, 2n * SOL); // 15 Jul 00:30 (summer time)
+    close('live', Date.UTC(2026, 2, 28, 23, 30), SOL, 2n * SOL); // 29 Mar 00:30, before the change at 01:00 UTC
+    close('live', Date.UTC(2025, 9, 25, 22, 30), SOL, 2n * SOL); // 26 Oct 2025 00:30 (summer time, a year before)
+    const older = pnlSummary(store, 1, 60, now, zone);
+    expect(older.days.map((d) => d.date)).toEqual(['2026-07-15', '2026-03-29', '2025-10-26']);
+    expect(pnlSummary(store, newer, 60, now, zone).days.map((d) => d.date)).toEqual(['2026-11-21']);
+  });
+});

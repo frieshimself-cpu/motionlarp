@@ -14,44 +14,101 @@ const sol = (lamports: bigint) => Number((Number(lamports) / 1e9).toFixed(9));
 // time had, never by today's: with today's, a viewer in Berlin put the trades closed between 00:00 and 01:00 on a
 // summer night on the day before, all winter long.
 
-/** One clock per time zone, by its IANA name (they are slow to make: made once). */
-const clocks = new Map<string, Intl.DateTimeFormat>();
+/** A Map that keeps its `max` most recently used entries and forgets the rest. */
+class Recent<K, V> {
+  private readonly m = new Map<K, V>();
+  constructor(private readonly max: number) {}
+  get(k: K): V | undefined {
+    const v = this.m.get(k);
+    if (v !== undefined) {
+      this.m.delete(k);
+      this.m.set(k, v);
+    }
+    return v;
+  }
+  set(k: K, v: V): void {
+    this.m.delete(k);
+    this.m.set(k, v);
+    if (this.m.size > this.max) this.m.delete(this.m.keys().next().value as K);
+  }
+  get size(): number { return this.m.size; }
+}
 
-/** The page's time zone (an IANA name such as "Europe/Berlin") when this machine knows it, else null. */
-export function knownZone(zone: unknown): string | null {
+// The caches below are shared by every page that asks, for as long as the server runs. They were keyed by the text the
+// page sent: Intl takes a zone's name in any letter case and under its other names ("europe/BERLIN", "CET", "US/Pacific"),
+// so a logged-in page could add a clock (about 34 kB the garbage collector barely sees) and a fresh pass over its whole
+// history with every new spelling, and the server kept some 150 MB after 15,000 of them. Now each spelling is first
+// turned into the zone's own name, which is what the clocks and offsets are kept under, and each cache holds a bounded
+// number of the most recently used entries.
+
+/** A spelling, in lower case (a zone's name is the same in any case), → the zone's own name, as Intl gives it. */
+const names = new Recent<string, string>(1024);
+/** One clock per zone, by its own name (they are slow to make). */
+const clocks = new Recent<string, Intl.DateTimeFormat>(64);
+
+/** The zone's own name for a spelling the page sent ("europe/berlin", "US/Pacific"), or null for one unknown here. */
+function canonicalZone(zone: unknown): string | null {
   if (typeof zone !== 'string' || zone.length > 64 || !/^[A-Za-z][A-Za-z0-9_+\-/]*$/.test(zone)) return null;
-  if (clocks.has(zone)) return zone;
-  let clock: Intl.DateTimeFormat;
+  const key = zone.toLowerCase();
+  const hit = names.get(key);
+  if (hit !== undefined) return hit;
+  let name: string;
   try {
-    clock = new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' });
+    name = new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone;
   } catch {
     return null;
   }
-  if (clocks.size >= 1000) clocks.clear();
-  clocks.set(zone, clock);
-  return zone;
+  names.set(key, name);
+  return name;
 }
 
-/** How far ahead of UTC the zone's clocks were at `t` (ms, to the second; 0 for a zone this machine does not know). */
-export function zoneOffsetMs(zone: string, t: number): number {
-  const clock = knownZone(zone) === null ? null : clocks.get(zone);
-  if (!clock) return 0;
+/** The page's time zone (an IANA name such as "Europe/Berlin", in any case or under another of its names) when this
+ *  machine knows it, else null. */
+export function knownZone(zone: unknown): string | null {
+  return canonicalZone(zone) === null ? null : (zone as string);
+}
+
+/** The clock of a zone by its own name. */
+function clockOf(name: string): Intl.DateTimeFormat {
+  let clock = clocks.get(name);
+  if (!clock) {
+    clock = new Intl.DateTimeFormat('en-US', { timeZone: name, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' });
+    clocks.set(name, clock);
+  }
+  return clock;
+}
+
+/** How far ahead of UTC a clock was at `t` (ms, to the second). */
+function offsetBy(clock: Intl.DateTimeFormat, t: number): number {
   const at = Math.floor(t / 1000) * 1000;
   const parts = clock.formatToParts(new Date(at));
   const v = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((p) => p.type === type)?.value ?? 0);
   return Date.UTC(v('year'), v('month') - 1, v('day'), v('hour'), v('minute'), v('second')) - at;
 }
 
+/** How far ahead of UTC the zone's clocks were at `t` (ms, to the second; 0 for a zone this machine does not know). */
+export function zoneOffsetMs(zone: string, t: number): number {
+  const name = canonicalZone(zone);
+  return name === null ? 0 : offsetBy(clockOf(name), t);
+}
+
 export interface OffsetSpan { from: number; offsetMs: number }
 
 /** The offsets the zone's clocks had between `from` and `to`, each from the second it began, oldest first. */
 export function zoneOffsets(zone: string, from: number, to: number): OffsetSpan[] {
-  let cur = zoneOffsetMs(zone, from);
+  const name = canonicalZone(zone);
+  return offsetsBetween(name === null ? null : clockOf(name), from, to);
+}
+
+/** The offsets a clock had between `from` and `to` (none known: 0 throughout). */
+function offsetsBetween(clock: Intl.DateTimeFormat | null, from: number, to: number): OffsetSpan[] {
+  const offset = (t: number) => (clock ? offsetBy(clock, t) : 0);
+  let cur = offset(from);
   const out: OffsetSpan[] = [{ from, offsetMs: cur }];
   // Clocks change a few times a year at most: look once a day, and find the very second of each change.
   for (let t = from; t < to; ) {
     const next = Math.min(t + DAY, to);
-    if (zoneOffsetMs(zone, next) === cur) {
+    if (offset(next) === cur) {
       t = next;
       continue;
     }
@@ -59,28 +116,34 @@ export function zoneOffsets(zone: string, from: number, to: number): OffsetSpan[
     let hi = Math.floor(next / 1000); // a second with a new one
     while (hi - lo > 1) {
       const mid = Math.floor((lo + hi) / 2);
-      if (zoneOffsetMs(zone, mid * 1000) === cur) lo = mid;
+      if (offset(mid * 1000) === cur) lo = mid;
       else hi = mid;
     }
-    cur = zoneOffsetMs(zone, hi * 1000);
+    cur = offset(hi * 1000);
     out.push({ from: hi * 1000, offsetMs: cur });
     t = hi * 1000;
   }
   return out;
 }
 
-/** What has been worked out per zone, and for which stretch of time (the past of the clocks does not change). */
-const known = new Map<string, { from: number; to: number; spans: OffsetSpan[] }>();
+/** What has been worked out per zone (by its own name), and for which stretch of time (the past of the clocks does not
+ *  change). */
+const known = new Recent<string, { from: number; to: number; spans: OffsetSpan[] }>(64);
 
-/** The zone's offsets over the closing times from `first` to `last`: only the stretches that hold any of them. */
+/** How many entries the zone caches hold (the tests check that they stay bounded). */
+export function zoneCacheSizes(): { names: number; clocks: number; offsets: number } {
+  return { names: names.size, clocks: clocks.size, offsets: known.size };
+}
+
+/** The zone's offsets over the closing times from `first` to `last`: only the stretches that hold any of them.
+ *  `zone`: the zone's own name. */
 function offsetsOver(zone: string, first: number, last: number): OffsetSpan[] {
   let k = known.get(zone);
   if (!k || first < k.from || last > k.to) {
     // A week ahead: the page asks every few seconds, and this is worked out again once a week, not each time.
     const from = Math.min(first, k?.from ?? first);
     const to = Math.max(last, k?.to ?? last) + 7 * DAY;
-    k = { from, to, spans: zoneOffsets(zone, from, to) };
-    if (known.size >= 1000) known.clear();
+    k = { from, to, spans: offsetsBetween(clockOf(zone), from, to) };
     known.set(zone, k);
   }
   const s = k.spans;
@@ -97,9 +160,9 @@ function offsetsOver(zone: string, first: number, last: number): OffsetSpan[] {
  * this machine does not know, or none, falls back to tzMinutes for every trade).
  */
 export function pnlSummary(store: Store, userId: number, tzMinutes: number, now = Date.now(), zone?: string | null): PnlSummary {
-  const z = knownZone(zone);
+  const z = canonicalZone(zone);
   const off = Math.max(-840, Math.min(840, Math.round(tzMinutes) || 0)) * 60_000;
-  const today = Math.floor((now + (z ? zoneOffsetMs(z, now) : off)) / DAY);
+  const today = Math.floor((now + (z ? offsetBy(clockOf(z), now) : off)) / DAY);
   const rows = z ? store.pnlByLocalDay(userId, (first, last) => offsetsOver(z, first, last)) : store.pnlByDay(userId, off);
   const empty = (): PnlBucket => ({ todaySol: 0, weekSol: 0, allSol: 0, trades: 0, wins: 0 });
   const lamports = { live: { today: 0n, week: 0n, all: 0n }, test: { today: 0n, week: 0n, all: 0n } };

@@ -602,6 +602,17 @@ export class Store {
        WHERE f.user_id = ? AND p.status = 'closed' AND p.mode = ?`, userId, mode);
     return { trades, wins, pnlLamports, feesLamports: big(fees?.fees ?? 0), byCopy };
   }
+  /**
+   * Every closed position of a user per copy and mode ('live' or 'paper'): how many, and their profit (fees left out),
+   * in one pass. The dashboard's copy lines, asked every 3 s by each open page, on the thread that copies the trades:
+   * they took closedTotals three times (each with a pass over the fills for fees they did not show).
+   */
+  closedPerCopy(userId: number): { copyId: number; mode: 'live' | 'paper'; closed: number; pnlLamports: bigint }[] {
+    return this.all(
+      `SELECT copy_id, mode, COUNT(*) AS n, SUM(proceeds_lamports - cost_lamports) AS pnl
+       FROM positions WHERE user_id = ? AND status = 'closed' AND mode IN ('live', 'paper') GROUP BY copy_id, mode`, userId,
+    ).map((r) => ({ copyId: num(r.copy_id), mode: r.mode === 'live' ? 'live' as const : 'paper' as const, closed: num(r.n), pnlLamports: big(r.pnl) }));
+  }
 
   /** Closed positions per local day (offset in ms east of UTC) and mode, newest day first. */
   pnlByDay(userId: number, offsetMs: number): { day: number; mode: string; trades: number; wins: number; pnlLamports: bigint }[] {
