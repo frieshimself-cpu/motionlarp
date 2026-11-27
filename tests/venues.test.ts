@@ -154,3 +154,10 @@ describe('a second RPC link takes over when the main one fails', () => {
     expect((await boundedFetch('https://main.example/', { method: 'POST', body: '{}' })).status).toBe(503);
   });
 });
+
+describe('a coin Jupiter will not trade', () => {
+  it('reads in plain words (no liquidity, flagged, or not listed yet)', () => {
+    expect(friendlyError('jupiter: The token X is not tradable')).toMatch(/Jupiter will not trade this coin/);
+    expect(friendlyError('jupiter: No routes found')).toMatch(/no market for this coin yet/);
+  });
+});
