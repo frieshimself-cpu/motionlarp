@@ -134,16 +134,18 @@ function sameOwed(o: OwedSell, order: SellOrder): boolean {
 const NOT_FOUND_MARGIN_BLOCKS = 10;
 
 /**
- * A sell not found that never can land: the chain was past the last block it could land in when its height was read
- * (one past its blockhash's last valid height), with a margin, and the status came from a node at least as far along
- * as that read (one behind may not have seen a sale that landed in its last blocks yet: it was dropped, never booked,
- * and its rule sold again). Well past it (WELL_PAST_BLOCKS), whatever node said it: without the slots to tell, and when
- * the status node is always some slots behind (it was never believed, and the position waited for the 180 s fallback).
+ * A trade not found that never can land. The chain's tip (its height and that block's slot) was read before the status:
+ * the last block the trade could land in (one past its blockhash's last valid height) then had a slot no later than the
+ * tip's slot less the blocks since (a slot per block at least). A status that tells how far along its node was is
+ * believed once that node has reached that slot, and the chain is a margin past the block (a node on a short fork of its
+ * own): a node behind it may not have seen a trade that landed in its last blocks (dropped, never booked, its rule sold
+ * again; a buy that landed marked failed, its coins never sold), however far past the chain is. Without the slots to
+ * tell, it is believed well past it (WELL_PAST_BLOCKS), whatever node said it.
  */
 function neverLands(lastValid: number, tip: { height: number; slot?: number }, statusSlot: number | undefined): boolean {
   const last = lastValid + LAST_BLOCK_PAST_VALID;
-  if (tip.height > last + WELL_PAST_BLOCKS) return true;
-  return tip.slot !== undefined && statusSlot !== undefined && tip.height > last + NOT_FOUND_MARGIN_BLOCKS && statusSlot >= tip.slot;
+  if (tip.slot !== undefined && statusSlot !== undefined) return tip.height > last + NOT_FOUND_MARGIN_BLOCKS && statusSlot >= tip.slot - (tip.height - last);
+  return tip.height > last + WELL_PAST_BLOCKS;
 }
 
 /** P % of `held`, exact for 100 %; never more than held. */
@@ -441,7 +443,7 @@ export class Engine {
       if (!fill.ok && fill.uncertain) {
         // It went out and nobody could tell us what became of it. Not failed, not bought: the position stays
         // "opening" (so the coin is not bought twice) and restore() settles it from the wallet within a minute.
-        this.quietly('a feed line', () => store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label}: sent, but its outcome is not known yet (the connection did not answer). It is settled from the wallet within a minute.`, mint: t.mint, signature: t.signature }));
+        this.quietly('a feed line', () => store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label}: sent, but its outcome is not known yet (the connection did not answer). It is settled from its own transaction as soon as the chain shows whether it landed (normally within a minute).`, mint: t.mint, signature: t.signature }));
         return;
       }
       if (!fill.ok) {
@@ -577,6 +579,13 @@ export class Engine {
    * first: landed → its exact numbers; failed, or still not found once it can no longer land → a normal failure
    * (retried); no answer → asked again, more slowly, until there is one (its coins stay reserved meanwhile).
    */
+  /** A sell whose outcome nobody could tell: said in the feed while it is read from its own transaction (the position's
+   *  other sells wait for it, up to ten minutes should the chain not move). */
+  private unknownOutcomeLine(p: Position, order: SellOrder, label: string): void {
+    const why = REASON_TEXT[order.reason](order, p);
+    this.quietly('a feed line', () => this.deps.store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `Sell of ${label} (${why}): sent, but its outcome is not known yet (the connection did not answer). It is read from its own transaction until the chain shows whether it landed (normally within a minute or two, ten minutes at most); if it did not, it is tried again.`, mint: p.mint }));
+  }
+
   private async settleUnknownSell(signature: string | null, owner: string, mint: string, sentAt: number, error: string, signed?: SignedInfo): Promise<Awaited<ReturnType<Executor['sell']>>> {
     const { executor } = this.deps;
     if (!signature || !executor.settleSell) return { ok: false, error };
@@ -695,7 +704,10 @@ export class Engine {
             exit: live, checkFirst: failures > 0, closeIfEmpty: !!order.everything, onSigned: (sig, info) => { signature = sig; signed = info; this.writeSellOut(p, order, asked, sig, sentAt, info); },
           });
           // Nobody could tell us whether it landed: settled from its own transaction first, its coins still reserved.
-          if (!fill.ok && fill.uncertain) fill = await this.settleUnknownSell(signature, owner, p.mint, sentAt, fill.error, signed);
+          if (!fill.ok && fill.uncertain) {
+            this.unknownOutcomeLine(p, order, label);
+            fill = await this.settleUnknownSell(signature, owner, p.mint, sentAt, fill.error, signed);
+          }
           if (fill.ok) {
             // Booked while its coins are still reserved (another sell's booking must not take them off meanwhile).
             // The wallet's balance after the last step tells whether the bag is really empty (a failed read keeps
@@ -1100,7 +1112,10 @@ export class Engine {
       try {
         fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0, exit: live, checkFirst, closeIfEmpty: order.percent >= 100 && inFlight === 0n, onSigned: (sig, info) => { signature = sig; signed = info; this.writeSellOut(p, order, tokens, sig, sentAt, info); } });
         // Nobody could tell us whether it landed: settled from its own transaction first, its coins still reserved.
-        if (!fill.ok && fill.uncertain) fill = await this.settleUnknownSell(signature, owner, p.mint, sentAt, fill.error, signed);
+        if (!fill.ok && fill.uncertain) {
+          this.unknownOutcomeLine(p, order, label);
+          fill = await this.settleUnknownSell(signature, owner, p.mint, sentAt, fill.error, signed);
+        }
         if (fill.ok) {
           // Booked while its coins are still reserved: the wallet is read first and the position after it, and from
           // that re-read on everything is synchronous. A sell booked while the wallet was being read is never
@@ -1157,13 +1172,13 @@ export class Engine {
   private alreadyOnItsWay(p: Position): { ok: true; note: string } {
     const leftover = [...this.orphans.values()].filter((o) => o.positionId === p.id);
     const note = leftover.some((o) => !this.ownLeftovers.has(o.signature))
-      ? 'all of it is in a sell sent just before the server restarted, whose outcome is being read: if it did not go through, the coins are sold right after (within about a minute)'
+      ? 'all of it is in a sell sent just before the server restarted, whose outcome is being read: if it did not go through, the coins are sold right after (once the chain shows it can no longer land, normally within a minute or two)'
       : leftover.length && leftover.every((o) => this.landedLeftovers.has(o.signature))
         ? leftover.some((o) => o.marketShort)
           ? 'all of it was in a sell of ours that has just landed, but the market paid for only part of it: the rest is sold right after (once that sell is written down, normally within seconds)'
           : 'all of it was just sold by another sell of ours: it shows once the server has written it down (normally within seconds)'
         : leftover.length
-          ? 'all of it is in a sell of ours whose outcome is being read from the chain: if it did not go through, the coins are sold right after (within about a minute)'
+          ? 'all of it is in a sell of ours whose outcome is being read from the chain: if it did not go through, the coins are sold right after (once the chain shows it can no longer land, normally within a minute or two)'
           : 'all of it is already being sold by another sell of ours on its way: whatever that one does not sell is sold right after it';
     this.quietly('a feed line', () => this.deps.store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `Sell of ${shortMint(p.mint)} (${p.copyName}) (you pressed Sell now): ${note}.`, mint: p.mint }));
     return { ok: true, note: `${note[0]!.toUpperCase()}${note.slice(1)}.` };
@@ -1504,6 +1519,7 @@ export class Engine {
    */
   private async settleOrphans(): Promise<void> {
     const { store, executor } = this.deps;
+    let passTip: { height: number; slot?: number } | null | undefined;
     for (const o of [...this.orphans.values()]) {
       if (this.stopped) return;
       if (this.settlingOrphans.has(o.signature) || !this.orphans.has(o.signature)) continue;
@@ -1520,7 +1536,9 @@ export class Engine {
         // "not found" means it never can (any block that could hold it came before that read), provided the status came
         // from a node at least as far along (see neverLands). It is dropped then instead of three minutes after it was
         // sent: the position's rules and Sell now wait for it meanwhile.
-        const tip = o.lastValid !== undefined ? await this.chainTip() : null;
+        // (read once per pass, before the first status that needs it: older than every status read after it)
+        if (o.lastValid !== undefined && passTip === undefined) passTip = await this.chainTip();
+        const tip = o.lastValid !== undefined ? passTip ?? null : null;
         let r: Awaited<ReturnType<NonNullable<Executor['settleSell']>>>;
         try {
           r = await executor.settleSell(o.signature, owner, o.mint);
@@ -1551,16 +1569,29 @@ export class Engine {
    */
   private notLanding(lastValid: number | null | undefined, tip: { height: number; slot?: number } | null, statusSlot: number | undefined, since: number, fallbackMs: number): boolean {
     const age = this.now() - since;
-    if (lastValid !== null && lastValid !== undefined && tip !== null) return neverLands(lastValid, tip, statusSlot) || age > NOT_FOUND_GIVE_UP_MS;
+    const { executor } = this.deps;
+    // (an executor that can read the tip, whose reads have all failed so far: no verdict yet, but the backstop; the
+    // fixed time used to stand in for a read that failed, and a sell that could still land was sold again)
+    if (lastValid !== null && lastValid !== undefined && (executor.chainTip || executor.blockHeight)) return (tip !== null && neverLands(lastValid, tip, statusSlot)) || age > NOT_FOUND_GIVE_UP_MS;
     return age > fallbackMs;
   }
 
-  /** The chain's height now, with the slot it was read at when the executor tells it; null when it cannot be read. */
+  /** The highest chain tip read so far (see chainTip). */
+  private highestTip: { height: number; slot?: number } | null = null;
+
+  /**
+   * The chain's height now, with the slot it was read at when the executor tells it: the highest read so far, which
+   * stands in for a read that fails (an earlier read is still a lower bound on the chain, read before the status that
+   * follows); null when none could be read.
+   */
   private async chainTip(): Promise<{ height: number; slot?: number } | null> {
     const { executor } = this.deps;
-    if (executor.chainTip) return executor.chainTip().catch(() => null);
-    if (executor.blockHeight) return executor.blockHeight().then((height) => ({ height })).catch(() => null);
-    return null;
+    let tip: { height: number; slot?: number } | null = null;
+    if (executor.chainTip) tip = await executor.chainTip().catch(() => null);
+    else if (executor.blockHeight) tip = await executor.blockHeight().then((height) => ({ height })).catch(() => null);
+    else return null;
+    if (tip && (!this.highestTip || tip.height > this.highestTip.height)) this.highestTip = tip;
+    return this.highestTip;
   }
 
   /** A sell from before a restart that landed: booked as this process books its own (with the platform fee it
@@ -1676,6 +1707,7 @@ export class Engine {
   /** Buys that were in flight when the server stopped, or whose outcome was unknown: settled from their own transaction. */
   private async settleOpening(): Promise<void> {
     const { store, executor } = this.deps;
+    let passTip: { height: number; slot?: number } | null | undefined;
     for (const p of store.openingPositions()) {
       if (this.queues.has(p.id)) continue; // still running in this process
       const label = `${shortMint(p.mint)} (${p.copyName})`;
@@ -1696,7 +1728,9 @@ export class Engine {
         if (executor.settleBuy) {
           // Its own transaction says what happened: exact coins and cost, or that it failed. (The chain's tip is read
           // first: see notLanding.)
-          const tip = p.buyLastValid !== null ? await this.chainTip() : null;
+          // (read once per pass, before the first status that needs it: older than every status read after it)
+          if (p.buyLastValid !== null && passTip === undefined) passTip = await this.chainTip();
+          const tip = p.buyLastValid !== null ? passTip ?? null : null;
           const r = await executor.settleBuy(p.buySig, wallet.publicKey.toBase58(), p.mint);
           if (r.state === 'landed') {
             // (one of this process whose booking failed: from its own confirmation, so its timed sells keep their times)
@@ -1712,7 +1746,9 @@ export class Engine {
             const late = ours !== undefined ? 'written down a few seconds late (the server could not save it at once); its timed sells count from the buy' : 'confirmed late (its exit starts now)';
             this.quietly('the feed line of a buy', () => store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'buy', message: `Bought ${fmtSol(r.lamports)} of ${label} — ${late}`, mint: p.mint, signature: sig }));
             this.firePending(p.id);
-          } else if (r.state === 'failed' || this.notLanding(p.buyLastValid, tip, r.slot, p.openedAt, UNKNOWN_BUY_EXPIRES_MS)) {
+          } else if (r.state === 'failed' || (!this.unbookedBuys.has(p.id) && this.notLanding(p.buyLastValid, tip, r.slot, p.openedAt, UNKNOWN_BUY_EXPIRES_MS))) {
+            // (one this process saw land, whose booking failed, is never taken as not landed: a node that says "not
+            // found" has not caught up)
             // Failed on chain, or not found once it no longer can land: it never landed.
             this.unbookedBuys.delete(p.id);
             this.pendingMirror.delete(p.id);
