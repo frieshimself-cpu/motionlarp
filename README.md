@@ -124,6 +124,11 @@ Log in with the admin password. Only you have it; a user account is never an adm
 - **How a trade is sent.** On every lane at once (the RPC and, with a tip, Helius Sender in the nearest region),
   re-sent about once a second until it lands; both Helius lanes ask for MEV Protect (routing around validators
   linked to sandwich attacks; `MEV_PROTECT=off` switches it off). The last sell of a timed exit never gives up.
+  When the RPC link fails, the same request goes to a backup link (`RPC_BACKUP_URL`, the public one by default;
+  only the request travels, never the key). A retry is simulated first, so a sell that cannot work costs nothing.
+- **Selling everything closes the coin's token account** in the same transaction (its rent, about 0.002 SOL,
+  comes back to the wallet). A pump.fun curve that holds less SOL than the coins are priced at (a "mayhem" coin)
+  sells what it can pay for, and the rest is sold as soon as it fills up again.
 - **Trading fees, set per copy by each user:** priority fee and tip, separately for buys and sells, plus slippage.
   The priority fee goes to the network; a tipped trade is also sent through
   Helius Sender (Jito and staked connections at once): a tip of 0.001 SOL or more uses every fast lane, a smaller

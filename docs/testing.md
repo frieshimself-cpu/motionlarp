@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 217 tests
+## Automated (every change): `npm test`, 346 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -226,13 +226,65 @@ change exactly on every fill, including a small sell that did not cover its own 
 
 Automated tests: 262.
 
+## 27 Nov 2026 (early morning): four review teams, the rest of the features with real money, a 7 SOL check
+
+**More real money, the whole server (private copy), each scenario copying our own leader wallet:**
+- Timed sells of what is left (50 % at +2 s, the rest at +4 s), stop loss at −1 % (sold everything at once),
+  "same %" mirror (they sold 50 %, we sold 50 %; they sold the rest, we sold the rest), "everything" mirror (they
+  sold 30 %, we sold everything), dead coin (no price change for 5 s sold everything). Every one landed and the
+  profit shown matched the wallet's change.
+- Platform fee: 1 % of the buy and of the sell, in the same transaction as the swap, seen on chain.
+- The sell that empties the bag closes the coin's token account in the same transaction; the rent came back
+  (pump.fun curve coin and PumpSwap coin).
+- Money: 0.5 SOL sent by the owner; 0.39 SOL is left in the two test wallets, so about 0.11 SOL was used in all
+  (network fees, tips, platform fees paid to ourselves, small losses on tiny trades).
+
+**Every-coin sweep** (`scripts/sweep-coins.ts`, read-only): 31 live coins, 122 simulated trades of our own code
+(buy, sell part, sell all; curve, PumpSwap, Jupiter, Token-2022 coins, cashback coins, coins priced in USDC/USD1):
+all pass except a few micro-coins Jupiter itself refuses ("not tradable"), which now say so in plain words.
+
+**7 SOL, the size the Scharo preset buys** (`scripts/check-big-buy.ts`, read-only, signed as a wallet holding more
+than 7 SOL): our buy, wrapped exactly as the executor sends it (compute budget and the 0.001 SOL priority fee, the
+1 % platform fee, the 0.005 SOL tip), simulated on 4 pump.fun curve coins and 4 PumpSwap coins that had just been
+bought: 8 of 8 pass, each spending 7.0775 SOL (7 + 0.07 fee + tip + priority fee + the coin account's rent), using
+69k–96k of the 200k compute units, 885–923 bytes of the 1,232 allowed.
+
+**Fixed after the reviews, each with tests** (commits of 27 Nov, in order):
+1. Engine: their full exit while a timed step was in flight sold the same coins twice, or overwrote the step's
+   proceeds; the Live switch now stops new real buys only (positions bought for real are still sold); a retry is
+   simulated before it is sent; a curve that completed while held re-routes its sell to PumpSwap at once; a buy
+   read from pump.fun's event counts as meeting a minimum it is within 1.5 % of; old leader buys (over 20 s) are
+   not copied; unknown modes and empty boxes in the editor are refused.
+2. Velo lessons and the venue review: a backup RPC link; re-sending on its own timer; failed trades say why in
+   the program's own words; a buy's signature is written down when it is signed and an unknown outcome is settled
+   from that transaction; a completed curve never reads as a price of 0 (that fired every stop loss); cashback
+   coins are bought through Jupiter (exact spend); a buy's short-lived blockhash never comes from a stuck feed.
+3. Selling everything closes the coin's token account (rent back), proven with real sells.
+4. Logs keep transaction signatures readable (they were blanked like private keys); a real key is still hidden.
+5. The watcher: a buy counts only when the copied wallet signed it or paid from its own account (a stranger can no
+   longer fake one with a forged log line); the fast path reads only lines pump.fun itself wrote; a stream that
+   stops delivering no longer hides the websocket's notice; a failed fetch is retried; a buy heard late together
+   with the wallet's full exit is not copied.
+6. pump.fun, second review: a mayhem curve that holds less SOL than a sell asks for no longer refuses the sell
+   for ever ("Overflow"): it sells what the curve can pay for and the rest as soon as it fills up; a coin between
+   its curve and its PumpSwap pool is no longer sent to Jupiter for 20 s; a partly filled mayhem buy pays the fee
+   on what it spends; PumpSwap trades always create the wrapped-SOL account if missing.
+7. A crash in the middle of a test buy could, after a restart with Live switched on, be restored as a real
+   position and sell coins the wallet already held. A buy is now written down as test or live from the start,
+   and a live buy that was never signed is marked failed.
+
 ## Not yet verified
 
 - **Real trades on the real server** (Helius RPC with the key, the regional Sender, the Helius stream in live
   mode). Everything above ran this code for real elsewhere; on walletmotion.app it ran in test mode. It needs the
   owner's "Live trading" switch. The status line in `/api/config` shows per-lane counters (`sends`) once it has.
 - The Helius RPC lane with `mev-protect=true` (no Helius key outside the server). Sender with it was proven.
-- A 7 SOL trade. The largest real buy so far is 0.01 SOL.
+- A real 7 SOL trade. 7 SOL buys are proven by simulation on 8 live coins (above); the largest real buy so far is
+  0.02 SOL. On a curve with less than 7 SOL of coins left, our buy completes it and spends the whole amount
+  (pump.fun's exact-spend buy); that case was not simulated.
+- The on-chain simulation of a mayhem-curve sell that is cut to what the curve can pay (the public RPC
+  rate-limited the script; the arithmetic is covered by tests and pump.fun's refusal of the old sell was seen in
+  a simulation by the review).
 - That the firewall / fail2ban step ran on the server (it logs to /var/log/motionlarp-update.log).
 - The Docker image was not built here (no Docker engine in the build container); `npm run build` and the built
   server were checked, and the real server has rebuilt itself after every push.
