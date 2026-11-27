@@ -334,6 +334,10 @@ export function createApp(deps: AppDeps): Server {
   }
 
   async function walletSol(uid: number, pubkey: string): Promise<number | null> {
+    // The engine re-reads a wallet that may buy every 3 s and right after each of our trades: its figure is the
+    // freshest (this cache showed the balance from before the last sells for up to 10 s).
+    const known = deps.engine.knownBalance(pubkey);
+    if (known !== null) return sol(known);
     const hit = balanceCache.get(uid);
     if (hit && Date.now() - hit.at < 10_000) return hit.sol;
     let value: number | null = null;

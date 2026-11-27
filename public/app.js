@@ -479,9 +479,12 @@ function openEditor(copy, preset) {
 }
 
 // ── data loop ────────────────────────────────────────────────────────────
+/** Polls in a row that failed: an update restarts the site in a second or two, which is not worth an error. */
+let failedPolls = 0;
 async function loadState() {
   try {
     state = await api('GET', `/api/state${TZ}`);
+    failedPolls = 0;
     if (tab === 'history') history = await api('GET', `/api/history${TZ}`).catch(() => history);
     // Never re-draw under someone typing (the private key box above all). A switch is not typing, and neither is
     // the login form: after Enter in the key box the dashboard must replace it. Nor while text on the page is being
@@ -490,10 +493,14 @@ async function loadState() {
     const typing = a && app.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && a.type !== 'checkbox')) && !a.closest('#auth-form');
     const sel = window.getSelection();
     const selecting = !!sel && !sel.isCollapsed && app.contains(sel.anchorNode);
-    if (modal.hidden && !typing && !selecting && !$('#wk')?.value) redraw();
+    const idle = modal.hidden && !typing && !selecting && !$('#wk')?.value;
+    // A new version of the site is running (an update): the page reloads itself to match, once nobody is typing.
+    const running = state.server?.version;
+    if (idle && running && config?.server?.version && running !== config.server.version) { location.reload(); return; }
+    if (idle) redraw();
   } catch (err) {
     if (err.status === 401) { state = null; renderAuth(); return; }
-    toast(err.message, true);
+    if (++failedPolls >= 3) toast(err.message, true);
   }
 }
 /** Re-draws the page keeping where its scrolled lists were (the activity list jumped back to the top every 3 s, a

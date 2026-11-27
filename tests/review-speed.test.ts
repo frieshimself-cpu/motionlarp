@@ -253,3 +253,48 @@ describe('the engine in front of the copy buy', () => {
     expect(s.requests).toHaveLength(1);
   });
 });
+
+describe('ready at the start', () => {
+  it('the copy path is run once at the start, to a signed transaction: nothing is sent, nothing is read', async () => {
+    const { ex } = executor();
+    await ex.warmCopyPath();
+    expect(sent).toHaveLength(0);
+    expect(net.reads).toEqual([]);
+  });
+});
+
+describe("the dashboard's balance", () => {
+  it("is the engine's own figure, renewed every 3 s and right after each of our trades (it lagged up to 10 s)", async () => {
+    const { createHash } = await import('node:crypto');
+    const { createApp } = await import('../src/http/app.js');
+    const store = new Store(':memory:');
+    const uid = store.createUser('u', 'x');
+    const wallet = Keypair.generate();
+    store.setWallet(uid, wallet.publicKey.toBase58(), 'enc');
+    store.createCopy(uid, validateSettings({ leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih', buySol: 1, minLeaderBuySol: 0 }));
+    let sol = 5n * SOL;
+    let reads = 0;
+    const exec = { buy: async () => ({ ok: false as const, error: 'x' }), sell: async () => ({ ok: false as const, error: 'x' }), quoteSell: async () => 1n, solBalance: async () => { reads++; return sol; }, tokenBalance: async () => 0n, isLive: () => true };
+    const engine = new Engine({ store, executor: exec, walletFor: () => wallet, priceMs: 2_000, maxSolPerBuy: 10, feeReserveSol: 0.01 });
+    const server = createApp({ store, engine, executor: exec, masterKey: '11'.repeat(32), secureCookies: false, forgetWallet: () => {}, serverInfo: () => ({ live: true, maxSolPerBuy: 1, watching: 1, mode: 'live' }) });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const token = 'speed-test-session-token';
+    store.createSession(createHash('sha256').update(token).digest('hex'), uid, Date.now() + 3_600_000);
+    const state = async () => {
+      const port = (server.address() as import('node:net').AddressInfo).port;
+      const res = await fetch(`http://127.0.0.1:${port}/api/state`, { headers: { cookie: `ml_session=${token}`, 'x-requested-with': 'motionlarp' } });
+      return (await res.json()) as { wallet: { sol: number } };
+    };
+    try {
+      await engine.keepBalancesFresh();
+      expect((await state()).wallet.sol).toBe(5);
+      sol = 4n * SOL; // a trade of ours moved it, and the engine read it again
+      await engine.keepBalancesFresh();
+      const before = reads;
+      expect((await state()).wallet.sol).toBe(4); // at once, with no read of the dashboard's own
+      expect(reads).toBe(before);
+    } finally {
+      server.close();
+    }
+  });
+});

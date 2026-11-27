@@ -163,6 +163,13 @@ export class Engine {
     return this.readBalance(owner);
   }
 
+  /** The wallet's SOL as last read, when that read is under `maxAgeMs` old (renewed every 3 s and after each of our
+   *  trades); null otherwise. For the dashboard: no read of its own. */
+  knownBalance(owner: string, maxAgeMs = 5_000): bigint | null {
+    const hit = this.solCache.get(owner);
+    return hit && this.now() - hit.at < maxAgeMs ? hit.lamports : null;
+  }
+
   /** Reads the wallet's SOL and keeps it. `fresh`: a new read even while one is out (that one may predate a trade). */
   private readBalance(owner: string, fresh = false): Promise<bigint> {
     const out = this.balanceReads.get(owner);

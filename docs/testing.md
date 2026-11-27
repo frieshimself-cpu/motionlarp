@@ -361,6 +361,41 @@ The owner switched Live trading on. A copy on the test account followed our own 
   changed by −0.0110 SOL because the last sell closed an empty coin account left by an earlier test (its rent came back).
 The two test copies were deleted afterwards.
 
+## 27 Nov 2026, 06:00–06:30 UTC: the copy with no read in front of it; updates at a quiet moment
+
+**The copy path.** A pump.fun curve buy of the copied wallet is now copied with no network read before our buy is
+sent: the buy is built from pump.fun's own event of their buy (the curve as their buy left it, and the coin's token
+program as pump.fun called it in that trade), from any feed (the Helius stream, the websocket's log notices, a fetch);
+the fee tables stay in memory and are renewed in the background; the wallet's SOL is renewed every 3 s and right after
+each of our trades (two buys at once never count the same SOL); the coin balance before the buy is asked for alongside,
+never waited for. What is left in front of the send is CPU: about 3 ms (build 2.4, compile 0.4, sign 0.5). The feed
+says "sent N ms after their trade was seen".
+- Mainnet, sending nothing (`scripts/check-copy-from-event.ts`), two runs on 24 coins just bought on the curve (7 of
+  them mayhem coins): the token program read from the logs is the mint's owner 24/24; the buy built from the event has
+  exactly the accounts of one built from a fresh read 24/24 (pump.fun's SDK picks its buyback fee wallet at random on
+  every build: that one account is allowed to differ); simulated with the priority fee, the platform fee and the tip,
+  without an error, 24/24; the event's reserves are the curve right after the trade 15/15 wherever no trade came in
+  between (two more in the first run were read at a newer commitment than the signature list). It also showed that
+  mayhem curves hold 1 billion coins like the others (the code first assumed 2 billion).
+- `tests/review-speed.test.ts`, `tests/watcher.test.ts`: nothing is read from the network before the send (a
+  connection that records every call records none); the coin balance is still unanswered when the buy goes out; a
+  classic SPL coin gets the classic program; a token program pump.fun did not call itself is never taken.
+
+**Updates.** `deploy/update.sh` now builds a new version while the running one keeps trading, and restarts it only at
+a quiet moment: nothing open and nothing under way; after 20 minutes, nothing under way and nothing due in the next
+30 s; after an hour, any moment (the app finishes what is under way first). The app answers `/api/quiet` on its own
+machine only. A build that fails stops nothing. The restart measured from outside: **2.3 s** without an answer (b200258),
+then **1.3 s** once watching no longer waits for the sender region to be measured (58f4054).
+
+**Timing fuzzer cases 12–17**, fixed with tests that fail on the code before: an owed Sell now's failure line written
+every 30 s (12); the last step of a "% of the original bag" ladder selling coins the user bought by hand (13: it now
+sells what is left of the copy's bag; a remainder within 2 % of the books is still swept up); an update in the middle
+of an exit leaving the last sale at its quote for good (14: a fill now says it is an estimate until its exact figures
+are read, and the safety pass reads any estimate from the chain for a day); a buy booked with the quote's coin count
+whose exact count was taken off a second time after a sell had already matched the books to the wallet (15, 16); a
+position sold out on the quote's count whose buy had received more (17: it is opened again and the rest sold). The
+harness does not know case 17's follow-up sell yet (it flags it, and the 2 s before the exact count arrives).
+
 ## Not yet verified
 
 - The Helius RPC lane with `mev-protect=true` on its own (it carried the trades above together with Sender).

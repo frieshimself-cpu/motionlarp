@@ -17,6 +17,7 @@ import { applyStoredSettings, saveOwnerSettings, settingsView, type OwnerSetting
 import { rpc } from './chain/rpc.js';
 import { chooseSender, GLOBAL_SENDER, pingRegion } from './tx/sender-region.js';
 import { HeliusStream, streamUrlFor } from './watch/helius-stream.js';
+import { warmEventDecoder } from './watch/events.js';
 import { Watcher, websocketSubscriber } from './watch/watcher.js';
 
 if (!/^[0-9a-fA-F]{64}$/.test(config.masterKey)) {
@@ -141,7 +142,10 @@ const clock = setInterval(() => {
 // The copy path never waits for a read: pump.fun's fee tables are read now (then renewed in the background), and the
 // SOL balance of every wallet that may buy is renewed every 3 s.
 if (config.rpcUrl) {
-  void executor.pf.curve.warmGlobals();
+  // ...and the copy path itself runs once on a made-up coin (nothing is sent), so the first copy after a start does
+  // not wait for its code to load.
+  warmEventDecoder();
+  void executor.pf.curve.warmGlobals().then(() => executor.warmCopyPath()).catch((err) => log.warn('copy path warm-up failed', { error: safeErrorMessage(err) }));
   let renewing = false;
   setInterval(() => {
     if (renewing) return;

@@ -20,6 +20,15 @@ const str = (v: unknown) => (v && typeof (v as { toString: () => string }).toStr
 
 const TOKEN_PROGRAMS = new Set(['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']);
 
+/** Loads pump.fun's event decoder ahead of the first trade (building it reads pump.fun's whole program description). */
+export function warmEventDecoder(): void {
+  try {
+    events().decode('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
+  } catch {
+    // a made-up event: only the decoder's loading mattered
+  }
+}
+
 export function fastBuysFromLogs(logs: string[], signature: string, leader: string, slot: number, heardAt?: number): LeaderTrade[] | null {
   if (logs.some((l) => l.includes(PUMP_AMM_PROGRAM) || /log truncated/i.test(l))) return null;
   const buys: LeaderTrade[] = [];

@@ -11,7 +11,7 @@
 //  * test: the buy is built and simulated with the user's real wallet when it holds enough SOL (proving it would go
 //    through), the fill is the real quote, nothing is sent. Sells are filled from the quote.
 // The platform fee rides inside the same transaction as the trade on both routes.
-import { PublicKey, SystemProgram, type Keypair, type TransactionInstruction, type VersionedTransaction } from '@solana/web3.js';
+import { Keypair, PublicKey, SystemProgram, type TransactionInstruction, type VersionedTransaction } from '@solana/web3.js';
 import { createCloseAccountInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { config } from '../config.js';
 import { getConnection, getShortBlockhash } from '../chain/connection.js';
@@ -310,6 +310,23 @@ export class ChainExecutor implements Executor {
     const change = walletChange(got, owner, mint);
     if (!change) return { state: 'failed' };
     return { state: 'landed', tokens: change.tokens, lamports: change.lamports };
+  }
+
+  /**
+   * Runs the copy path once on a made-up coin and wallet, to the signed transaction (nothing is sent): the first real
+   * copy after a start then finds its code loaded. (The first copy after a restart was sent 88 ms after the copied
+   * wallet's trade was seen; the work itself is a few ms.)
+   */
+  async warmCopyPath(): Promise<void> {
+    const wallet = Keypair.generate();
+    const mint = Keypair.generate().publicKey;
+    const tokenProgram = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+    const pool: ResolvedPool = { kind: 'pumpfun_curve', pool: bondingCurvePdaOf(mint), mint, tokenProgram };
+    const curve: CurveHint = { virtualTokenReserves: 1_073_000_000_000_000n, virtualQuoteReserves: 30_000_000_000n, realTokenReserves: 793_100_000_000_000n, realQuoteReserves: 0n, creator: wallet.publicKey.toBase58(), mayhem: false, cashback: false, tokenProgram: tokenProgram.toBase58() };
+    const built = await this.pf.curve.buildBuy({ pool, user: wallet.publicKey, lamportsIn: 10_000_000n, slippagePct: 100, curve });
+    const ixs = withFee(built.instructions, wallet.publicKey, 10_000_000n, 0, config.feeWallet);
+    const tx = await this.nativeTx({ wallet, mint: mint.toBase58(), slippagePct: 100, priorityFeeSol: 0.001, tipSol: 0.005, live: true, feeBps: 0 }, ixs.instructions, true);
+    signatureOf(tx.tx);
   }
 
   /** Looks the coin up ahead of its buy (cached for a minute), so the buy itself has one round trip less to wait for. */
