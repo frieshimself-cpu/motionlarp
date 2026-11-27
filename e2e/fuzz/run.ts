@@ -1052,9 +1052,12 @@ class Run {
       // outcome is unknown, a crash) the documented rule is the reference: the position's coins less everything
       // that is out, the wallet only as a cap.
       // The same where the books carry a quote's coin count (a buy handed back before its exact count could be read),
-      // and, with database faults, where the wallet holds more than the books (coins left there by a booking that
-      // failed are not this position's: the wallet does not show which of its sells have left).
-      if (live && (this.sc.faults.partial > 0 || this.sc.faults.ghost > 0 || this.blind || tr.quotedBuy || (this.sc.db && read.value > p.tokensHeld))) {
+      // and, with database faults, where the wallet holds more than this position's coins still in it (its books less
+      // its sales that have left the wallet unbooked): coins left there by a booking that failed are not this
+      // position's, and the wallet no longer shows which of its sells have left.
+      let left = 0n;
+      for (const [inv, f] of tr.flying) if (inv !== ctx.inv && f.call.landedAt !== undefined && f.call.landedAt <= read.at) left += f.tokens;
+      if (live && (this.sc.faults.partial > 0 || this.sc.faults.ghost > 0 || this.blind || tr.quotedBuy || (this.sc.db && read.value > p.tokensHeld - left))) {
         const own = p.tokensHeld > others ? p.tokensHeld - others : 0n;
         free = read.value < own ? read.value : own;
       }
