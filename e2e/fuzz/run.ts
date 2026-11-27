@@ -1444,6 +1444,9 @@ class Run {
     if (orphan && landed && !orphan.answered && tr && ctx?.order) {
       orphan.answered = true;
       const o = ctx.order;
+      // (their sell that this one mirrored is done: it is booked from its own transaction, as sellReturned marks one that
+      // its own engine was told sold)
+      if (o.reason === 'mirror') { const due = tr.mirrorDue.find((d) => d.sig === o.tag); if (due) due.ok = true; }
       if ((c.sold ?? 0n) > 0n && onceOrder(o)) {
         const k = okey(o);
         const hit = tr.success.get(k);
