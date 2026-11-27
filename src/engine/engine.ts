@@ -176,9 +176,10 @@ export class Engine {
         if (p.sell.mirror.mode === 'exit' && !soldOut) continue;
         const percent = p.sell.mirror.mode !== 'same' || soldOut ? 100 : share * 100;
         const order: SellOrder = { reason: 'mirror', percent, tag: t.signature };
-        // Their full exit is written down at once: until the position is closed it is owed, and a restart or a crash
-        // before it has sold (it may wait behind another sell of ours) must not forget it.
+        // Written down at once: their full exit until the position is closed, their partial sell until our share of it
+        // is sold. A restart or a crash before then (it may wait behind another sell of ours) must not forget it.
         if (percent >= 100) this.writeExitOwed(p, order);
+        else this.oweSell(p, order);
         if (this.stopped) { this.oweAfterRestart(p.id, order); continue; }
         const key = this.orderKey(p.id, order);
         this.inFlight.add(key);
@@ -736,11 +737,32 @@ export class Engine {
     return balance;
   }
 
-  private markDone(p: Position, order: SellOrder): Partial<Pick<Position, 'firedTimed' | 'firedStop' | 'deadFired'>> {
+  private markDone(p: Position, order: SellOrder): Partial<Pick<Position, 'firedTimed' | 'firedStop' | 'deadFired' | 'owedSells'>> {
     if (order.reason === 'timed' && order.stage !== undefined) return { firedTimed: [...new Set([...p.firedTimed, order.stage])] };
     if (order.reason === 'stop_loss' && order.stage !== undefined) return { firedStop: [...new Set([...p.firedStop, order.stage])] };
     if (order.reason === 'dead_coin') return { deadFired: true };
+    if (order.reason === 'mirror' && order.percent < 100 && order.tag) {
+      // Their partial sell is done (sold, nothing left for it, or given up): no longer owed. (Read fresh: another of
+      // theirs may have been written down since this sell began.)
+      const owed = this.deps.store.position(p.id)?.owedSells ?? p.owedSells;
+      const left = owed.filter((o) => !(o.reason === order.reason && o.tag === order.tag));
+      if (left.length !== owed.length) return { owedSells: left };
+    }
     return {};
+  }
+
+  /**
+   * Their partial sell ("same share") is written down the moment it is heard, and stays until it is done: a restart
+   * or a crash before then must not forget it (fuzzer case 19: one waiting for its retry was lost, its retry living in
+   * memory only). restore() runs it after a restart, once; not while a sell of it from before the restart is still
+   * unsettled (one that went out and landed is done when it is booked).
+   */
+  private oweSell(p: Position, order: SellOrder): void {
+    if (order.reason !== 'mirror' || order.percent >= 100 || !order.tag) return;
+    if (p.owedSells.some((o) => o.reason === order.reason && o.tag === order.tag)) return;
+    const owed = [...p.owedSells, { reason: order.reason, percent: order.percent, tag: order.tag }];
+    this.deps.store.updatePosition(p.id, { owedSells: owed });
+    p.owedSells = owed;
   }
 
   private async sell(positionId: number, order: SellOrder, quiet = false, retry = false): Promise<{ ok: boolean; error?: string }> {
@@ -1192,12 +1214,15 @@ export class Engine {
     await this.settleOrphans();
     await this.settleOpening();
     await this.settleEstimates().catch(() => undefined);
-    // Full exits owed (written down when they failed, left coins, or came while the buy was unsettled): after a restart
-    // nothing in memory remembers them. One that this process is already retrying or waiting on is left to that.
+    // Full exits owed (written down when they were heard, failed, left coins, or came while the buy was unsettled) and
+    // their partial sells not sold yet: after a restart nothing in memory remembers them. One that this process is
+    // already retrying or waiting on is left to that. A partial sell runs with its own tag, so it is the same order
+    // (done once it is booked); a full exit owed sells everything, theirs included.
     for (const p of store.activePositions()) {
-      if (p.status !== 'open' || !p.exitOwed || this.queues.has(p.id) || this.exitOwed.has(p.id) || this.pendingMirror.has(p.id)) continue;
+      if (p.status !== 'open' || (!p.exitOwed && !p.owedSells.length) || this.queues.has(p.id) || this.exitOwed.has(p.id) || this.pendingMirror.has(p.id)) continue;
       if ([...this.retries.values()].some((r) => r.positionId === p.id) || this.waitsForOrphan(p.id)) continue;
-      this.run(p.id, { reason: p.exitOwed.reason, percent: 100, tag: `${p.exitOwed.tag ?? ''}:owed`, rest: true });
+      if (p.exitOwed) this.run(p.id, { reason: p.exitOwed.reason, percent: 100, tag: `${p.exitOwed.tag ?? ''}:owed`, rest: true });
+      else for (const o of p.owedSells) this.run(p.id, { reason: o.reason, percent: o.percent, ...(o.tag ? { tag: o.tag } : {}) });
     }
   }
 

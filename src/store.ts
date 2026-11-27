@@ -31,6 +31,9 @@ export interface Position {
   /** A full exit (their exit, a 100 % stop, dead coin, Sell now's rest) that is owed and not done yet: kept in the
    *  database so a restart cannot forget it (its retry was held in memory only). */
   exitOwed: { reason: SellReason; tag?: string } | null;
+  /** Their partial sells ("same share") whose share of ours is not sold yet: written down until it is (sold, nothing
+   *  left for it, or given up), so a restart cannot forget one waiting for its retry. */
+  owedSells: OwedSell[];
   firedTimed: number[];
   firedStop: number[];
   deadFired: boolean;
@@ -43,6 +46,9 @@ export interface Position {
   /** The coin's decimals (for showing token amounts); 6 on pump.fun. */
   decimals: number;
 }
+
+/** A sell of theirs we owe our share of: its rule, the percent of what we hold, and their transaction (the tag). */
+export interface OwedSell { reason: SellReason; percent: number; tag?: string }
 
 export interface Fill {
   id: number;
@@ -134,7 +140,8 @@ CREATE TABLE IF NOT EXISTS positions (
   copy_name TEXT NOT NULL,
   leader TEXT NOT NULL,
   decimals INTEGER NOT NULL DEFAULT 6,
-  exit_owed TEXT
+  exit_owed TEXT,
+  owed_sells TEXT
 );
 CREATE INDEX IF NOT EXISTS positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS positions_copy_mint ON positions(copy_id, mint);
@@ -223,6 +230,7 @@ function toPosition(r: Row): Position {
     leaderSig: String(r.leader_sig),
     buySig: r.buy_sig === null ? null : String(r.buy_sig),
     exitOwed: r.exit_owed === null || r.exit_owed === undefined ? null : (JSON.parse(String(r.exit_owed)) as { reason: SellReason; tag?: string }),
+    owedSells: r.owed_sells === null || r.owed_sells === undefined ? [] : (JSON.parse(String(r.owed_sells)) as OwedSell[]),
     firedTimed: JSON.parse(String(r.fired_timed)) as number[],
     firedStop: JSON.parse(String(r.fired_stop)) as number[],
     deadFired: num(r.dead_fired) === 1,
@@ -243,12 +251,12 @@ function toFill(r: Row): Fill {
   };
 }
 
-export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed'>>;
+export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed' | 'owedSells'>>;
 
 const COLUMN: Record<keyof PositionPatch, string> = {
   mode: 'mode', status: 'status', tokensBought: 'tokens_bought', tokensHeld: 'tokens_held', costLamports: 'cost_lamports', proceedsLamports: 'proceeds_lamports',
   openedAt: 'opened_at', closedAt: 'closed_at', buySig: 'buy_sig', firedTimed: 'fired_timed', firedStop: 'fired_stop', deadFired: 'dead_fired',
-  refValueLamports: 'ref_value', lastChangeAt: 'last_change_at', exitOwed: 'exit_owed',
+  refValueLamports: 'ref_value', lastChangeAt: 'last_change_at', exitOwed: 'exit_owed', owedSells: 'owed_sells',
 };
 
 export class Store {
@@ -273,6 +281,7 @@ export class Store {
     const posCols = this.all('PRAGMA table_info(positions)').map((r) => String(r.name));
     if (!posCols.includes('decimals')) this.db.exec('ALTER TABLE positions ADD COLUMN decimals INTEGER NOT NULL DEFAULT 6');
     if (!posCols.includes('exit_owed')) this.db.exec('ALTER TABLE positions ADD COLUMN exit_owed TEXT');
+    if (!posCols.includes('owed_sells')) this.db.exec('ALTER TABLE positions ADD COLUMN owed_sells TEXT');
     // (sells_out, added 27 Nov 2026, is created by SCHEMA above in a database that does not have it yet)
   }
 

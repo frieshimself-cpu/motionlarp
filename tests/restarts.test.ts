@@ -414,3 +414,77 @@ describe('databases written by earlier versions', () => {
     again.close();
   });
 });
+
+describe('their partial sell ("same share") is owed until it is done, across a restart (fuzzer case 19)', () => {
+  const same = { ...none, mirror: { enabled: true, mode: 'same' } };
+  const theySell = (s: ReturnType<typeof server>, left: bigint) => s.engine.onLeaderTrade({ ...trade('sell', MINT, left), tokenAmount: 2_000_000n - left });
+
+  it('their 75 % sell that failed and waits for its retry is sold after a restart (it lived in memory only)', async () => {
+    const s = server(same);
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'fail' : 'ok'); // the RPC is rate limiting: it waits for its retry
+    await theySell(s, 500_000n); await s.engine.idle(); // they sold 75 % of theirs
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([750_000n]);
+    expect(s.position()).toMatchObject({ tokensHeld: 1_000_000n });
+    expect(s.position().owedSells).toEqual([{ reason: 'mirror', percent: 75, tag: expect.any(String) }]);
+    await s.restart();
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([750_000n, 750_000n]);
+    expect(s.position()).toMatchObject({ status: 'open', tokensHeld: 250_000n, owedSells: [] });
+    await s.engine.restore(); await s.engine.idle(); // once: the next pass sells nothing more
+    expect(s.chain.sent).toHaveLength(2);
+  });
+
+  it('one that went out before a crash and landed is booked, not sold again', async () => {
+    const s = server(same);
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'lost-answer' : 'ok');
+    void theySell(s, 500_000n); await sleep(5);
+    s.crash();
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent).toHaveLength(1);
+    expect(s.position()).toMatchObject({ tokensHeld: 250_000n, proceedsLamports: 750_000_000n, owedSells: [] });
+  });
+
+  it('one that went out before a crash and did not land is sold once after it', async () => {
+    const s = server(same);
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'gone' : 'ok');
+    void theySell(s, 500_000n); await sleep(5);
+    s.crash();
+    s.chain.failed.add('S1');
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([750_000n, 750_000n]);
+    expect(s.position()).toMatchObject({ tokensHeld: 250_000n, owedSells: [] });
+  });
+
+  it('a sell that is done leaves nothing owed; one that gives up after its tries is not owed any more either', async () => {
+    const s = server(same);
+    await s.buy();
+    await theySell(s, 1_000_000n); await s.engine.idle(); // they sold half: we sell half
+    expect(s.position()).toMatchObject({ tokensHeld: 500_000n, owedSells: [] });
+    s.chain.plan = () => 'fail';
+    await theySell(s, 500_000n); await s.engine.idle(); // half of theirs again: it fails, and keeps failing
+    for (let i = 0; i < 12; i++) { s.at(60_000 * (i + 1)); await s.tick(); }
+    expect(s.feed().some((m) => /Gave up on/.test(m))).toBe(true);
+    expect(s.position().owedSells).toEqual([]);
+  });
+});
+
+describe('databases written by earlier versions (owed sells)', () => {
+  it('a full exit owed in the old form still reads, and a database without the owed sells column opens and gets it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ml-store-'));
+    const path = join(dir, 'old.db');
+    const first = new Store(path);
+    const uid = first.createUser('u', 'x');
+    const id = first.insertPosition({ userId: uid, copyId: 1, mint: MINT, mode: 'live', leaderSig: 'L', sell: validateSettings({ leader: LEADER }).sell, copyName: 'c', leader: LEADER, now: 1 });
+    first.db.exec('ALTER TABLE positions DROP COLUMN owed_sells');
+    first.db.prepare('UPDATE positions SET exit_owed = ? WHERE id = ?').run('{"reason":"mirror","tag":"L1"}', id);
+    first.close();
+    const again = new Store(path);
+    expect(again.position(id)).toMatchObject({ exitOwed: { reason: 'mirror', tag: 'L1' }, owedSells: [] });
+    again.updatePosition(id, { owedSells: [{ reason: 'mirror', percent: 75, tag: 'L2' }] });
+    expect(again.position(id)!.owedSells).toEqual([{ reason: 'mirror', percent: 75, tag: 'L2' }]);
+    again.close();
+  });
+});
