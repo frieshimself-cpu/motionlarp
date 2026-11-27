@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 589 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 599 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -637,6 +637,24 @@ the sell heard while nothing can be written): default mix 0 of 2,000, crash 0 of
 2,000, dbfault 1 of 2,000 (seed 1411 again), all saved cases pass, the self-test catches every planted fault. (The fuzzer had to learn that their buy, not their sell, is dropped when it
 cannot be marked seen; before that it flagged 560 seeds of 2,000 in dbfault for buys and skip lines the engine rightly
 never made.) `npm test`: 589 tests.
+
+**The copy's transaction, built about four times faster** (f46e756). From their trade heard, our buy is built and
+signed in **0.42 ms on a coin traded before** (2.9 ms before) and **1.27 ms on a brand-new coin** (3.1 ms), offline on
+this machine, median of 2,000 builds of a 7 SOL copy buy with the Scharo preset's fees. Where the time went (a CPU
+profile): 42 % working out program addresses (a hash and a curve check per try, 0.1 to 0.2 ms each, about a dozen per
+buy, several twice), 14 % web3.js's JavaScript signature (it works the wallet's public key out again every time), and
+much of the rest turning addresses into text to put the transaction together. Now program addresses are worked out once
+and remembered (the same seeds always give the same address), an address's text once per key, and transactions are
+signed with Node's own ed25519 (40 µs instead of 360 µs). What a brand-new coin still costs is its own addresses (its
+curve, its token accounts, its creator's vault), which cannot be known before the coin is first seen. The transactions
+are the same, byte for byte: nine copy buys built from fixed inputs (the coin of a real mainnet buy and two new coins,
+three rounds each) hash the same on the code before and after, signatures included; `tests/fast-build.test.ts` checks
+the addresses, bumps, text and signatures against web3.js's own. Sells go through the same builder and signer.
+The whole stretch inside the server, from their trade heard to our buy handed to the sender (the real executor, the
+network mocked, a file database, the speed reviewers' probe, two rounds of 1,500): median **0.96 ms** (p90 1.3 to
+1.4 ms), against 3.06 to 3.21 ms before; 0.26 ms of it is the engine's own bookkeeping before the build (the trade
+marked seen, the position written down before anything goes out).
+`npm test`: 599 tests.
 
 ## Not yet verified
 
