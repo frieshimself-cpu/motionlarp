@@ -98,6 +98,8 @@ const QUOTE_CACHE_MS = 1_500;
 /** A coin Jupiter cannot route is not asked again on every price check for this long. */
 const NO_ROUTE_BACKOFF_MS = 30_000;
 const NO_ROUTE = /no routes|could_not_find|not tradable|not_tradable/i;
+/** Rent minimum of a plain account: a transfer smaller than this into an EMPTY account fails, and takes the trade with it. */
+const RENT_MIN = 890_880n;
 
 /**
  * The attempts to build a Jupiter trade with our own transfers inside, in order, when one does not fit in a packet:
@@ -125,6 +127,31 @@ export class ChainExecutor implements Executor {
   private readonly tokenPrograms = new Map<string, PublicKey>();
   private readonly quoteCache = new Map<string, { at: number; lamports: bigint }>();
   private readonly quoteFails = new Map<string, { until: number; error: Error }>();
+  private feeWallet = { at: 0, funded: true };
+
+  /**
+   * Whether a platform fee of this size can be sent to the fee wallet. A fee under the rent minimum (at 1 %: any
+   * trade under about 0.09 SOL) fails on chain when the fee wallet is empty, and takes the trade with it (sells too):
+   * then it is left out until the wallet holds enough again. Read at most once a minute, only for such small fees.
+   */
+  private async feePayable(fee: bigint): Promise<boolean> {
+    if (fee <= 0n || fee >= RENT_MIN || !config.feeWallet) return true;
+    if (Date.now() - this.feeWallet.at > 60_000) {
+      try {
+        const lamports = BigInt(await getConnection().getBalance(new PublicKey(config.feeWallet), 'confirmed'));
+        this.feeWallet = { at: Date.now(), funded: lamports >= RENT_MIN };
+        if (!this.feeWallet.funded) log.warn('the fee wallet is empty: platform fees under 0.00089 SOL are left out until it holds 0.001 SOL', {});
+      } catch {
+        // keep the last answer
+      }
+    }
+    return this.feeWallet.funded;
+  }
+
+  /** The fee basis points to use for a trade whose fee is computed on `amount`. */
+  private async feeBpsFor(amount: bigint, feeBps: number): Promise<number> {
+    return (await this.feePayable(feeLamports(amount, feeBps))) ? feeBps : 0;
+  }
 
   isLive(req: { live: boolean; exit?: boolean }): boolean {
     // A sell of a position bought for real goes out even while the Live switch is off (only new buys stop).
@@ -323,7 +350,7 @@ export class ChainExecutor implements Executor {
       }
       const built = await venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct });
       const spend = built.lamportsIn ?? req.lamports;
-      const ixs = withFee(built.instructions, req.wallet.publicKey, spend, req.feeBps, config.feeWallet);
+      const ixs = withFee(built.instructions, req.wallet.publicKey, spend, await this.feeBpsFor(spend, req.feeBps), config.feeWallet);
       const tx = await this.nativeTx(req, ixs.instructions);
       const sim = await sendTransaction(tx.tx, false);
       if (!sim.ok) return { ok: false, error: sim.error };
@@ -337,7 +364,7 @@ export class ChainExecutor implements Executor {
     // counted on that, not on the full amount.
     const spend = built.lamportsIn ?? req.lamports;
     // The fee transfer rides in the same transaction, after the swap: no trade, no fee.
-    const ixs = withFee(built.instructions, req.wallet.publicKey, spend, req.feeBps, config.feeWallet);
+    const ixs = withFee(built.instructions, req.wallet.publicKey, spend, await this.feeBpsFor(spend, req.feeBps), config.feeWallet);
     const tx = await this.nativeTx(req, ixs.instructions, true);
     return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'buy', built.expectedOut, spend + ixs.fee + this.txCost(req), before, ixs.fee);
   }
@@ -364,7 +391,8 @@ export class ChainExecutor implements Executor {
           if (!smallerRouteOk(BigInt(found.quote.outAmount), BigInt(quote.outAmount))) throw new Error('no routes that small at a fair price');
         }
         const { tx, lastValidBlockHeight } = await this.jup.swap(quote, req.wallet.publicKey, BigInt(Math.round(req.priorityFeeSol * 1e9)));
-        const fee = attempt.fee && config.feeWallet ? feeOn(BigInt(quote.outAmount)) : 0n;
+        let fee = attempt.fee && config.feeWallet ? feeOn(BigInt(quote.outAmount)) : 0n;
+        if (fee > 0n && !(await this.feePayable(fee))) fee = 0n;
         let signed: VersionedTransaction = tx;
         const extra: TransactionInstruction[] = [];
         if (fee > 0n) extra.push(SystemProgram.transfer({ fromPubkey: req.wallet.publicKey, toPubkey: new PublicKey(config.feeWallet), lamports: fee }));
@@ -437,7 +465,7 @@ export class ChainExecutor implements Executor {
     // A market that cannot pay for all of it (a mayhem curve short of SOL) sells what it can pay for: that part is
     // sent and booked, the rest stays in the wallet for a later sell.
     const selling = built.tokensIn !== undefined && built.tokensIn < tokens ? built.tokensIn : tokens;
-    const ixs = withFee(built.instructions, req.wallet.publicKey, built.expectedOut, req.feeBps, config.feeWallet);
+    const ixs = withFee(built.instructions, req.wallet.publicKey, built.expectedOut, await this.feeBpsFor(built.expectedOut, req.feeBps), config.feeWallet);
     if (selling < tokens && built.expectedOut - ixs.fee <= this.txCost(req)) {
       // What it could pay for would not even cover this transaction: nothing is sent, the sell waits for SOL.
       return { ok: false, error: 'the curve holds too little SOL to pay for this sell right now (it fills up again when someone buys)' };
@@ -511,6 +539,8 @@ export class ChainExecutor implements Executor {
       }
       // Landed and failed: the program's own words say why (slippage, a finished curve, not enough SOL, …).
       let reason = confirmed.reason;
+      // Our small fee could not open an empty fee wallet: left out from the retry on.
+      if (/InsufficientFundsForRent/i.test(reason) && platformFee > 0n && platformFee < RENT_MIN) this.feeWallet = { at: Date.now(), funded: false };
       if (/errored/.test(reason)) {
         const detail = await getTransaction(sent.signature).then((t) => programError(t?.meta?.logMessages)).catch(() => null);
         if (detail) reason = `${reason} (${detail})`;

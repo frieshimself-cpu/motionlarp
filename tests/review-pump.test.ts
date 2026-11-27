@@ -6,6 +6,8 @@ import BN from 'bn.js';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { config } from '../src/config.js';
+import { setConnectionForTests } from '../src/chain/connection.js';
+import type { Connection } from '@solana/web3.js';
 import { ChainExecutor } from '../src/engine/executor.js';
 import { friendlyError } from '../src/log.js';
 import { PumpFunVenue } from '../src/venues/pumpfun.js';
@@ -18,6 +20,7 @@ const saved = { ...config };
 afterEach(() => {
   Object.assign(config, saved);
   vi.restoreAllMocks();
+  setConnectionForTests(null);
 });
 
 // Flat fees (no fee table): 0.95 % protocol + 0.30 % creator.
@@ -197,5 +200,48 @@ describe('a PumpSwap trade and the wallet\'s wrapped-SOL account', () => {
     const sellState = tradeState({ userQuoteAccountInfo: { a: 1 }, userBaseAccountInfo: { b: 1 } } as never, 'sell') as unknown as Record<string, unknown>;
     expect(sellState.userQuoteAccountInfo).toBeNull();
     expect(sellState.userBaseAccountInfo).toEqual({ b: 1 }); // a sell's coin account exists: we hold the coin
+  });
+});
+
+describe('the fee wallet was emptied while the site runs (from the Jupiter review)', () => {
+  // A transfer smaller than the rent minimum (0.00089 SOL) into an EMPTY account fails, and takes the trade with it.
+  function executor(built: BuildResult, feeWalletLamports: number) {
+    const ex = new ChainExecutor();
+    const seen: { read: unknown[] | null; balanceReads: number } = { read: null, balanceReads: 0 };
+    ex.isLive = () => true;
+    (ex.pf as unknown as { venueFor: () => unknown }).venueFor = () => ({ buildSell: async () => built, buildBuy: async () => built });
+    const anyEx = ex as unknown as Record<string, unknown>;
+    anyEx.ataBalance = async () => 1_000n;
+    anyEx.tokenBalance = async () => 0n;
+    anyEx.nativeTx = async () => ({ tx: {}, lastValidBlockHeight: 1 });
+    anyEx.sendAndRead = async (...args: unknown[]) => { seen.read = args; return { ok: true, signature: 's', tokens: args[4], lamports: args[5], simulated: false }; };
+    setConnectionForTests({ getBalance: async () => { seen.balanceReads++; return feeWalletLamports; } } as unknown as Connection);
+    return { ex, seen };
+  }
+  const req = (over: Record<string, unknown> = {}) => ({ wallet: Keypair.generate(), mint: PublicKey.unique().toBase58(), slippagePct: 25, priorityFeeSol: 0.001, tipSol: 0, live: true, feeBps: 100, ...over });
+  const sell = (ex: ChainExecutor) => (ex as unknown as { nativeSell: (r: unknown, p: ResolvedPool) => Promise<unknown> }).nativeSell.bind(ex);
+
+  it('a small sell leaves the platform fee out while the fee wallet is empty (the sell would fail on chain with it)', async () => {
+    config.feeWallet = Keypair.generate().publicKey.toBase58();
+    const { ex, seen } = executor({ instructions: [], expectedOut: 50_000_000n, minOut: 0n }, 0); // fee 0.0005 SOL
+    await sell(ex)({ ...req(), tokens: 1_000n }, curvePool());
+    expect(seen.read![7]).toBe(0n);
+  });
+
+  it('a funded fee wallet takes the small fee as before; it is read at most once a minute', async () => {
+    config.feeWallet = Keypair.generate().publicKey.toBase58();
+    const { ex, seen } = executor({ instructions: [], expectedOut: 50_000_000n, minOut: 0n }, 5_000_000);
+    await sell(ex)({ ...req(), tokens: 1_000n }, curvePool());
+    expect(seen.read![7]).toBe(500_000n);
+    await sell(ex)({ ...req(), tokens: 1_000n }, curvePool());
+    expect(seen.balanceReads).toBe(1);
+  });
+
+  it('a fee above the rent minimum is always paid (it can open an empty account) and needs no read', async () => {
+    config.feeWallet = Keypair.generate().publicKey.toBase58();
+    const { ex, seen } = executor({ instructions: [], expectedOut: 2_000_000_000n, minOut: 0n }, 0); // fee 0.02 SOL
+    await sell(ex)({ ...req(), tokens: 1_000n }, curvePool());
+    expect(seen.read![7]).toBe(20_000_000n);
+    expect(seen.balanceReads).toBe(0);
   });
 });
