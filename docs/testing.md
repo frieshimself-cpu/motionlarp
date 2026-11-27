@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 612 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 622 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -679,6 +679,30 @@ blocks past its last block). With the harness taking a sell as settled exactly w
 change, kept out of the repository until the fuzzer observes the engine's verdicts itself): default 0 of 2,000, lag 0
 of 2,000, ghost 0 of 1,500, crash 0 of 1,500, and its check of a "not found" taken as final while the sell could still
 land never fired. `npm test`: 612 tests.
+
+**The review of that commit** (two reviewers, each finding reproduced by a separate verifier) found two ways back to a
+wrong "never landed", fixed in 63fc09c with tests that fail on the code before. A read of the chain's tip that failed
+brought the fixed times back, and with them the double sale on a slow chain (the tip read is most likely to fail exactly
+when a trade's outcome is unknown because the RPC was failing): the highest tip read so far now stands in for a read
+that fails (an earlier read is still a lower bound on the chain, read before the status that follows), and an executor
+that can read the tip never falls back to a fixed time (no verdict until a tip is known, ten minutes at most). And "30
+blocks past, whatever node" believed a node whose own slot showed it had not reached the trade's last block: once buys
+were settled from the chain, a node 100 slots behind (the backup link, say) could mark a buy that landed failed, its
+coins never sold. A status that tells how far along its node was is now believed only once that node has reached the
+slot the trade's last block can have at the latest (the tip's slot less the blocks since: a slot per block at least),
+ten blocks past it; "30 blocks past, whatever node" is kept only for a status without a slot (a node L slots behind is
+believed once the tip is L blocks past, as quickly as before for the usual few slots). Also: a buy this process saw land,
+whose booking failed, is never marked failed on a "not found"; the settling passes read the tip once per pass, not once
+per buy or leftover; and a sell whose outcome is unknown says so in the feed while it is read ("normally within a minute
+or two, ten minutes at most"; the position's other sells wait for it), where nothing was said before. Each of ten planted
+regressions of these rules fails at least one test (the highest tip, the exact slot bound, the margin, the fallback, the
+confirmed buy, one tip per pass, the feed line among them). The fuzzer on 63fc09c: crash 0 of 1,500, diskfull 0 of 1,500,
+outage 0 of 1,000, dbfault 1 of 1,500 (seed 1411, the known case), all saved cases pass, the self-test catches every
+planted fault; default 11 of 2,000, lag 38 of 2,000 and ghost 88 of 1,500, every one of them the harness's old 120 s
+timing (US1, B1, FE3; no money or token check failed: in the lag run 1,582 sells left behind had landed and all 1,582
+were booked, none dropped). With the harness taking a sell as settled exactly when the engine's rule does, from the
+highest tip the engine has read: default 0 of 2,000, lag 0 of 2,000, ghost 0 of 1,500, crash 0 of 1,500. Live since
+17:54 UTC (a gap of 1.7 s). `npm test`: 622 tests.
 
 **The browser suite on the last code of the day** (05c74a3 to ecbb282 as the sizes ran one after another, the later
 ones with the faster build): **0 failed checks at all seven sizes** (655 at 1280 px, 652 at each of 1024, 768, 412,
