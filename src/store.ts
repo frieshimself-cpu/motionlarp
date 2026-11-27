@@ -306,8 +306,11 @@ export class Store {
     return this.run('UPDATE licenses SET used_by = ?, used_at = ? WHERE id = ? AND used_by IS NULL AND revoked = 0', userId, Date.now(), id).changes === 1;
   }
   /** A lost key is replaced: same license and account, new key; the old key stops working. */
+  /** A new key ends every session opened with the old one: a leaked key must lose its access at once. */
   rekeyLicense(id: number, keyHash: string, hint: string): boolean {
-    return this.run('UPDATE licenses SET key_hash = ?, hint = ? WHERE id = ?', keyHash, hint, id).changes === 1;
+    const ok = this.run('UPDATE licenses SET key_hash = ?, hint = ? WHERE id = ?', keyHash, hint, id).changes === 1;
+    if (ok) this.run('DELETE FROM sessions WHERE user_id = (SELECT used_by FROM licenses WHERE id = ?)', id);
+    return ok;
   }
   updateLicense(id: number, patch: { label?: string; feeBps?: number | null }): void {
     if (patch.label !== undefined) this.run('UPDATE licenses SET label = ? WHERE id = ?', patch.label, id);

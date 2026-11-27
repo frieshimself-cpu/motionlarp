@@ -110,7 +110,11 @@ describe('admin area', () => {
   });
 
   it('a lost key is replaced: the new key opens the same account, the old one stops working', async () => {
+    const before = new Client(); // a browser that got in with the old key (a leaked key, say)
+    expect((await before.call('POST', '/api/enter', { license: key })).status).toBe(200);
+    expect((await before.call('GET', '/api/state')).status).toBe(200);
     const r = await admin.call('POST', `/api/admin/licenses/${licenseId}/reissue`);
+    expect((await before.call('GET', '/api/state')).status).toBe(401); // logged out with the old key
     const fresh = String(r.body.key);
     expect(fresh).toMatch(/^WM-/);
     expect(fresh).not.toBe(key);

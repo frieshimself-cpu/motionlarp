@@ -217,7 +217,10 @@ function bind() {
   act('[data-fee]', 'fee', async (id) => {
     const v = prompt('Fee for this license in % (leave empty to use the default fee):', '');
     if (v === null) return;
-    await api('PUT', `/api/admin/licenses/${id}`, { feePercent: v.trim() === '' ? null : Number(v) });
+    // "0%", "0,5" and " 1 " are read as the numbers they mean; anything else is refused, never taken as "default".
+    const t = v.trim().replace(',', '.').replace(/%$/, '').trim();
+    if (t !== '' && !/^\d*\.?\d+$/.test(t)) { alert(`"${v}" is not a number: nothing was changed.`); return; }
+    await api('PUT', `/api/admin/licenses/${id}`, { feePercent: t === '' ? null : Number(t) });
   });
   act('[data-disable]', 'disable', async (id) => { if (confirm('Disable this user? They are logged out and get no new copies.')) await api('PUT', `/api/admin/users/${id}`, { disabled: true }); });
   act('[data-enable]', 'enable', (id) => api('PUT', `/api/admin/users/${id}`, { disabled: false }));

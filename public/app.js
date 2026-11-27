@@ -269,9 +269,9 @@ function bindDash() {
 // ── copy editor ──────────────────────────────────────────────────────────
 function stageRow(kind, a, b, of = "of what's left") {
   const first = kind === 'timed'
-    ? `<span>After</span><div class="unit"><input type="number" min="0" step="any" value="${esc(a)}" data-a aria-label="seconds"><span>sec</span></div>`
-    : `<span>At −</span><div class="unit"><input type="number" min="1" max="99" step="any" value="${esc(a)}" data-a aria-label="loss percent"><span>%</span></div>`;
-  return `<div class="stage" data-row="${kind}">${first}<span>sell</span><div class="unit"><input type="number" min="0.01" max="100" step="any" value="${esc(b)}" data-b aria-label="percent to sell"><span>%</span></div><span class="rest dim">${of}</span><button type="button" class="btn small ghost" data-remove aria-label="Remove">✕</button></div>`;
+    ? `<span>After</span><div class="unit"><input type="text" inputmode="decimal" min="0" step="any" value="${esc(a)}" data-a aria-label="seconds"><span>sec</span></div>`
+    : `<span>At −</span><div class="unit"><input type="text" inputmode="decimal" min="1" max="99" step="any" value="${esc(a)}" data-a aria-label="loss percent"><span>%</span></div>`;
+  return `<div class="stage" data-row="${kind}">${first}<span>sell</span><div class="unit"><input type="text" inputmode="decimal" min="0.01" max="100" step="any" value="${esc(b)}" data-b aria-label="percent to sell"><span>%</span></div><span class="rest dim">${of}</span><button type="button" class="btn small ghost" data-remove aria-label="Remove">✕</button></div>`;
 }
 
 function rule(id, title, desc, on, body) {
@@ -310,21 +310,21 @@ function openEditor(copy, preset) {
           <div class="field"><label for="f-name">Nickname</label><input id="f-name" type="text" value="${esc(d.name)}" maxlength="40" placeholder="Optional"></div>
         </div>
         <div class="row2">
-          <div class="field"><label for="f-buy">Your buy</label><div class="unit"><input id="f-buy" type="number" min="0.001" step="any" value="${esc(d.buySol)}"><span>SOL</span></div><div class="hint" id="buy-hint"></div></div>
-          <div class="field"><label for="f-min">Only when they buy at least</label><div class="unit"><input id="f-min" type="number" min="0" step="any" value="${esc(d.minLeaderBuySol)}"><span>SOL</span></div><div class="hint">Their smaller buys are skipped.</div></div>
+          <div class="field"><label for="f-buy">Your buy</label><div class="unit"><input id="f-buy" type="text" inputmode="decimal" min="0.001" step="any" value="${esc(d.buySol)}"><span>SOL</span></div><div class="hint" id="buy-hint"></div></div>
+          <div class="field"><label for="f-min">Only when they buy at least</label><div class="unit"><input id="f-min" type="text" inputmode="decimal" min="0" step="any" value="${esc(d.minLeaderBuySol)}"><span>SOL</span></div><div class="hint">Their smaller buys are skipped.</div></div>
         </div>
       </div>
 
       <div class="group">
         <div class="title">Trading fees</div>
         <div class="row4">
-          <div class="field"><label for="f-prio">Buy priority fee</label><div class="unit"><input id="f-prio" type="number" min="0" max="0.1" step="any" value="${esc(d.priorityFeeSol)}"><span>SOL</span></div></div>
-          <div class="field"><label for="f-tip">Buy tip</label><div class="unit"><input id="f-tip" type="number" min="0" max="0.5" step="any" value="${esc(d.tipSol ?? 0)}"><span>SOL</span></div></div>
-          <div class="field"><label for="f-sprio">Sell priority fee</label><div class="unit"><input id="f-sprio" type="number" min="0" max="0.1" step="any" value="${esc(sp)}"><span>SOL</span></div></div>
-          <div class="field"><label for="f-stip">Sell tip</label><div class="unit"><input id="f-stip" type="number" min="0" max="0.5" step="any" value="${esc(st)}"><span>SOL</span></div></div>
+          <div class="field"><label for="f-prio">Buy priority fee</label><div class="unit"><input id="f-prio" type="text" inputmode="decimal" min="0" max="0.1" step="any" value="${esc(d.priorityFeeSol)}"><span>SOL</span></div></div>
+          <div class="field"><label for="f-tip">Buy tip</label><div class="unit"><input id="f-tip" type="text" inputmode="decimal" min="0" max="0.5" step="any" value="${esc(d.tipSol ?? 0)}"><span>SOL</span></div></div>
+          <div class="field"><label for="f-sprio">Sell priority fee</label><div class="unit"><input id="f-sprio" type="text" inputmode="decimal" min="0" max="0.1" step="any" value="${esc(sp)}"><span>SOL</span></div></div>
+          <div class="field"><label for="f-stip">Sell tip</label><div class="unit"><input id="f-stip" type="text" inputmode="decimal" min="0" max="0.5" step="any" value="${esc(st)}"><span>SOL</span></div></div>
         </div>
         <div class="row2">
-          <div class="field"><label for="f-slip">Slippage</label><div class="unit"><input id="f-slip" type="number" min="0.5" max="100" step="any" value="${esc(d.slippagePct)}"><span>%</span></div></div>
+          <div class="field"><label for="f-slip">Slippage</label><div class="unit"><input id="f-slip" type="text" inputmode="decimal" min="0.5" max="100" step="any" value="${esc(d.slippagePct)}"><span>%</span></div></div>
           <div class="hint" style="align-self:center">Priority fee: paid to the network on every transaction. Tip: an extra payment to land sooner, sent through Helius Sender; 0 for none. A tip of 0.001 SOL or more uses every fast lane.</div>
         </div>
       </div>
@@ -346,7 +346,7 @@ function openEditor(copy, preset) {
           `<div id="stop-rows">${(d.sell.stopLoss.length ? d.sell.stopLoss : [{ lossPct: 30, percent: 100 }]).map((l) => stageRow('stop', l.lossPct, l.percent)).join('')}</div>
            <button type="button" class="btn small" data-add="stop">Add level</button>`)}
         ${rule('dead', 'Dead coin', 'Nobody is trading it any more: get out.', d.sell.deadCoin.enabled,
-          `<div class="stage" style="grid-template-columns:auto 120px auto"><span>No trades for</span><div class="unit"><input id="f-idle" type="number" min="5" step="1" value="${esc(d.sell.deadCoin.idleSec)}"><span>sec</span></div><span>→ sell everything</span></div>`)}
+          `<div class="stage" style="grid-template-columns:auto 120px auto"><span>No trades for</span><div class="unit"><input id="f-idle" type="text" inputmode="decimal" min="5" step="1" value="${esc(d.sell.deadCoin.idleSec)}"><span>sec</span></div><span>→ sell everything</span></div>`)}
       </div>
 
       <div class="group" style="margin-bottom:0">
@@ -418,7 +418,16 @@ function openEditor(copy, preset) {
     const on = (id) => $(`[data-rule="${id}"] [data-on]`, form).checked;
     // An empty box is sent as empty (the server then says which box), never as 0: "after 0 s sell 100 %" would sell
     // the whole bag the moment the buy lands.
-    const num = (el) => (el.value.trim() === '' ? null : Number(el.value.replace(',', '.')));
+    // Every number box: a comma is the decimal point ("0,05" is 0.05, never 5), anything that is not a plain number
+    // is refused with the box's name, and a required box left empty is refused (the server would put its default in).
+    const bad = [];
+    const parse = (el, label, empty) => {
+      const t = el.value.trim().replace(',', '.');
+      if (t === '') { if (empty === undefined) bad.push(`${label}: enter a number`); return empty ?? null; }
+      if (!/^\d*\.?\d+$/.test(t)) { bad.push(`${label}: "${el.value.trim()}" is not a number`); return null; }
+      return Number(t);
+    };
+    const num = (el) => parse(el, el.getAttribute('aria-label') || 'a box', null);
     const rows = (sel, a, b) => $$(sel, form).map((r) => ({ [a]: num($('[data-a]', r)), [b]: num($('[data-b]', r)) }));
     const leaders = [...new Set($('#f-leader').value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean))];
     const nick = $('#f-name').value.trim();
@@ -426,23 +435,25 @@ function openEditor(copy, preset) {
       leader: leaders[0] ?? '',
       name: nick,
       enabled: copy ? copy.enabled : true,
-      buySol: Number($('#f-buy').value),
-      minLeaderBuySol: Number($('#f-min').value || 0),
-      slippagePct: Number($('#f-slip').value),
-      priorityFeeSol: Number($('#f-prio').value),
-      tipSol: Number($('#f-tip').value || 0),
-      sellPriorityFeeSol: Number($('#f-sprio').value),
-      sellTipSol: Number($('#f-stip').value || 0),
+      buySol: parse($('#f-buy'), 'Your buy'),
+      minLeaderBuySol: parse($('#f-min'), 'Only when they buy at least', 0),
+      slippagePct: parse($('#f-slip'), 'Slippage'),
+      priorityFeeSol: parse($('#f-prio'), 'Buy priority fee'),
+      tipSol: parse($('#f-tip'), 'Buy tip', 0),
+      sellPriorityFeeSol: parse($('#f-sprio'), 'Sell priority fee'),
+      sellTipSol: parse($('#f-stip'), 'Sell tip', 0),
       oncePerCoin: $('#f-once').checked,
       sell: {
         mirror: { enabled: on('mirror'), mode: $('#f-mirror-mode .on').dataset.v },
         timed: on('timed') ? rows('[data-row="timed"]', 'afterSec', 'percent') : [],
         timedOf: $('#f-timed-of .on').dataset.v,
         stopLoss: on('stop') ? rows('[data-row="stop"]', 'lossPct', 'percent') : [],
-        deadCoin: { enabled: on('dead'), idleSec: Number($('#f-idle').value) },
+        deadCoin: { enabled: on('dead'), idleSec: on('dead') ? parse($('#f-idle'), 'No trades for') : (parse($('#f-idle'), 'No trades for', 120) ?? 120) },
       },
     };
-    if (live && !copy && !confirm(`The site is live: this buys ${body.buySol} SOL with your real wallet every time ${leaders.length > 1 ? 'one of these wallets' : body.name || 'this wallet'} buys. Continue?`)) return;
+    if (bad.length) { $('#form-err').innerHTML = `<div class="err">${esc(bad.join(' · '))}</div>`; return; }
+    // On a live site a new copy, or a changed buy size, is confirmed with the amount in words.
+    if (live && (!copy || body.buySol !== copy.buySol) && !confirm(`The site is live: this buys ${body.buySol} SOL with your real wallet every time ${leaders.length > 1 ? 'one of these wallets' : body.name || 'this wallet'} buys. Continue?`)) return;
     let done = 0;
     try {
       if (copy) await api('PUT', `/api/copies/${copy.id}`, body);
@@ -471,8 +482,10 @@ async function loadState() {
   try {
     state = await api('GET', `/api/state${TZ}`);
     if (tab === 'history') history = await api('GET', `/api/history${TZ}`).catch(() => history);
-    // Never re-draw under someone typing (the private key box above all).
-    const typing = document.activeElement && app.contains(document.activeElement) && /INPUT|TEXTAREA/.test(document.activeElement.tagName);
+    // Never re-draw under someone typing (the private key box above all). A switch is not typing, and neither is
+    // the login form: after Enter in the key box the dashboard must replace it.
+    const a = document.activeElement;
+    const typing = a && app.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && a.type !== 'checkbox')) && !a.closest('#auth-form');
     if (modal.hidden && !typing && !$('#wk')?.value) render();
   } catch (err) {
     if (err.status === 401) { state = null; renderAuth(); return; }
