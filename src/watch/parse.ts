@@ -86,6 +86,15 @@ export function walletChange(tx: RawTransaction, owner: string, mint: string): {
   return { lamports, tokens };
 }
 
+/** Whether the key at `index` signed the transaction ('jsonParsed' says so per key; 'json' gives the count). */
+export function signedBy(tx: RawTransaction, index: number): boolean {
+  const msg = tx.transaction.message;
+  const k = msg.accountKeys[index];
+  if (k && typeof k === 'object' && typeof k.signer === 'boolean') return k.signer;
+  if (msg.header && typeof msg.header.numRequiredSignatures === 'number') return index < msg.header.numRequiredSignatures;
+  return true; // no way to tell (older recordings): as before
+}
+
 export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTrade[] {
   const meta = tx.meta;
   if (!meta || meta.err) return [];
@@ -93,6 +102,11 @@ export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTra
   const venue = keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : keys.includes(PUMP_PROGRAM) ? 'pumpfun' : 'other';
   const leaderIdx = keys.indexOf(leader);
   if (leaderIdx < 0) return [];
+  // A buy is the wallet's only if the wallet signed the transaction, or its own account paid for it. (Anyone can
+  // name a wallet in a transaction, send it coins, and drain lamports from a token account they made for it and
+  // handed over, without its signature: that must not read as the wallet buying. A wallet that is a program account,
+  // such as a smart wallet, does not sign but does pay from its own account.)
+  const signed = signedBy(tx, leaderIdx);
 
   const lamportDelta = (i: number) => BigInt((meta.postBalances[i] ?? 0) - (meta.preBalances[i] ?? 0));
   let sol = lamportDelta(leaderIdx) + (leaderIdx === 0 ? BigInt(meta.fee) : 0n);
@@ -120,11 +134,19 @@ export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTra
   const coins = [...delta.keys()].filter((m) => !STABLE_MINTS.has(m));
 
   const trades: LeaderTrade[] = [];
+  const ownPaid = -(lamportDelta(leaderIdx) + (leaderIdx === 0 ? BigInt(meta.fee) : 0n));
   for (const mint of coins) {
     const d = delta.get(mint)!;
     const side = d > 0n ? 'buy' : 'sell';
+    if (side === 'buy' && !signed && ownPaid < SOL_DUST) continue;
     const solPaid = side === 'buy' ? -sol : sol; // positive = SOL went the other way
     let counter: LeaderTrade['counter'];
+    if (side === 'buy' && solPaid >= SOL_DUST) {
+      // Paid with a stablecoin AND a little SOL (a bot's tip or fee): the stablecoin is the price. It is valued in
+      // SOL and added before the minimum is checked.
+      const stable = [...delta.entries()].find(([m, x]) => m !== mint && STABLE_MINTS.has(m) && x < 0n);
+      if (stable) counter = { mint: stable[0], amount: -stable[1] };
+    }
     if (solPaid < SOL_DUST) {
       // Not paid in SOL: a stablecoin first, else another coin, moving the opposite way (largest wins).
       const opposite = [...delta.entries()].filter(([m, x]) => m !== mint && (side === 'buy' ? x < 0n : x > 0n));
@@ -139,7 +161,7 @@ export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTra
       leader,
       mint,
       side,
-      solLamports: counter ? 0n : solPaid,
+      solLamports: counter && solPaid < SOL_DUST ? 0n : solPaid,
       ...(counter ? { counter } : {}),
       tokenAmount: side === 'buy' ? post - pre : pre - post,
       tokensBefore: pre,

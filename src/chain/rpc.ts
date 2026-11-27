@@ -22,7 +22,15 @@ export interface RawTransaction {
     loadedAddresses?: { writable: string[]; readonly: string[] };
     logMessages?: string[];
   } | null;
-  transaction: { signatures: string[]; message: { accountKeys: (string | { pubkey: string })[] } };
+  transaction: {
+    signatures: string[];
+    message: {
+      /** 'json' encoding: plain keys; 'jsonParsed' (the Helius stream): objects that say whether the key signed. */
+      accountKeys: (string | { pubkey: string; signer?: boolean })[];
+      /** 'json' encoding: the first numRequiredSignatures keys are the signers. */
+      header?: { numRequiredSignatures: number; numReadonlySignedAccounts?: number; numReadonlyUnsignedAccounts?: number };
+    };
+  };
 }
 
 let nextId = 1;

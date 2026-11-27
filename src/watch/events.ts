@@ -4,7 +4,7 @@
 // normal fetch-and-parse path.
 import { Connection } from '@solana/web3.js';
 import { pumpSdk } from '../venues/sdk.js';
-import { PUMP_AMM_PROGRAM, WSOL_MINT, type LeaderTrade } from './parse.js';
+import { PUMP_AMM_PROGRAM, PUMP_PROGRAM, WSOL_MINT, type LeaderTrade } from './parse.js';
 
 /** pump.fun writes the zero key as the quote mint of a SOL-priced coin. */
 const SYSTEM_PROGRAM = '11111111111111111111111111111111';
@@ -21,8 +21,15 @@ const str = (v: unknown) => (v && typeof (v as { toString: () => string }).toStr
 export function fastBuysFromLogs(logs: string[], signature: string, leader: string, slot: number): LeaderTrade[] | null {
   if (logs.some((l) => l.includes(PUMP_AMM_PROGRAM) || /log truncated/i.test(l))) return null;
   const buys: LeaderTrade[] = [];
+  // Which program is running: a "Program data" line counts only when pump.fun itself wrote it. (Any program can
+  // log a line shaped like pump.fun's trade event, naming any wallet; pump.fun only writes one for a buy its user
+  // signed.)
+  const running: string[] = [];
   for (const line of logs) {
-    if (!line.startsWith('Program data: ')) continue;
+    const call = /^Program (\w{32,44}) invoke \[/.exec(line);
+    if (call) { running.push(call[1]!); continue; }
+    if (/^Program \w{32,44} (success|failed)/.test(line)) { running.pop(); continue; }
+    if (!line.startsWith('Program data: ') || running[running.length - 1] !== PUMP_PROGRAM) continue;
     let ev: { name: string; data: Record<string, unknown> } | null = null;
     try {
       ev = events().decode(line.slice('Program data: '.length));
@@ -34,10 +41,12 @@ export function fastBuysFromLogs(logs: string[], signature: string, leader: stri
     // A coin priced in another token (USDC, USD1, …): the amounts are not SOL. The full transaction decides.
     const quote = ev.data.quoteMint === undefined ? '' : str(ev.data.quoteMint);
     if (quote && quote !== SYSTEM_PROGRAM && quote !== WSOL_MINT) return null;
-    // Every part of the price the event carries (checked on the Scharo wallet's real buys of 27 Nov 2026): what
-    // reached the curve, the protocol, creator and buyback fees, and the holder rewards.
+    // What the wallet handed pump.fun: the SOL for the curve, the protocol fee and the creator fee (checked to the
+    // lamport against the instruction's own amount on the Scharo wallet's real buys of 27 Nov 2026; the buyback fee
+    // is a slice of the protocol fee, and holder rewards repeat the creator fee, so they are not added again). A
+    // trading bot's own fee is not in the event: the engine allows for it.
     const part = (k: string) => BigInt(ev!.data[k] === undefined || ev!.data[k] === null ? '0' : str(ev!.data[k]));
-    const sol = part('solAmount') + part('fee') + part('creatorFee') + part('buybackFee') + part('holderRewards');
+    const sol = part('solAmount') + part('fee') + part('creatorFee');
     const tokens = BigInt(str(ev.data.tokenAmount));
     buys.push({ signature, leader, mint: str(ev.data.mint), side: 'buy', solLamports: sol, tokenAmount: tokens, tokensBefore: 0n, tokensAfter: tokens, venue: 'pumpfun', slot, blockTime: null, approx: true });
   }

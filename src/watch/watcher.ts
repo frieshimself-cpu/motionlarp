@@ -24,7 +24,16 @@ export interface WatcherDeps {
   maxConcurrentFetches?: number;
   /** True while the Helius transaction stream is delivering full transactions (see handleStreamTx). */
   streamHealthy?: () => boolean;
+  /** How long the stream gets to deliver a transaction the websocket announced, before it is fetched (default 400 ms). */
+  streamGraceMs?: number;
+  /** A transaction whose fetch takes longer than this no longer holds up the wallet's later trades (default 2 s). */
+  stuckMs?: number;
 }
+
+/** A transaction that could not be fetched is tried again on later cycles for this long. */
+const RETRY_FOR_MS = 120_000;
+/** While the stream delivers, the poll (the backup) runs this often at most. */
+const QUIET_POLL_MS = 20_000;
 
 const SEEN_CAP = 20_000;
 /** Programs that move SOL or tokens without trading: a transaction that invokes only these is skipped unfetched. */
@@ -78,6 +87,9 @@ export class Watcher {
   private readonly pending = new Set<Promise<void>>();
   private timer: NodeJS.Timeout | null = null;
   private syncing = false;
+  private stopped = false;
+  /** Signatures whose fetch failed: tried again on later cycles (the poll's cursor has moved past them). */
+  private readonly retryLater = new Map<string, { signature: string; leader: string; until: number }>();
   private readonly getSigs: NonNullable<WatcherDeps['getSignatures']>;
   private readonly getTx: NonNullable<WatcherDeps['getTransaction']>;
 
@@ -88,14 +100,20 @@ export class Watcher {
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     const loop = async () => {
       await this.sync().catch((err) => log.warn('watch cycle failed', { error: safeErrorMessage(err) }));
-      this.timer = setTimeout(loop, this.deps.pollMs);
+      if (this.stopped) return; // stopped while the cycle ran: do not start another
+      // While the stream delivers, the poll is only the backup: every 20 s instead of every few seconds (each poll
+      // costs one request per copied wallet).
+      const wait = this.deps.streamHealthy?.() ? Math.max(this.deps.pollMs, QUIET_POLL_MS) : this.deps.pollMs;
+      this.timer = setTimeout(loop, wait);
     };
     void loop();
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     for (const u of this.unsubs.values()) u();
@@ -125,6 +143,15 @@ export class Watcher {
         }
       }
       await Promise.all([...wanted].map((leader) => this.poll(leader)));
+      // Transactions whose fetch failed earlier: once more, for a couple of minutes.
+      const now = Date.now();
+      for (const [key, r] of this.retryLater) {
+        this.retryLater.delete(key);
+        if (now > r.until || !wanted.has(r.leader) || this.stopped) continue;
+        const job = this.process(r.signature, r.leader, r.until).catch((err) => log.warn('leader transaction failed', { signature: r.signature, error: safeErrorMessage(err) }));
+        this.pending.add(job);
+        void job.finally(() => this.pending.delete(job));
+      }
       await this.drain();
     } finally {
       this.syncing = false;
@@ -155,23 +182,70 @@ export class Watcher {
       return;
     }
     if (newest) this.cursors.set(leader, newest);
+    const fresh: string[] = [];
     for (const s of [...sigs].reverse()) {
       if (s.signature === cursor) continue;
       if (s.err) { this.seen.add(`${s.signature}:${leader}`); continue; }
-      this.handle(s.signature, leader);
+      if (!this.seen.has(`${s.signature}:${leader}`)) fresh.push(s.signature);
+    }
+    if (fresh.length > 1) {
+      const job = this.processBatch(leader, fresh).catch((err) => log.warn('leader transactions failed', { leader, error: safeErrorMessage(err) }));
+      this.pending.add(job);
+      void job.finally(() => this.pending.delete(job));
+    } else if (fresh.length === 1) {
+      this.handle(fresh[0]!, leader);
+    }
+  }
+
+  /**
+   * Several transactions of one wallet found at once (the push feeds missed them, or the server stalled): all are
+   * fetched first. A buy followed in the same batch by that wallet's full exit of the coin is not copied: it would
+   * be bought late and dumped at once.
+   */
+  private async processBatch(leader: string, signatures: string[]): Promise<void> {
+    for (const s of signatures) this.markSeen(`${s}:${leader}`);
+    const fetched = signatures.map((s) => (async () => {
+      const release = await this.slot();
+      try {
+        return await this.fetchTx(s);
+      } finally {
+        release();
+      }
+    })());
+    const txs = await Promise.all(fetched);
+    const trades = txs.map((tx) => (tx ? parseLeaderTrades(tx, leader) : null));
+    for (let i = 0; i < signatures.length; i++) {
+      const tx = txs[i];
+      if (!tx) {
+        this.retryLater.set(`${signatures[i]}:${leader}`, { signature: signatures[i]!, leader, until: Date.now() + RETRY_FOR_MS });
+        continue;
+      }
+      const exitedLater = (mint: string) => trades.slice(i + 1).some((ts) => ts?.some((t) => t.mint === mint && t.side === 'sell' && t.tokensAfter === 0n));
+      const keep = trades[i]!.filter((t) => {
+        if (t.side === 'buy' && exitedLater(t.mint)) {
+          log.info('leader buy skipped: heard late, together with its full exit', { leader, mint: t.mint, sig: signatures[i]!.slice(0, 12) });
+          return false;
+        }
+        return true;
+      });
+      await this.deliver(leader, signatures[i]!, Promise.resolve(tx), 'fetch', keep);
     }
   }
 
   /** Fetch, parse and pass on one signature, once. Logs that never mention pump.fun / PumpSwap skip the fetch. */
-  handle(signature: string, leader: string, logs?: string[], slot?: number): void {
+  handle(signature: string, leader: string, logs?: string[], slot?: number, afterGrace = false): void {
+    if (this.stopped) return;
     const key = `${signature}:${leader}`;
     if (this.seen.has(key)) return;
     const truncated = logs?.some((l) => /log truncated/i.test(l));
     const fromSocket = logs !== undefined;
     const plainBuy = logs && slot !== undefined && !truncated ? fastBuysFromLogs(logs, signature, leader, slot) : null;
-    // The Helius stream brings this transaction in full (no fetch) a moment from now: leave it to the stream. It
-    // stays unmarked, so the poll still picks it up if the stream never delivers it.
-    if (fromSocket && !plainBuy && this.deps.streamHealthy?.()) return;
+    // The Helius stream brings this transaction in full (no fetch) a moment from now: give it that moment. If it has
+    // not delivered by then (a stream that says it is healthy but has quietly stopped), fetch it as usual.
+    if (fromSocket && !plainBuy && !afterGrace && this.deps.streamHealthy?.()) {
+      setTimeout(() => this.handle(signature, leader, logs, slot, true), this.deps.streamGraceMs ?? 400).unref?.();
+      return;
+    }
     this.markSeen(key);
     if (logs && logs.length && !truncated && !mightTrade(logs)) return;
     // Fast path: a plain pump.fun buy is copied straight from the logs, no fetch. (The engine's slot check keeps a
@@ -204,6 +278,7 @@ export class Watcher {
    * it involves, in order behind that wallet's earlier transactions.
    */
   handleStreamTx(tx: RawTransaction): void {
+    if (this.stopped) return;
     const signature = tx.transaction.signatures[0];
     if (!signature || tx.meta?.err) return;
     const keys = new Set(tx.transaction.message.accountKeys.map((k) => (typeof k === 'string' ? k : k.pubkey)));
@@ -234,7 +309,7 @@ export class Watcher {
   /** Per wallet, the previous transaction's hand-off to the engine: trades are passed on in arrival order. */
   private readonly delivery = new Map<string, Promise<void>>();
 
-  private async process(signature: string, leader: string): Promise<void> {
+  private async process(signature: string, leader: string, retryUntil = Date.now() + RETRY_FOR_MS): Promise<void> {
     // Fetch now (in parallel, within the cap) but hand over strictly after this wallet's earlier transactions, so
     // a quick buy-then-sell is never seen as sell-then-buy.
     const fetched = (async () => {
@@ -245,26 +320,41 @@ export class Watcher {
         release();
       }
     })();
-    await this.deliver(leader, signature, fetched, 'fetch');
+    await this.deliver(leader, signature, fetched, 'fetch', undefined, retryUntil);
   }
 
   /** Hand a transaction's trades to the engine, strictly after this wallet's earlier transactions. */
-  private async deliver(leader: string, signature: string, source: Promise<RawTransaction | null>, via: 'fetch' | 'stream'): Promise<void> {
+  private async deliver(leader: string, signature: string, source: Promise<RawTransaction | null>, via: 'fetch' | 'stream', parsed?: LeaderTrade[], retryUntil = Date.now() + RETRY_FOR_MS): Promise<void> {
     const prev = this.delivery.get(leader) ?? Promise.resolve();
-    const mine = prev.then(async () => {
-      const tx = await source;
+    const handOver = async (tx: RawTransaction | null) => {
       if (!tx) {
-        this.seen.delete(`${signature}:${leader}`); // let a later poll try again
+        // Not fetched: tried again on later cycles (the poll's cursor has already moved past it).
+        if (Date.now() < retryUntil) this.retryLater.set(`${signature}:${leader}`, { signature, leader, until: retryUntil });
         return;
       }
-      for (const t of parseLeaderTrades(tx, leader)) {
-        if (t.counter && t.solLamports === 0n && this.deps.valueInSol) {
-          // Paid (or paid out) in a stablecoin or another coin: its SOL value is what "bought at least X SOL" means.
-          t.solLamports = await this.deps.valueInSol(t.counter.mint, t.counter.amount).catch(() => 0n);
+      for (const t of parsed ?? parseLeaderTrades(tx, leader)) {
+        if (t.counter && t.side === 'buy' && this.deps.valueInSol) {
+          // Paid in a stablecoin or another coin (perhaps with a little SOL too): its SOL value is what "bought at
+          // least X SOL" means. (A sell paid out in another coin needs no price: it is mirrored by its share.)
+          t.solLamports += await this.deps.valueInSol(t.counter.mint, t.counter.amount).catch(() => 0n);
         }
         log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, via, lagMs: t.blockTime ? Date.now() - t.blockTime * 1000 : null, sig: signature.slice(0, 12) });
         await this.deps.onTrade(t);
       }
+    };
+    const STUCK = Symbol('stuck');
+    const mine = prev.then(async () => {
+      // A fetch that hangs must not hold up this wallet's later trades (its exit above all): after a short wait the
+      // queue moves on, and this one is handed over on its own when it arrives. (The engine refuses a buy that
+      // arrives after the same wallet's later sell of the coin.)
+      let timer: NodeJS.Timeout | undefined;
+      const first = await Promise.race([source, new Promise<typeof STUCK>((r) => { timer = setTimeout(() => r(STUCK), this.deps.stuckMs ?? 2_000); })]);
+      clearTimeout(timer);
+      if (first === STUCK) {
+        void source.then(handOver).catch((err) => log.warn('leader transaction failed', { signature, error: safeErrorMessage(err) }));
+        return;
+      }
+      await handOver(first);
     });
     const tail = mine.catch(() => undefined);
     this.delivery.set(leader, tail);
