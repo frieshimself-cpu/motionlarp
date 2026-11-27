@@ -165,6 +165,9 @@ class Run {
   private restarts = 0;
   /** A crash, or a shutdown that ran out of time: trades in flight were not booked. */
   private cutOff = false;
+  /** From the engine's stop() (an update's shutdown, a crash) until the new engine starts: a stopped engine sends
+   *  nothing, and the rest of a full exit it booked is written down (positions.exit_owed) for the next start. */
+  private stopping = false;
   private readonly orphanSeen = new Set<string>();
   private readonly proceedsOff = new Set<number>();
   private readonly quotedFillSeen = new Set<number>();
@@ -316,6 +319,7 @@ class Run {
   private startEngine(): void {
     const { sc, sim, store } = this;
     this.gen++;
+    this.stopping = false;
     const gen = this.gen;
     this.exec = new Exec(this.market, gen);
     const skew = sc.sabotage === 'clock-ahead' ? 3_000 : sc.sabotage === 'clock-behind' ? -3_000 : 0;
@@ -565,6 +569,8 @@ class Run {
         let running = 0;
         for (const n of tr.bagActive.values()) running += n;
         if (p && p.status === 'open' && tr.flying.size === 0 && running === 0 && tr.queueActive === 0 && tr.reading === 0) {
+          // A stopped engine sends nothing: what is left is sold after the restart, if it is written down.
+          if (this.stopping && p.exitOwed) { this.note('full-exit-left-coins-to-the-next-start:the-server-was-stopping'); return; }
           this.problem('FX1', `full-exit-left-coins-behind:${order.reason}`, `p${pid} ${orderText(order)} sold the ${sale.sold} it asked for, nothing else is on its way or about to go, and the position still holds ${p.tokensHeld} (wallet ${sale.live ? this.market.tokens(sale.owner, sale.mint) : 'n/a'})`);
         }
       });
@@ -1083,7 +1089,11 @@ class Run {
           for (const f of tr?.flying.values() ?? []) out += f.tokens;
           let running = 0;
           for (const n of tr?.bagActive.values() ?? []) running += n;
-          if (now && now.status !== 'closed' && now.tokensHeld > out && running === 0 && (tr?.queueActive ?? 0) === 0 && (tr?.reading ?? 0) === 0 && this.sc.faults.partial === 0 && !this.blind && (tr?.bagFailedAt ?? -1) < pressedAt) this.problem('SN1', 'sell-now-said-ok-position-still-open', `p${p.id}: Sell now answered ok and the position is ${now.status} holding ${now.tokensHeld} (other sells have ${out} out, no timed step is running, nothing else is under way)`);
+          if (now && now.status !== 'closed' && now.tokensHeld > out && running === 0 && (tr?.queueActive ?? 0) === 0 && (tr?.reading ?? 0) === 0 && this.sc.faults.partial === 0 && !this.blind && (tr?.bagFailedAt ?? -1) < pressedAt) {
+            // (a stopped engine sends nothing: the rest of the press is written down and sold after the restart)
+            if (this.stopping && now.exitOwed) this.note('sell-now-rest-owed-to-the-next-start:the-server-was-stopping');
+            else this.problem('SN1', 'sell-now-said-ok-position-still-open', `p${p.id}: Sell now answered ok and the position is ${now.status} holding ${now.tokensHeld} (other sells have ${out} out, no timed step is running, nothing else is under way)`);
+          }
         });
       } else if (p.status !== 'open') {
         if (r.error !== 'no open position with that id') this.problem('SN1', 'sell-now-on-a-non-open-position', `p${p.id} was ${p.status}; Sell now answered "${r.error}"`);
@@ -1182,6 +1192,7 @@ class Run {
     if (waited) this.line(`…waited ${waited / 1000}s for an exit in progress`);
     const old = this.engine;
     old.stop();
+    this.stopping = true;
     let idle = false;
     void old.idle().then(() => { idle = true; }, (err) => this.problem('E1', 'idle-rejected', String(err)));
     await sim.settle();
@@ -1224,6 +1235,7 @@ class Run {
     this.line('SERVER CRASH: the process dies with trades in flight');
     this.safetyEpoch++;
     this.engine.stop();
+    this.stopping = true;
     this.exec.alive = false;
     await this.sim.advance(downMs);
     this.line(`SERVER BACK after ${downMs / 1000}s`);
