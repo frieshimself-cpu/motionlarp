@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 157 tests
+## Automated (every change): `npm test`, 172 tests
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -84,11 +84,23 @@ with a bad and a good key, a copy with custom fees, the redesigned pages on desk
 scroll, no script errors). Saving a new RPC link on the admin page restarted the server and came back with it.
 Mainnet: a PumpSwap buy with platform fee and tip simulated cleanly.
 
+## 27 Nov 2026: key login, profit by day, Sender, hardening, the real server
+
+- License key as the login (first use opens the account, later uses return to it, reissue kills the old key,
+  accounts from before keys get one from the admin page), sessions that renew while used, an admin login that
+  survives restarts: API tests, and the whole flow in a real browser.
+- Profit today / 7 days / all time and the daily table, following the viewer's clock, live and test apart.
+- Several wallets added in one go (a bad address in the list reports which one and how many were added).
+- Helius Sender for tipped trades: endpoint, tip accounts and minimums from Helius's docs; unit tests for the
+  routing; the endpoint answers from here. Not yet sent live.
+- Stricter browser policy: pages load, an injected inline script does not run (checked in a browser).
+- **On the real server (walletmotion.app):** automatic updates picked up three pushes, each within about 1–2
+  minutes, and the site came back each time, including with the locked-down container settings.
+
 ## Not yet verified
 
-- The installer and the automatic updater on a real server (only dry-run here: no Docker engine in the build
-  container).
-- Sending through Jito's block engine (needs a live trade).
+- Sending a tipped trade through Helius Sender (needs a live trade).
+- That the firewall / fail2ban step ran on the server (it logs to /var/log/motionlarp-update.log).
 - A **live** buy and sell with real SOL (needs a funded wallet, a paid RPC and the owner's go-ahead):
   `LIVE_TRADING=true`, one copy set to Live, 0.01 SOL. Check on Solscan that the buy lands, the fill in the
   history matches the transaction, and the sells fire.

@@ -14,12 +14,14 @@ pump.fun trades around the clock: your buy size, your minimum, your exits.
   - **Stop loss levels**: e.g. −30 % sell half, −60 % sell the rest. Each fires once.
   - **Dead coin**: no trades for N seconds → sell everything.
 - **Sell now** button on every open position.
-- **License keys and an owner page.** Friends sign up with a key you create; you manage keys, users, fees and
+- **License keys and an owner page.** A friend pastes the key you created and is in (no sign-up, no password); you manage keys, users, fees and
   settings at `/admin`.
 - **Custom trading fees.** Priority fee and tip per copy, for buys and sells.
 - **Test mode first.** Every copy starts in test mode: buys are checked against the real chain, fills come from
   real prices, nothing is sent. Switch a copy to Live once you trust it.
 - A live feed of every buy, sell and skipped copy (with the reason), and a history with profit per trade.
+
+- **Profit today, last 7 days, all time**, and a day-by-day table; real and test trades kept apart.
 
 A clean, dense trading dashboard that also works on a phone.
 
@@ -77,15 +79,16 @@ Log in with the admin password. Only you have it; a user account is never an adm
   characters), set the platform fee and the wallet it is paid to, the most a single buy may spend, an optional
   Jupiter API key, and the **Live trading** switch. Changing the RPC link restarts the site by itself.
 - **License keys.** One key = one account. Create a key for each friend (and one for yourself), copy it when it
-  is shown (once), send it to them; they sign up with it. A key can carry its own fee (0 % for you, say).
+  is shown (once), send it to them; pasting it on the site is all they need. "New key" replaces a lost one. A key can carry its own fee (0 % for you, say).
   Revoke a key and its user is locked out and gets no new copies; open positions still sell by their rules.
 - **Users.** Wallet, copies, open and closed positions, profit, fees paid; disable or enable anyone.
 
 ## Fees
 
 - **Trading fees, set per copy by each user:** priority fee and tip, separately for buys and sells, plus slippage,
-  with Eco / Fast / Turbo presets. The priority fee goes to the network; the tip goes to the block builder, and a
-  tipped trade is also sent through Jito so it lands sooner.
+  with Eco / Fast / Turbo presets. The priority fee goes to the network; a tipped trade is also sent through
+  Helius Sender (Jito and staked connections at once): a tip of 0.001 SOL or more uses every fast lane, a smaller
+  one (from 0.000005 SOL) the lighter lane.
 - **Platform fee, set by you on the admin page:** a % of every copy buy and sell, sent to your fee wallet inside
   the same transaction, after the swap: no trade, no fee. A license key can override it. The fee wallet must hold
   at least 0.001 SOL (a transfer into an empty wallet fails and would take the trade with it). Users see the fee
@@ -100,16 +103,28 @@ Log in with the admin password. Only you have it; a user account is never an adm
 
 Both switches are needed for a real trade: Live trading on the admin page **and** the copy set to Live.
 
-## Safety, in plain words
+## How the private keys are protected
 
-- **Friends should use a fresh wallet** holding only what they copy with, never their main wallet. The server
-  holds the key (encrypted). If the server were broken into while running, those wallets could be drained.
-- Keys are encrypted with `MASTER_KEY` and tied to the account that imported them. They are never logged, never
-  shown again, and never sent to the browser.
-- A wallet can't be removed or swapped while it has open positions (the coins would be stranded).
-- `MAX_SOL_PER_BUY` caps every buy. `FEE_RESERVE_SOL` keeps SOL back for fees.
-- Any coin Jupiter can route is copied. A coin only seconds old on a non-pump.fun launchpad can take Jupiter
-  ~10–15 s to pick up: the buy waits for it (up to ~15 s), so such copies land later. pump.fun coins don't wait.
+- **In the browser:** the key is pasted into a masked box, sent once over HTTPS, and never comes back: no page
+  or API answer ever contains it, and there is no "export" or "withdraw" on the site. Only scripts served by this
+  site can run on its pages (a strict content policy), so injected markup cannot run code.
+- **On the server:** keys are stored encrypted (AES-256-GCM under `MASTER_KEY`, each bound to its account), never
+  logged (a redactor scrubs anything key-shaped), and decrypted only in memory to sign a trade. The app runs in a
+  locked-down container (read-only, no Linux capabilities, non-root). The firewall leaves only SSH and the website
+  open; repeated SSH password guesses get the address blocked (fail2ban).
+- **Logins:** a license key is the login, so treat it like a password. A lost or leaked key is replaced on the
+  admin page ("New key": the old one stops working). Sessions last 90 days from the last visit, in an HttpOnly
+  cookie. The admin area has its own password.
+
+What no setting can remove, because the bot has to be able to sign trades while nobody is watching:
+
+- **Whoever controls the server controls the wallets on it.** Keep the server's root password long and unique,
+  keep `MASTER_KEY` backed up somewhere else, and delete `MASTER_KEY_BACKUP.txt` from the server once you have.
+- **Automatic updates run whatever is pushed to this repository's branch.** Turn on two-factor login on the
+  GitHub account that owns it. To stop automatic updates: delete `/etc/cron.d/motionlarp-update`.
+- **So everyone should use a fresh wallet holding only what they trade with**, never a main wallet. The site
+  warns when a wallet holds more than 5 SOL. Someone who got hold of a friend's license key cannot withdraw, but
+  could place bad trades with it; `Max per buy` on the admin page caps what one buy can lose.
 
 ## Run it on your own computer
 
@@ -117,7 +132,7 @@ Both switches are needed for a real trade: Live trading on the admin page **and*
 npm install
 cp .env.example .env        # MASTER_KEY (npm run genkey) and ADMIN_PASSWORD; the rest at /admin
 npm run dev                 # http://127.0.0.1:3000
-npm test                    # 157 tests
+npm test                    # 172 tests
 npm run check:mainnet       # builds real buys/sells for real wallets on mainnet and simulates them (sends nothing)
 npm run measure             # how many slots behind a copy would be, and how long building it takes
 ```
