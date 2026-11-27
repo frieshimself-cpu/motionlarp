@@ -124,6 +124,7 @@ function renderWallet() {
         <div class="sol-big">${fmtSol(w.sol ?? 0, 4)} <small>SOL</small></div>
         <div class="addr" style="margin-top:8px"><a href="${solscanAcct(w.pubkey)}" target="_blank" rel="noopener">${esc(w.pubkey)}</a></div>
         <div class="hint">Send SOL to this address to fund your copies.</div>
+        ${(w.sol ?? 0) > 5 ? '<div class="note" style="margin-top:10px">This wallet holds more than 5 SOL. Keep only what you trade with here and move the rest to a wallet this site never sees.</div>' : ''}
       </div>
     </div>
   </div>`;

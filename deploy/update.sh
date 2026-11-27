@@ -14,3 +14,5 @@ echo "$(date -Is) updating $LOCAL -> $REMOTE"
 git pull --ff-only --quiet
 docker compose up -d --build
 echo "$(date -Is) updated to $(git rev-parse --short HEAD)"
+# Server hardening that ships with the code (idempotent; never fails the update).
+if [ -x deploy/harden.sh ]; then deploy/harden.sh || true; fi

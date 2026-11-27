@@ -87,6 +87,7 @@ if [ -z "$DRY" ]; then
   printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n*/2 * * * * root MOTIONLARP_DIR=%s %s/deploy/update.sh >> /var/log/motionlarp-update.log 2>&1\n' "$DIR" "$DIR" > /etc/cron.d/motionlarp-update
   chmod 644 /etc/cron.d/motionlarp-update
   say "Automatic updates are on"
+  chmod +x "$DIR/deploy/harden.sh" 2>/dev/null && "$DIR/deploy/harden.sh" || true
 fi
 
 say "Starting the site (the first time takes a few minutes)"

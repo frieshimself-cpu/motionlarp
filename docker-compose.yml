@@ -5,6 +5,11 @@ services:
     restart: unless-stopped
     # In-flight trades finish before a stop or restart (live buys can take a while to confirm).
     stop_grace_period: 150s
+    # Locked down: the app cannot write anywhere but its data volume, holds no Linux capabilities and cannot gain any.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     env_file: .env
     environment:
       HOST: 0.0.0.0

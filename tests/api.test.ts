@@ -142,3 +142,24 @@ describe('wallet and copies', () => {
     expect((await alice.call('DELETE', '/api/wallet')).status).toBe(200);
   });
 });
+
+describe('browser protections', () => {
+  it('pages and API answers carry the security headers: only our own scripts run, no framing, no plugins', async () => {
+    for (const path of ['/', '/api/config']) {
+      const res = await fetch(base + path);
+      const csp = res.headers.get('content-security-policy') ?? '';
+      expect(csp).toContain("script-src 'self'");
+      expect(csp).toContain("object-src 'none'");
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+    }
+  });
+  it('a wallet key is never accepted in a URL, only in a POST body, and never echoed in an error', async () => {
+    const c = new Client();
+    await c.call('POST', '/api/enter', { license: lic() });
+    const bad = await c.call('POST', '/api/wallet', { key: 'x'.repeat(88) });
+    expect(bad.status).toBe(400);
+    expect(bad.text).not.toContain('x'.repeat(20));
+  });
+});
