@@ -50,14 +50,18 @@ async function checkDashboard(env, page, who, opts = {}) {
   book.eq(`${P}: trades and winners of the ${E.primary} trades only`, [f2[1], f2[2]], [String(main.trades), winRate]);
   if (other.trades) book.ok(`${P}: the other kind (${otherName}) all time, apart`, f2[3] === otherName && amount(f2[4], other.all, 3), { shown: c2.foot, exact: solStr(other.all) });
   const enabled = Object.values(C).filter((c) => c.settings.enabled).length;
-  const f3 = /^([+−]?[\d.]+) SOL unrealized · copying (\d+) of (\d+)$/.exec(c3.foot) || [];
-  book.eq(`${P}: card 4 counts open positions and copies`, [c3.label, c3.value, f3[2], f3[3]], ['Open positions', String(E.open.length), String(opts.enabled ?? enabled), String(opts.copies ?? Object.keys(C).length)]);
+  // "<real> SOL unrealized · test: <test> · copying N of M" (the test part only when both kinds are open; with test
+  // positions alone the card is marked test, as the profit cards are).
+  const f3 = /^([+−]?[\d.]+) SOL unrealized(?: · test: ([+−]?[\d.]+))? · copying (\d+) of (\d+)$/.exec(c3.foot) || [];
+  const anyLive = E.open.some((p) => p.mode === 'live');
+  const anyTest = E.open.some((p) => p.mode === 'test');
+  book.eq(`${P}: card 4 counts open positions and copies`, [c3.label, c3.value, f3[3], f3[4]], [`Open positions${anyTest && !anyLive ? ' test' : ''}`, String(E.open.length), String(opts.enabled ?? enabled), String(opts.copies ?? Object.keys(C).length)]);
   const openLive = sum(E.open.filter((p) => p.mode === 'live').map((p) => p.pnl));
   const openTest = sum(E.open.filter((p) => p.mode === 'test').map((p) => p.pnl));
-  if (E.open.some((p) => p.mode === 'live') && E.open.some((p) => p.mode === 'test')) {
-    book.ok(`${P}: the P/L of open positions keeps real and test apart (it is real money only, or two numbers)`, amount(f3[1], openLive, 4), { shown: c3.foot, realPositionsOnly: solStr(openLive), testPositionsOnly: solStr(openTest), bothAdded: solStr(openLive + openTest) });
+  if (anyLive && anyTest) {
+    book.ok(`${P}: the P/L of open positions keeps real and test apart (it is real money only, or two numbers)`, amount(f3[1], openLive, 4) && amount(f3[2], openTest, 4), { shown: c3.foot, realPositionsOnly: solStr(openLive), testPositionsOnly: solStr(openTest), bothAdded: solStr(openLive + openTest) });
   } else {
-    book.ok(`${P}: the P/L of open positions`, amount(f3[1], openLive + openTest, 4), { shown: c3.foot, exact: solStr(openLive + openTest) });
+    book.ok(`${P}: the P/L of open positions`, amount(f3[1], openLive + openTest, 4) && f3[2] === undefined, { shown: c3.foot, exact: solStr(openLive + openTest) });
   }
 
   // ── wallet card ──
@@ -74,12 +78,14 @@ async function checkDashboard(env, page, who, opts = {}) {
     book.eq(`${P}: copy "${s.name}": name, wallet, buy, minimum, fees, slippage`, [row.name, row.meta[0], row.leaderHref], [`${s.name} TEST`, `${X.short(s.leader)} · buy ${s.buySol} SOL when they buy ≥ ${s.minLeaderBuySol} SOL · ${X.feeText(s)} SOL · slippage ${s.slippagePct}%`, `https://solscan.io/account/${s.leader}`]);
     book.eq(`${P}: copy "${s.name}": sell rules as tags`, row.tags, X.sellTags(s.sell));
     book.eq(`${P}: copy "${s.name}": switch ${s.enabled ? 'on' : 'off (line dimmed)'}`, [row.on, row.paused, row.switchTitle], [s.enabled, !s.enabled, s.enabled ? 'Pause' : 'Resume']);
+    // Closed positions and their profit are of one kind, as on the profit cards: real ones once the account has any,
+    // test ones until then (the count and the profit then describe the same positions).
     const m = /^(\d+) open · (\d+) closed · ([+−]?[\d.]+) SOL$/.exec(row.meta[1]) || [];
-    book.eq(`${P}: copy "${s.name}": open and closed counts`, [m[1], m[2]], [String(c.open), String(c.closed)]);
+    book.eq(`${P}: copy "${s.name}": open and closed counts (closed: the ${E.primary} ones)`, [m[1], m[2]], [String(c.open), String(c.closedOf[E.primary])]);
     if (c.live !== 0n && c.test !== 0n) {
-      book.ok(`${P}: copy "${s.name}": its profit keeps real and test apart`, amount(m[3], c.live, 3, row.pnlClass), { shown: row.meta[1], realTradesOnly: solStr(c.live), testTradesOnly: solStr(c.test), bothAdded: solStr(c.live + c.test) });
+      book.ok(`${P}: copy "${s.name}": its profit keeps real and test apart`, amount(m[3], c[E.primary], 3, row.pnlClass), { shown: row.meta[1], realTradesOnly: solStr(c.live), testTradesOnly: solStr(c.test), bothAdded: solStr(c.live + c.test) });
     } else {
-      book.ok(`${P}: copy "${s.name}": its profit`, amount(m[3], c.live + c.test, 3, row.pnlClass), { shown: row.meta[1], exact: solStr(c.live + c.test) });
+      book.ok(`${P}: copy "${s.name}": its profit`, amount(m[3], c[E.primary], 3, row.pnlClass), { shown: row.meta[1], exact: solStr(c[E.primary]) });
     }
   }
 
@@ -152,23 +158,27 @@ async function checkHistory(env, page, who, opts = {}) {
   book.ok(`${P}: each day's profit = SOL returned − SOL spent of the positions closed that day, signed and coloured`, badDay.length === 0, badDay.slice(0, 5));
 
   // ── the heading of the closed positions ──
-  const m = /^Closed positions\s*(\d+) · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)?$/.exec(h.closedHead) || [];
+  // It counts EVERY closed position of the kind the profit cards show (real ones once there are any, test ones until
+  // then), not just the rows listed under it, and says so when the list holds only the latest 200 (findings B1, B2).
+  const m = /^Closed positions\s*(\d+) · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)?( · the latest (\d+) are listed)?$/.exec(h.closedHead) || [];
   const live = E.modes.live, test = E.modes.test;
   const all = { trades: live.trades + test.trades, pnl: live.all + test.all, wins: live.wins + test.wins, fees: live.fees + test.fees };
+  const shownKind = E.primary === 'live' ? live : test;
+  const winners = (b) => (b.trades ? Math.round((b.wins / b.trades) * 100) : 0);
   if (opts.skipHeading) {
     // judged once, in the viewer's main time zone
   } else if (both) {
     book.ok(`${P}: the heading's total keeps real and test apart (${live.trades} real trades, ${solStr(live.all)} SOL; ${test.trades} test trades, ${solStr(test.all)} SOL)`,
-      m[1] === String(live.trades) && amount(m[2], live.all, 4), { shown: h.closedHead, realOnly: { trades: live.trades, total: solStr(live.all), winners: `${Math.round((live.wins / live.trades) * 100)}%`, platformFees: solStr(live.fees) }, testOnly: { trades: test.trades, total: solStr(test.all), winners: `${Math.round((test.wins / test.trades) * 100)}%`, platformFees: solStr(test.fees) }, bothAdded: { trades: all.trades, total: solStr(all.pnl), winners: `${Math.round((all.wins / all.trades) * 100)}%`, platformFees: solStr(all.fees) } });
+      m[1] === String(live.trades) && amount(m[2], live.all, 4) && m[3] === String(winners(live)) && (live.fees === 0n ? m[4] === undefined : matches(m[4], solNum(live.fees))), { shown: h.closedHead, realOnly: { trades: live.trades, total: solStr(live.all), winners: `${winners(live)}%`, platformFees: solStr(live.fees) }, testOnly: { trades: test.trades, total: solStr(test.all), winners: `${winners(test)}%`, platformFees: solStr(test.fees) }, bothAdded: { trades: all.trades, total: solStr(all.pnl), winners: `${winners(all)}%`, platformFees: solStr(all.fees) } });
   } else {
-    book.ok(`${P}: the heading counts every closed position (${all.trades}) and totals them (${solStr(all.pnl)} SOL, ${all.trades ? Math.round((all.wins / all.trades) * 100) : 0}% winners, platform fees ${solStr(all.fees)} SOL)`,
-      m[1] === String(all.trades) && amount(m[2], all.pnl, 4) && m[3] === String(all.trades ? Math.round((all.wins / all.trades) * 100) : 0) && (all.fees === 0n ? m[4] === undefined : matches(m[4], solNum(all.fees))),
-      { shown: h.closedHead, expected: { trades: all.trades, total: solStr(all.pnl), winners: `${all.trades ? Math.round((all.wins / all.trades) * 100) : 0}%`, platformFees: solStr(all.fees) } });
+    book.ok(`${P}: the heading counts every closed position (${all.trades}) and totals them (${solStr(all.pnl)} SOL, ${winners(all)}% winners, platform fees ${solStr(all.fees)} SOL)`,
+      m[1] === String(all.trades) && amount(m[2], all.pnl, 4) && m[3] === String(winners(all)) && (all.fees === 0n ? m[4] === undefined : matches(m[4], solNum(all.fees))),
+      { shown: h.closedHead, expected: { trades: all.trades, total: solStr(all.pnl), winners: `${winners(all)}%`, platformFees: solStr(all.fees) } });
   }
 
   if (!opts.skipHeading) {
-    const hm = m;
-    book.ok(`${P}: the heading adds up exactly the rows listed under it (count, total, winners %, platform fees; real and test rows alike)`, hm[1] === String(all.trades) && amount(hm[2], all.pnl, 4) && hm[3] === String(all.trades ? Math.round((all.wins / all.trades) * 100) : 0) && (all.fees === 0n ? hm[4] === undefined : matches(hm[4], solNum(all.fees))) || E.closed.length > 200, { shown: h.closedHead, rows: all.trades, total: solStr(all.pnl), fees: solStr(all.fees) });
+    const listed = Math.min(200, E.closed.length);
+    book.ok(`${P}: the heading says when the list under it holds only the latest ${listed} of the ${E.closed.length} closed positions (and only then)`, E.closed.length > 200 ? m[6] === String(listed) : m[5] === undefined, { shown: h.closedHead, closed: E.closed.length, listed, headingCounts: shownKind.trades });
   }
 
   // ── each closed position ──
@@ -232,7 +242,7 @@ async function alice(env) {
     const row = h.closed[negPos];
     book.note('alice: how the sell with negative proceeds is printed in History', row && row.sells.map((s) => s.text));
     book.ok('alice: History prints the negative sell with a minus sign', !!row && /[-−]0\.0004$/.test(row.sells[2].text), row && row.sells);
-    book.ok('alice: History uses one minus sign everywhere (the sells and "Returned" print "-", the P/L prints "−")', !!row && !row.sells.some((s) => /-\d/.test(s.text)), row && { sells: row.sells.map((s) => s.text), pnl: row.pnl });
+    book.ok('alice: History uses one minus sign everywhere (the sells and "Returned" printed "-" next to the P/L\'s "−")', !!row && !row.sells.some((s) => /-\d/.test(s.text)), row && { sells: row.sells.map((s) => s.text), pnl: row.pnl });
     const even = h.closed[E.closed.findIndex((p) => p.key === 'H8-live-even-40d')];
     book.eq('alice: a position that came out exactly even shows 0 and 0.0% with no colour', even && [even.pnl, even.pnlPct, even.pnlClass.replace('num', '').trim()], ['0', '0.0%', '']);
     // Both tabs still answer after going back and forth.

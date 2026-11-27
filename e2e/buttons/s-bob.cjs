@@ -32,11 +32,11 @@ async function bob(env) {
     book.ok('bob: History\'s heading, its own day table and the Dashboard agree on how many trades closed and what they made', Number(m[1]) === dayTrades && Math.abs(shown(m[2]) - st.pnl.test.allSol) < 0.0002,
       { historyHeading: h.closedHead, dayTableTrades: dayTrades, dayTableProfitSum: Number(daySum.toFixed(4)), dashboardAllTime: st.pnl.test.allSol, dashboardTrades: st.pnl.test.trades, seededTrades: E.modes.test.trades, seededProfit: solStr(E.modes.test.all) });
     book.ok('bob: when more positions closed than the table lists, the page says the list is cut', h.closed.length >= E.closed.length || /newest|latest|last 200|of 205|more/i.test(h.closedHead), { rowsListed: h.closed.length, closedInAll: E.closed.length, heading: h.closedHead });
-    // Whatever it covers, the heading must at least add up the rows it lists.
-    const listed = E.closed.slice(0, h.closed.length);
-    const lp = listed.reduce((a, p) => a + p.pnl, 0n), lf = listed.reduce((a, p) => a + p.fees, 0n), lw = listed.filter((p) => p.pnl > 0n).length;
-    const hm = /^Closed positions\s*(\d+) · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)?$/.exec(h.closedHead) || [];
-    book.ok('bob: the History heading adds up exactly the rows listed under it (count, total, winners %, platform fees)', hm[1] === String(listed.length) && matches(hm[2], solNum(lp)) && hm[3] === String(Math.round((lw / listed.length) * 100)) && matches(hm[4], solNum(lf)), { shown: h.closedHead, rowsListed: listed.length, theirTotal: solStr(lp), theirWinners: `${Math.round((lw / listed.length) * 100)}%`, theirFees: solStr(lf) });
+    // The heading covers every closed position, not only the 200 rows listed under it (finding B2): all 205 of them,
+    // their total, their winners and the platform fees they carried.
+    const all = E.modes.test;
+    const hm = /^Closed positions\s*(\d+) · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)? · the latest 200 are listed$/.exec(h.closedHead) || [];
+    book.ok('bob: the History heading adds up all 205 closed positions, not only the 200 listed (count, total, winners %, platform fees)', hm[1] === String(all.trades) && matches(hm[2], solNum(all.all)) && hm[3] === String(Math.round((all.wins / all.trades) * 100)) && matches(hm[4], solNum(all.fees)), { shown: h.closedHead, closedInAll: all.trades, total: solStr(all.all), winners: `${Math.round((all.wins / all.trades) * 100)}%`, fees: solStr(all.fees) });
     await ui.openTab(page, 'dash');
   });
 

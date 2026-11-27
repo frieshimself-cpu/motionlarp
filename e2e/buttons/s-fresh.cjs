@@ -583,20 +583,29 @@ async function freshUser(env) {
     await ui.submitEditor(page);
     await page.locator('#form-err .err').waitFor();
     let ed = await ui.readEditor(page);
-    book.eq('a wrong address among three: says which one and how many were added', ed.err, 'Wallet 2 (not-…ress): enter the wallet address to copy (a Solana wallet address) 1 of 3 were added.');
+    book.eq('a wrong address among three: says which one, how many were added, and that the box now holds the rest', ed.err, 'Wallet 2 (not-…ress): enter the wallet address to copy (a Solana wallet address). 1 of 3 were added; the box now holds the 2 not added yet.');
+    book.eq('a wrong address among three: the wallet already added has left the box', ed.leader.split('\n'), ['not-a-wallet-address', leaders[10]]);
     await screenCheck(page, book, 'editor-partial-add');
     st = await ui.state(page);
     book.eq('a wrong address among three: the one before it was added, the one after it was not', st.copies.filter((c) => /^Mix/.test(c.name)).map((c) => [c.name, c.leader]), [['Mix 1', leaders[9]]]);
-    // The natural next step: correct the typo and press Start copying again.
-    await page.locator('#f-leader').fill(`${leaders[9]}\n${leaders[11]}\n${leaders[10]}`);
+    // Typing a wallet that is already copied back into the box: refused, naming the copy (one copy per wallet).
+    book.allow(409, /^\/api\/copies$/);
+    await page.locator('#f-leader').fill(`${leaders[9]}\n${leaders[10]}`);
+    await ui.submitEditor(page);
+    await page.locator('#form-err .err').waitFor();
+    ed = await ui.readEditor(page);
+    book.eq('a wallet already copied, typed into the box again: refused, naming its copy; nothing is added', [ed.err, (await ui.state(page)).copies.filter((c) => /^Mix/.test(c.name)).length], [`Wallet 1 (${X.short(leaders[9])}): you already copy this wallet as "Mix 1": edit that copy instead`, 1]);
+    // The natural next step: correct the typo in what the box holds and press Start copying again.
+    await page.locator('#f-leader').fill(`${leaders[11]}\n${leaders[10]}`);
     await ui.hideToast(page);
     await ui.submitEditor(page);
-    await ui.toast(page);
+    const t = await ui.toast(page);
     await until(async () => !(await ui.editorOpen(page)), { timeout: 4000 });
     st = await ui.state(page);
     const mix = st.copies.filter((c) => /^Mix/.test(c.name));
     const dup = mix.filter((c) => c.leader === leaders[9]).length;
     book.ok('after correcting the typo and pressing Start copying again, the wallet that was already added is not added a second time', dup === 1, { copiesOfTheFirstWallet: dup, copies: mix.map((c) => [c.id, c.name, X.short(c.leader)]) });
+    book.eq('after correcting the typo: the other two are added, numbered on from the first', { toast: t && t.text, copies: mix.map((c) => [c.name, c.leader]) }, { toast: 'Copying 2 wallets', copies: [['Mix 1', leaders[9]], ['Mix 2', leaders[11]], ['Mix 3', leaders[10]]] });
     if (await ui.editorOpen(page)) await ui.closeEditor(page, 'cancel');
   });
 
@@ -629,10 +638,10 @@ async function freshUser(env) {
       await ui.closeEditor(page, 'cancel');
     }
 
-    // Markup in a nickname must show as text.
+    // Markup in a nickname must show as text. (A wallet not copied yet: one copy per wallet.)
     const evil = '<img src=x onerror=alert(1)>';
     await ui.openNew(page);
-    await ui.fillEditor(page, { leaderText: leaders[2], name: evil });
+    await ui.fillEditor(page, { leaderText: leaders[5], name: evil });
     await ui.hideToast(page);
     await ui.submitEditor(page);
     await ui.toast(page);
@@ -646,17 +655,20 @@ async function freshUser(env) {
     book.eq('a nickname with markup: the editor title and box show it as text', { title: (await ui.readEditor(page)).title, name: (await ui.readEditor(page)).name, imgs: await page.locator('#modal img').count() }, { title: `Edit ${evil}`, name: evil, imgs: 0 });
     await ui.closeEditor(page, 'cancel');
 
-    // The same wallet a second time: is anything said?
+    // The same wallet a second time: refused, naming the copy that already follows it.
     const sameBefore = st.copies.filter((c) => c.leader === preset.settings.leader).length;
+    book.allow(409, /^\/api\/copies$/);
     await ui.openPreset(page);
     await ui.hideToast(page);
     await ui.submitEditor(page);
-    const t = await ui.toast(page);
-    await until(async () => !(await ui.editorOpen(page)), { timeout: 3000 });
+    const t = await ui.toast(page, 2500);
+    await page.locator('#form-err .err').waitFor({ timeout: 3000 }).catch(() => undefined);
+    const said = (await ui.editorOpen(page)) ? (await ui.readEditor(page)).err : null;
     st = await ui.state(page);
     const sameAfter = st.copies.filter((c) => c.leader === preset.settings.leader).length;
-    book.note('the Scharo preset saved a second time', { toast: t, copiesOfThatWalletBefore: sameBefore, after: sameAfter });
+    book.note('the Scharo preset saved a second time', { toast: t, editorSays: said, copiesOfThatWalletBefore: sameBefore, after: sameAfter });
     book.ok('a second copy of a wallet already being copied is refused or at least warned about', sameAfter === sameBefore || (t && t.bad), { toast: t, copiesOfThatWalletBefore: sameBefore, after: sameAfter });
+    book.eq('a second copy of a wallet: the editor stays open and names the copy that already follows it', said, 'you already copy this wallet as "Scharo": edit that copy instead');
     if (await ui.editorOpen(page)) await ui.closeEditor(page, 'cancel');
 
     // Twenty copies per account.
@@ -669,7 +681,7 @@ async function freshUser(env) {
     await ui.submitEditor(page);
     await page.locator('#form-err .err').waitFor({ timeout: 15000 });
     const ed = await ui.readEditor(page);
-    book.eq('the 21st copy is refused: says which wallet and how many were added', ed.err, `Wallet ${room + 1} (${X.short(fresh[room])}): at most 20 copies per account ${room} of ${room + 2} were added.`);
+    book.eq('the 21st copy is refused: says which wallet and how many were added', ed.err, `Wallet ${room + 1} (${X.short(fresh[room])}): at most 20 copies per account. ${room} of ${room + 2} were added; the box now holds the 2 not added yet.`);
     book.eq('twenty copies is the most an account holds', (await ui.state(page)).copies.length, 20);
     await ui.closeEditor(page, 'cancel');
     await sleep(300);

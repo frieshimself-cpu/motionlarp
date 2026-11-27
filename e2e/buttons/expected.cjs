@@ -70,14 +70,24 @@ function forUser(manifest, userKey, { timeZone = 'UTC', now = Date.now() } = {})
   return out;
 }
 
-/** Per copy: positions open now, closed ones, and their profit by mode. */
+/** Per copy: positions open now, closed ones (all, and of each kind), and their profit by mode. */
 function forCopies(manifest, userKey) {
   const out = {};
   const u = forUser(manifest, userKey);
-  for (const c of manifest.copies.filter((x) => x.user === userKey)) out[c.key] = { id: c.id, settings: c.settings, open: 0, closed: 0, live: 0n, test: 0n };
+  for (const c of manifest.copies.filter((x) => x.user === userKey)) out[c.key] = { id: c.id, settings: c.settings, open: 0, closed: 0, closedOf: { live: 0, test: 0 }, live: 0n, test: 0n };
   for (const p of u.open) out[p.copy].open += 1;
-  for (const p of u.closed) { out[p.copy].closed += 1; out[p.copy][p.mode] += p.pnl; }
+  for (const p of u.closed) { out[p.copy].closed += 1; out[p.copy].closedOf[p.mode] += 1; out[p.copy][p.mode] += p.pnl; }
   return out;
+}
+
+/** A number written out the way the site prints what a person typed: never "5e-7". */
+function plain(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return String(n ?? '');
+  const m = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(String(n));
+  if (!m) return String(n);
+  const [, sign, int, frac = '', e] = m;
+  const exp = Number(e);
+  return exp < 0 ? `${sign}0.${'0'.repeat(-exp - 1)}${int}${frac}` : `${sign}${int}${frac}${'0'.repeat(Math.max(0, exp - frac.length))}`;
 }
 
 /** What a copy's line on the dashboard should say about its sell rules. */
@@ -87,21 +97,21 @@ function sellTags(sell) {
   if (sell.mirror.enabled) t.push(mode === 'exit' ? 'Sell all when they sell all' : mode === 'all' ? 'Sell when they sell · all' : 'Sell when they sell');
   if (sell.timed.length) {
     const bag = sell.timedOf === 'bag';
-    t.push(sell.timed.map((x, i) => `${bag && i === sell.timed.length - 1 ? 'rest' : `${x.percent}%`} @ ${x.afterSec}s`).join(' → ') + (bag ? ' · of the bag' : ''));
+    t.push(sell.timed.map((x, i) => `${bag && i === sell.timed.length - 1 ? 'rest' : `${plain(x.percent)}%`} @ ${plain(x.afterSec)}s`).join(' → ') + (bag ? ' · of the bag' : ''));
   }
-  if (sell.stopLoss.length) t.push(`Stop ${sell.stopLoss.map((l) => `−${l.lossPct}% → ${l.percent}%`).join(', ')}`);
-  if (sell.deadCoin.enabled) t.push(`Dead coin ${sell.deadCoin.idleSec}s`);
+  if (sell.stopLoss.length) t.push(`Stop ${sell.stopLoss.map((l) => `−${plain(l.lossPct)}% → ${plain(l.percent)}%`).join(', ')}`);
+  if (sell.deadCoin.enabled) t.push(`Dead coin ${plain(sell.deadCoin.idleSec)}s`);
   return t.length ? t : ['No automatic sells'];
 }
 
 function feeText(c) {
-  const buy = `${c.priorityFeeSol}${c.tipSol ? ` + ${c.tipSol} tip` : ''}`;
+  const buy = `${plain(c.priorityFeeSol)}${c.tipSol ? ` + ${plain(c.tipSol)} tip` : ''}`;
   const sp = c.sellPriorityFeeSol ?? c.priorityFeeSol;
   const st = c.sellTipSol ?? c.tipSol;
-  const sellT = `${sp}${st ? ` + ${st} tip` : ''}`;
+  const sellT = `${plain(sp)}${st ? ` + ${plain(st)} tip` : ''}`;
   return buy === sellT ? `fees ${buy}` : `fees buy ${buy} · sell ${sellT}`;
 }
 
 const short = (a) => `${a.slice(0, 4)}…${a.slice(-4)}`;
 
-module.exports = { forUser, forCopies, sellTags, feeText, short, localDate, dayNumber, dayLabel, DAY };
+module.exports = { forUser, forCopies, sellTags, feeText, plain, short, localDate, dayNumber, dayLabel, DAY };

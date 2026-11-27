@@ -89,8 +89,12 @@ async function adminFirstLook(env) {
       book.eq(`admin users: ${U.name}: active copies, open and closed positions`, [row.copies, row.open, row.closed], [String(copies), String(e.open.length), String(e.closed.length)]);
       book.ok(`admin users: ${U.name}: fees paid = platform fees of their real fills`, matches(row.fees, solNum(e.fees.live)), { shown: row.fees, exact: solStr(e.fees.live) });
       const live = e.modes.live.all, test = e.modes.test.all;
-      if (test !== 0n) book.ok(`admin users: ${U.name}: "Profit" is real money only (test results are not added to it)`, matches(row.profit, solNum(live), 3), { shown: row.profit, realTradesOnly: solStr(live), testTradesOnly: solStr(test), bothAdded: solStr(live + test) });
-      else book.ok(`admin users: ${U.name}: profit`, matches(row.profit, solNum(live), 3), { shown: row.profit, exact: solStr(live) });
+      if (test !== 0n) {
+        book.ok(`admin users: ${U.name}: "Profit" is real money only (test results are not added to it)`, matches(row.profit, solNum(live), 3), { shown: row.profit, realTradesOnly: solStr(live), testTradesOnly: solStr(test), bothAdded: solStr(live + test) });
+        book.ok(`admin users: ${U.name}: what test trades made is shown apart, under it`, /^test [+−]/.test(row.testProfit || '') && matches(row.testProfit, solNum(test), 3), { shown: row.testProfit, testTradesOnly: solStr(test) });
+      } else {
+        book.ok(`admin users: ${U.name}: profit`, matches(row.profit, solNum(live), 3) && row.testProfit === null, { shown: row.profit, test: row.testProfit, exact: solStr(live) });
+      }
       book.eq(`admin users: ${U.name}: buttons`, row.buttons, [...(U.licensed ? [] : ['Create key']), U.disabled ? 'Enable' : 'Disable']);
     }
     book.eq('admin: Settings show what was saved (fee, fee wallet, max per buy, live off)', a.settings, { fee: '1', wallet: manifest.owner.feeWallet, max: '5', live: false, liveText: 'Test mode', liveClass: 'muted', msg: '', msgClass: 'muted' });
@@ -354,14 +358,19 @@ async function adminEverything(env, parts) {
       book.ok('Enable: the user gets back in and finds their positions and history', back && st.positions.length === 4 && st.pnl.live.trades === wantTrades, st && { positions: st.positions.length, trades: st.pnl.live.trades, wantTrades });
     }
 
-    // Two switches for one thing: a revoked key whose user is then enabled from the Users table.
+    // Two switches for one thing: a revoked key whose user is then enabled from the Users table. Refused, with how to
+    // do it instead (finding B4, fixed in 526897f): the user stays disabled while the key stays revoked.
     const bobKey = licRow(a, 'Bob').id;
     const bobUser = userRow(a, 'Bob').id;
     planDialog(page, { accept: true });
     await page.locator(`[data-revoke="${bobKey}"]`).click();
     await after((x) => licRow(x, 'Bob').status === 'Revoked' && userRow(x, 'Bob').disabled);
+    book.allow(409, /^\/api\/admin\/users\/\d+$/);
+    await ui.hideToast(page);
     await page.locator(`[data-enable="${bobUser}"]`).click();
-    a = await after((x) => !userRow(x, 'Bob').disabled);
+    const refused = await ui.toast(page);
+    book.eq('Enable on the user of a revoked key: refused, and says to restore the key', refused, { text: 'their key is revoked: restore their key first (that enables them too)', bad: true });
+    a = await after((x) => userRow(x, 'Bob').disabled && licRow(x, 'Bob').status === 'Revoked');
     const v = await tryLogin('bob-revoked-enabled', nextIp(), K.bob.key);
     await v.V.context.close();
     const st = await ui.adminState(page);
