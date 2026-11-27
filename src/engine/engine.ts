@@ -106,7 +106,9 @@ export class Engine {
    * keep reading the next transactions meanwhile).
    */
   async onLeaderTrade(t: LeaderTrade): Promise<void> {
-    const staleSec = this.deps.staleSec ?? 60;
+    // A copy of a fast trader's buy that is this late is a loss more often than not (the poll, the backup feed,
+    // brings trades 4-5 s late; a restart can bring older ones).
+    const staleSec = this.deps.staleSec ?? 20;
     // Old buys are not copied (caught up after downtime). Old sells still are: we may be holding that coin.
     if (t.side === 'buy' && t.blockTime && this.now() / 1000 - t.blockTime > staleSec) return;
     if (!this.deps.store.markSeen(`${t.signature}:${t.mint}`)) return;
@@ -155,7 +157,10 @@ export class Engine {
       return null;
     };
     const minLamports = BigInt(Math.round(s.minLeaderBuySol * 1e9));
-    if (t.solLamports < minLamports) return skip(`they bought ${fmtSol(t.solLamports)}, under your ${fmtSol(minLamports)} minimum`);
+    // A buy read from pump.fun's event (the fast path) is about 1 % under what the wallet really spent (a trading
+    // bot's own fee is not in the event): within 1.5 % of the minimum it counts as meeting it.
+    const meets = t.solLamports >= minLamports || (t.approx === true && t.solLamports * 1000n >= minLamports * 985n);
+    if (!meets) return skip(`they bought ${fmtSol(t.solLamports)}, under your ${fmtSol(minLamports)} minimum`);
     // One position per coin per user: not bought again (by this or another of their copies) until it has been exited.
     if (store.activePositionOfUser(copy.userId, t.mint)) return skip('already holding this coin');
     if (s.oncePerCoin && store.hasTraded(copy.id, t.mint)) return skip('already traded this coin (buy once per coin is on)');
@@ -318,7 +323,8 @@ export class Engine {
       let tokens = 0n;
       try {
         if (!wallet) throw new Error('no wallet');
-        if (live && !executor.isLive({ live: true })) throw new Error('the site is in test mode: a live position can only be sold once live trading is back on');
+        // The Live switch stops new real buys only: a position bought for real is always sold by its rules.
+        if (live && !executor.isLive({ live: true, exit: true })) throw new Error('no connection to Solana: a live position cannot be sold right now');
         const owner = wallet.publicKey.toBase58();
         if (order.everything) {
           // The last step: whatever the wallet holds now (live), in-flight earlier steps included, as specified.
@@ -336,7 +342,7 @@ export class Engine {
           tokens = want < free ? want : free;
           if (tokens <= 0n) { store.updatePosition(p.id, { firedTimed: [...new Set([...p.firedTimed, stage])] }); return; }
         }
-        const copy = store.copy(p.copyId);
+        const copy = store.copyIncludingDeleted(p.copyId);
         const sentAt = this.now();
         const mine = this.reserved.get(p.id) ?? new Map<string, bigint>();
         mine.set(key, tokens);
@@ -347,6 +353,7 @@ export class Engine {
             wallet, mint: p.mint, tokens, slippagePct: copy?.settings.slippagePct ?? 25,
             priorityFeeSol: copy?.settings.sellPriorityFeeSol ?? copy?.settings.priorityFeeSol ?? 0.0005,
             tipSol: copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0, live, feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0,
+            exit: live, checkFirst: failures > 0,
           });
         } finally {
           mine.delete(key);
@@ -356,6 +363,7 @@ export class Engine {
           // The wallet's balance after the last step tells whether the bag is really empty (a failed read keeps our books).
           const after = live && order.everything ? await executor.tokenBalance(owner, p.mint).catch(() => null) : null;
           this.settleSell(p.id, order, fill, sentAt, after);
+          this.solCache.delete(owner); // the wallet's SOL just changed
           return;
         }
         error = fill.error;
@@ -443,7 +451,7 @@ export class Engine {
     let result: { ok: boolean; error?: string } = { ok: false, error: 'not tried' };
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 2) await new Promise((r) => setTimeout(r, this.deps.zeroRecheckMs ?? 300));
-      result = await this.enqueue(positionId, () => this.sell(positionId, { reason: 'manual', percent: 100 }, attempt < 2));
+      result = await this.enqueue(positionId, () => this.sell(positionId, { reason: 'manual', percent: 100 }, attempt < 2, attempt > 0));
       if (result.ok || result.error === 'position is not open') break;
     }
     return result;
@@ -470,7 +478,7 @@ export class Engine {
     return {};
   }
 
-  private async sell(positionId: number, order: SellOrder, quiet = false): Promise<{ ok: boolean; error?: string }> {
+  private async sell(positionId: number, order: SellOrder, quiet = false, retry = false): Promise<{ ok: boolean; error?: string }> {
     const { store, executor } = this.deps;
     const p = store.position(positionId);
     if (!p || p.status !== 'open' || p.tokensHeld <= 0n) return { ok: false, error: 'position is not open' };
@@ -486,8 +494,9 @@ export class Engine {
       || (order.reason === 'stop_loss' && order.stage !== undefined && p.firedStop.includes(order.stage))
       || (order.reason === 'dead_coin' && p.deadFired)) return { ok: true };
     const live = p.mode === 'live';
-    if (live && !executor.isLive({ live: true })) {
-      return this.sellFailed(p, order, label, 'the server is in test mode: a live position can only be sold once LIVE_TRADING is back on', quiet);
+    // The Live switch stops new real buys only: a position bought for real is always sold by its rules.
+    if (live && !executor.isLive({ live: true, exit: true })) {
+      return this.sellFailed(p, order, label, 'no connection to Solana: a live position cannot be sold right now', quiet);
     }
     try {
       // Live: this position's own tokens, never more than the wallet really holds (other copies or coins the user
@@ -508,17 +517,34 @@ export class Engine {
         store.updatePosition(p.id, this.markDone(p, order));
         return { ok: true };
       }
-      const copy = store.copy(p.copyId);
+      const copy = store.copyIncludingDeleted(p.copyId);
       const slippagePct = copy?.settings.slippagePct ?? 25;
       // (copies saved before sell fees existed fall back to their buy fees)
       const priorityFeeSol = copy?.settings.sellPriorityFeeSol ?? copy?.settings.priorityFeeSol ?? 0.0005;
       const tipSol = copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0;
       const sentAt = this.now();
-      const fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0 });
+      const key = this.orderKey(p.id, order);
+      const checkFirst = retry || (this.retries.get(key)?.tries ?? 0) > 0;
+      // While this sell is out, its tokens are reserved: a timed step that comes due meanwhile does not ask for them.
+      const mine = this.reserved.get(p.id) ?? new Map<string, bigint>();
+      mine.set(key, tokens);
+      this.reserved.set(p.id, mine);
+      let fill: Awaited<ReturnType<Executor['sell']>>;
+      try {
+        fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0, exit: live, checkFirst });
+      } finally {
+        mine.delete(key);
+        if (!mine.size) this.reserved.delete(p.id);
+      }
       if (!fill.ok) return this.sellFailed(p, order, label, fill.error, quiet);
 
-      this.retries.delete(this.orderKey(p.id, order));
-      let left = held - fill.tokens;
+      this.retries.delete(key);
+      this.solCache.delete(owner); // the wallet's SOL just changed
+      // Booked on the position as it is NOW: a timed step that landed while this sell was out has booked its own
+      // tokens and SOL meanwhile, and must not be overwritten.
+      const cur = store.position(p.id) ?? p;
+      const base = cur.tokensHeld < held ? cur.tokensHeld : held;
+      let left = base - fill.tokens;
       if (live) {
         // If the wallet now holds less than our books say (sold elsewhere), believe the wallet. A failed read
         // keeps our own figure: an RPC hiccup must not close a position.
@@ -529,9 +555,9 @@ export class Engine {
       const closed = left === 0n;
       store.updatePosition(p.id, {
         tokensHeld: left,
-        proceedsLamports: p.proceedsLamports + fill.lamports,
-        ...(closed ? { status: 'closed' as const, closedAt: this.now() } : {}),
-        ...this.markDone(p, order),
+        proceedsLamports: cur.proceedsLamports + fill.lamports,
+        ...(closed && cur.status === 'open' ? { status: 'closed' as const, closedAt: this.now() } : {}),
+        ...this.markDone(cur, order),
       });
       const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
       const booked = fill.lamports;
@@ -587,7 +613,7 @@ export class Engine {
       if (this.queues.has(p.id)) continue; // still running in this process
       const label = `${shortMint(p.mint)} (${p.copyName})`;
       const wallet = this.deps.walletFor(p.userId);
-      if (p.mode !== 'live' || !wallet || !executor.isLive({ live: true })) {
+      if (p.mode !== 'live' || !wallet || !executor.isLive({ live: true, exit: true })) {
         store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
         continue;
       }

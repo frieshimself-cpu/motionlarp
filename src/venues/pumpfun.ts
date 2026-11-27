@@ -134,6 +134,8 @@ export class PumpFunVenue implements Venue {
     const { global, feeConfig } = await this.fetchGlobals();
     const state = await this.sdk().fetchSellState(pool.mint, user, pool.tokenProgram);
     this.assertSolCurve(state.quoteMint);
+    // The curve completed while we held the coin: it trades on PumpSwap now ('migrated' re-routes it at once).
+    if (state.bondingCurve.complete) throw new VenueError('bonding curve is complete (migrated)', 'migrated');
     const amount = bn(tokensIn);
     const solAmount = getSellSolAmountFromTokenAmount({
       global,

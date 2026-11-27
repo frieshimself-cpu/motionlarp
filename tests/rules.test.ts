@@ -165,3 +165,18 @@ describe('new copy options', () => {
     });
   });
 });
+
+describe('settings refuse values they do not understand (27 Nov 2026)', () => {
+  it('an unknown "sell when they sell" mode or timed basis is refused, not silently replaced', async () => {
+    const { validateSettings } = await import('../src/engine/settings.js');
+    const base = { leader: 'GsJuHUtw6ni41HNgiycuAn4xeFw5GupsZUBPHgzW6PJR', buySol: 0.1 };
+    expect(() => validateSettings({ ...base, sell: { mirror: { enabled: true, mode: 'half' } } })).toThrow(/sell when they sell/i);
+    expect(() => validateSettings({ ...base, sell: { timedOf: 'everything' } })).toThrow(/timed/i);
+    expect(validateSettings({ ...base, sell: { mirror: { enabled: true, mode: 'exit' }, timedOf: 'bag' } }).sell).toMatchObject({ mirror: { mode: 'exit' }, timedOf: 'bag' });
+  });
+
+  it('a timed step with no seconds is refused (an empty box must not become "sell everything at once")', async () => {
+    const { validateSettings } = await import('../src/engine/settings.js');
+    expect(() => validateSettings({ leader: 'GsJuHUtw6ni41HNgiycuAn4xeFw5GupsZUBPHgzW6PJR', buySol: 0.1, sell: { timed: [{ afterSec: null, percent: 100 }] } })).toThrow(/seconds/);
+  });
+});

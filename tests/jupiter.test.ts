@@ -114,3 +114,48 @@ describe('Jupiter is busy (429 / 5xx)', () => {
     expect(n).toBe(1);
   });
 });
+
+describe('finding a route: a coin that needs more hops is not "no route"', () => {
+  // The sweep of 27 Nov: Bonk-launchpad coins priced in USD1 need SOL -> USD1 -> coin. With the 48-account limit the
+  // site gave Jupiter the answer was "No routes found"; with Jupiter's own default (64) the route is there.
+  const reply = (maxAccounts: string | null) => (maxAccounts === '64'
+    ? new Response(JSON.stringify({ inAmount: '1', outAmount: '9', otherAmountThreshold: '8', routePlan: [{}, {}, {}] }), { status: 200 })
+    : new Response(JSON.stringify({ error: 'No routes found', errorCode: 'NO_ROUTES_FOUND' }), { status: 400 }));
+
+  it('asks again with the larger limit at once, without the "new coin" pauses', async () => {
+    const sizes: (string | null)[] = [];
+    const j = new Jupiter('https://jup.test', '', async (url) => { const m = new URL(String(url)).searchParams.get('maxAccounts'); sizes.push(m); return reply(m); }, 5_000);
+    const t0 = Date.now();
+    const r = await j.route(SOL, MINT, 10n, 100, true);
+    expect(r.quote.outAmount).toBe('9');
+    expect(r.maxAccounts).toBe(64);
+    expect(sizes).toEqual(['48', '64']);
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+
+  it('a route that fits the small limit is used as before', async () => {
+    const sizes: (string | null)[] = [];
+    const j = new Jupiter('https://jup.test', '', async (url) => { sizes.push(new URL(String(url)).searchParams.get('maxAccounts')); return reply('64'); }, 1);
+    expect((await j.route(SOL, MINT, 10n, 100, true)).maxAccounts).toBe(48);
+    expect(sizes).toEqual(['48']);
+  });
+
+  it('no route at either size: a buy waits for a brand-new coin to be picked up; a sell or a price check does not wait', async () => {
+    let n = 0;
+    const never = new Jupiter('https://jup.test', '', async () => { n++; return reply(null); }, 1);
+    await expect(never.route(SOL, MINT, 10n, 100, false)).rejects.toThrow(/No routes/);
+    expect(n).toBe(2); // 48, then 64, no retries
+    n = 0;
+    let appearsAt = 5;
+    const later = new Jupiter('https://jup.test', '', async (url) => { n++; return --appearsAt <= 0 ? reply(new URL(String(url)).searchParams.get('maxAccounts')) : reply(null); }, 1);
+    expect((await later.route(SOL, MINT, 10n, 100, true)).quote.outAmount).toBe('9');
+    expect(n).toBeGreaterThan(2);
+  });
+
+  it('another kind of error is not mistaken for "no route"', async () => {
+    let n = 0;
+    const j = new Jupiter('https://jup.test', '', async () => { n++; return new Response(JSON.stringify({ error: 'Invalid slippage' }), { status: 400 }); }, 1);
+    await expect(j.route(SOL, MINT, 10n, 100, true)).rejects.toThrow(/Invalid slippage/);
+    expect(n).toBe(1);
+  });
+});

@@ -52,6 +52,20 @@ const ex = new ChainExecutor() as unknown as {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const short = (s: string) => `${s.slice(0, 6)}…`;
 
+// Without a Jupiter key the free endpoint allows about one request a second: space the requests out, so a rate
+// limit is not mistaken for a coin that cannot be traded. (With JUPITER_API_KEY set the site's own client is used.)
+if (!config.jupiterApiKey) {
+  const { Jupiter } = await import('../src/venues/jupiter.js');
+  let nextAt = 0;
+  const paced: typeof fetch = async (input, init) => {
+    const wait = nextAt - Date.now();
+    nextAt = Math.max(Date.now(), nextAt) + 1_150;
+    if (wait > 0) await sleep(wait);
+    return fetch(input, init);
+  };
+  (ex as unknown as { jup: unknown }).jup = new Jupiter(config.jupiterUrl, '', paced as never);
+}
+
 /** Signs nothing real: the simulation runs with signature checks off, as the wallet that owns the coins. */
 function standIn(owner: Pk) {
   return new Keypair({ publicKey: owner.toBytes(), secretKey: Keypair.generate().secretKey });
@@ -141,7 +155,9 @@ async function oneCoin(venue: string, mint: string, owner: Pk) {
   const held = await ex.tokenBalance(owner.toBase58(), mint).catch(() => 0n);
   if (held > 1n) {
     await attempt('sell 40% of bag', sell((held * 40n) / 100n));
-    await attempt('sell everything', sell(held));
+    // The wallet is somebody's live wallet: read its balance again right before the full sell.
+    const now = await ex.tokenBalance(owner.toBase58(), mint).catch(() => held);
+    if (now > 1n) await attempt('sell everything', sell(now));
   } else {
     console.log('  (the wallet no longer holds the coin: sells not simulated)');
   }

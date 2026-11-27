@@ -18,6 +18,9 @@ type Sell = TradeRequest & { tokens: bigint };
 
 class Market implements Executor {
   live = false;
+  /** The owner's Live switch (off: no new real buys; sells of positions already bought for real still go out). */
+  switchOn = true;
+  requests: Sell[] = [];
   held = 0n;
   sells: { tokens: bigint; at: number }[] = [];
   attempts = 0;
@@ -26,10 +29,12 @@ class Market implements Executor {
   constructor(private readonly clock: () => number) {}
   async buy(req: TradeRequest & { lamports: bigint }): Promise<FillResult> {
     const tokens = (req.lamports * BAG) / SOL;
-    this.held += tokens;
-    return { ok: true, signature: 'B', tokens, lamports: req.lamports, simulated: !this.live, confirmedAt: this.clock() };
+    const real = this.live && this.switchOn;
+    if (real) this.held += tokens;
+    return { ok: true, signature: 'B', tokens, lamports: req.lamports, simulated: !real, confirmedAt: this.clock() };
   }
   async sell(req: Sell): Promise<FillResult> {
+    this.requests.push(req);
     const n = ++this.attempts;
     const outcome = await this.plan(n, req);
     if (outcome === 'fail') return { ok: false, error: 'boom' };
@@ -42,7 +47,7 @@ class Market implements Executor {
   async quoteSell(_m: string, tokens: bigint) { return (tokens * SOL) / BAG; }
   async solBalance() { return 100n * SOL; }
   async tokenBalance() { return this.held; }
-  isLive(r: { live: boolean }) { return r.live && this.live; }
+  isLive(r: { live: boolean; exit?: boolean }) { return r.live && this.live && (this.switchOn || !!r.exit); }
 }
 
 function buyTrade(over: Partial<LeaderTrade> = {}): LeaderTrade {
@@ -386,5 +391,73 @@ describe('found by the review of 27 Nov 2026 (reading the wallet, overlapping se
     await engine.onLeaderTrade(buyTrade()); await engine.idle();
     expect(order.indexOf('warm')).toBeLessThan(order.indexOf('balance done'));
     expect(open()).toHaveLength(1);
+  });
+});
+
+describe('found by the review of the engine (27 Nov 2026)', () => {
+  it('a timed step that comes due while their full exit is being sold stands down (nothing is sold twice)', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let release: () => void = () => undefined;
+    ex.plan = (n) => (n === 1 ? new Promise((r) => { release = () => r('ok'); }) : 'ok'); // the exit stays in flight
+    const exit = engine.onLeaderTrade(sellTrade(0n));
+    await sleep(10);
+    clock = 1_000_000 + 2000; await engine.tick(); await sleep(20); // step 1 comes due meanwhile
+    expect(ex.attempts).toBe(1);
+    release();
+    await exit; await engine.idle();
+    expect(ex.sells.map((x) => x.tokens)).toEqual([BAG]);
+    expect(open()).toHaveLength(0);
+  });
+
+  it('their full exit overlapping a timed step: every SOL received is booked (the exit does not overwrite the step)', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    const gates: (() => void)[] = [];
+    ex.plan = () => new Promise((r) => gates.push(() => r('ok')));
+    clock = 1_000_000 + 2000;
+    await engine.tick(); await sleep(5); // step 1 (40 %) in flight
+    const exit = engine.onLeaderTrade(sellTrade(0n));
+    await sleep(10); // the exit (60 %) in flight too
+    expect(gates).toHaveLength(2);
+    gates[0]!(); await sleep(10); // step 1 lands and is booked first
+    gates[1]!(); await exit; await engine.idle();
+    const pos = store.closedPositions(uid)[0]!;
+    expect(pos.proceedsLamports).toBe(SOL); // 0.4 + 0.6 SOL
+    expect(pos.tokensHeld).toBe(0n);
+  });
+
+  it('Live switched off: positions already bought with real SOL still sell, by their rules and with Sell now', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.switchOn = false; // the owner flips Live off
+    await at(2);
+    expect(ex.sells.map((x) => x.tokens)).toEqual([400_000n]);
+    expect(ex.requests.every((r) => r.exit === true)).toBe(true);
+    const r = await engine.sellNow(uid, open()[0]!.id);
+    expect(r.ok).toBe(true);
+    expect(ex.held).toBe(0n);
+    // and no new real buy happens while it is off
+    await engine.onLeaderTrade(buyTrade({ mint: 'Mint2222222222222222222222222222222222222222' })); await engine.idle();
+    expect(store.activePositions(uid).filter((p) => p.mode === 'live')).toHaveLength(0);
+  });
+
+  it('a retry is checked (simulated) before it is sent, so a sell that cannot work costs nothing', async () => {
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.plan = (n) => (n === 1 ? 'fail' : 'ok');
+    await at(2);
+    expect(ex.requests.map((r) => !!r.checkFirst)).toEqual([false, true]);
+  });
+
+  it('a deleted copy\'s open position still sells with that copy\'s own fees and slippage', async () => {
+    const id = scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    expect(store.deleteCopy(uid, id)).toBe(true);
+    await at(2);
+    expect(ex.requests[0]).toMatchObject({ slippagePct: 100, priorityFeeSol: 0.001, tipSol: 0.001 });
   });
 });

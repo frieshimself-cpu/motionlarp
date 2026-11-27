@@ -166,8 +166,10 @@ describe('review findings', () => {
     const id = store.activePositions(uid)[0]!.id;
     store.updatePosition(id, { mode: 'live' });
     adv(1000); await engine.tick(); await engine.idle();
+    // Never sold on paper. (Since 27 Nov a live position IS sold for real while the owner's Live switch is off;
+    // this fake executor cannot send at all, so the sell waits and says why.)
     expect(ex.sells).toEqual([]);
-    expect(store.events(uid)[0]!.message).toMatch(/test mode/);
+    expect(store.events(uid)[0]!.message).toMatch(/cannot be sold right now/);
   });
 
   it('#7 restore: interrupted test buys fail; an interrupted live buy that landed opens', async () => {

@@ -390,6 +390,11 @@ export class Store {
   private toCopy(r: Row): CopyRow {
     return { id: num(r.id), userId: num(r.user_id), settings: JSON.parse(String(r.settings)) as CopySettings, createdAt: num(r.created_at), updatedAt: num(r.updated_at) };
   }
+  /** A copy even when it was deleted (its open positions still sell with its own fees and slippage). */
+  copyIncludingDeleted(id: number): CopyRow | undefined {
+    const r = this.get('SELECT * FROM copies WHERE id = ?', id);
+    return r && this.toCopy(r);
+  }
   copy(id: number): CopyRow | undefined {
     const r = this.get('SELECT * FROM copies WHERE id = ? AND deleted = 0', id);
     return r && this.toCopy(r);

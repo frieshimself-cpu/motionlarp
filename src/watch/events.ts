@@ -4,7 +4,10 @@
 // normal fetch-and-parse path.
 import { Connection } from '@solana/web3.js';
 import { pumpSdk } from '../venues/sdk.js';
-import { PUMP_AMM_PROGRAM, type LeaderTrade } from './parse.js';
+import { PUMP_AMM_PROGRAM, WSOL_MINT, type LeaderTrade } from './parse.js';
+
+/** pump.fun writes the zero key as the quote mint of a SOL-priced coin. */
+const SYSTEM_PROGRAM = '11111111111111111111111111111111';
 
 // The program object is only used for its event decoder; this connection is never called.
 let coder: { decode: (b64: string) => { name: string; data: Record<string, unknown> } | null } | null = null;
@@ -28,9 +31,15 @@ export function fastBuysFromLogs(logs: string[], signature: string, leader: stri
     }
     if (!ev || ev.name !== 'tradeEvent' || str(ev.data.user) !== leader) continue;
     if (str(ev.data.isBuy) !== 'true') return null; // a sell: needs the full transaction
-    const sol = BigInt(str(ev.data.solAmount)) + BigInt(str(ev.data.fee ?? 0)) + BigInt(str(ev.data.creatorFee ?? 0));
+    // A coin priced in another token (USDC, USD1, …): the amounts are not SOL. The full transaction decides.
+    const quote = ev.data.quoteMint === undefined ? '' : str(ev.data.quoteMint);
+    if (quote && quote !== SYSTEM_PROGRAM && quote !== WSOL_MINT) return null;
+    // Every part of the price the event carries (checked on the Scharo wallet's real buys of 27 Nov 2026): what
+    // reached the curve, the protocol, creator and buyback fees, and the holder rewards.
+    const part = (k: string) => BigInt(ev!.data[k] === undefined || ev!.data[k] === null ? '0' : str(ev!.data[k]));
+    const sol = part('solAmount') + part('fee') + part('creatorFee') + part('buybackFee') + part('holderRewards');
     const tokens = BigInt(str(ev.data.tokenAmount));
-    buys.push({ signature, leader, mint: str(ev.data.mint), side: 'buy', solLamports: sol, tokenAmount: tokens, tokensBefore: 0n, tokensAfter: tokens, venue: 'pumpfun', slot, blockTime: null });
+    buys.push({ signature, leader, mint: str(ev.data.mint), side: 'buy', solLamports: sol, tokenAmount: tokens, tokensBefore: 0n, tokensAfter: tokens, venue: 'pumpfun', slot, blockTime: null, approx: true });
   }
   return buys.length ? buys : null;
 }

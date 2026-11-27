@@ -22,7 +22,7 @@ import { feeLamports, withFee } from '../fee.js';
 import { confirmSignature } from '../tx/confirm.js';
 import { canSendLive, resend, sendTransaction } from '../tx/send.js';
 import { tipAccount, tipInstruction, tipLamports, tipRoute } from '../tx/tip.js';
-import { appendInstruction, Jupiter } from '../venues/jupiter.js';
+import { appendInstruction, Jupiter, MAX_TRANSACTION_BYTES, ROUTE_SMALL } from '../venues/jupiter.js';
 import { PfDispatcher } from '../venues/pf.js';
 import { VenueError, type ResolvedPool } from '../venues/types.js';
 import { walletChange, WSOL_MINT } from '../watch/parse.js';
@@ -50,6 +50,11 @@ export interface TradeRequest {
   live: boolean;
   /** Platform fee in basis points for this user (0 = none). */
   feeBps: number;
+  /** A sell of a position bought with real SOL: it goes out even while the owner's Live switch is off (the switch
+   *  stops new real buys; it must not strand coins already bought). */
+  exit?: boolean;
+  /** Simulate before sending (a retry: one that cannot work then costs nothing). */
+  checkFirst?: boolean;
 }
 
 export interface Executor {
@@ -61,7 +66,7 @@ export interface Executor {
   solBalance(owner: string): Promise<bigint>;
   tokenBalance(owner: string, mint: string): Promise<bigint>;
   /** True when a request with live=true would really be sent. */
-  isLive(req: { live: boolean }): boolean;
+  isLive(req: { live: boolean; exit?: boolean }): boolean;
   /** Optional: look the coin up ahead of the buy (the engine calls it while it checks the wallet's balance). */
   warm?(mint: string): Promise<void>;
 }
@@ -70,7 +75,8 @@ const FETCH_FILL_TRIES = 6;
 /** Native-route refusals that mean "not a coin this route can trade": use Jupiter instead. */
 const USE_JUPITER = new Set(['unresolved', 'unsupported_pool', 'unsupported_quote', 'unsupported_program', 'migrating']);
 /** Smaller routes leave room for our fee instruction; tried in order when a route does not fit. */
-const ROUTE_SIZES = [48, 32, 20];
+/** Smaller routes to fall back to when a transaction does not fit with our own transfers inside. */
+const SMALLER_ROUTE_SIZES = [32, 20];
 const QUOTE_CACHE_MS = 4_000;
 
 export class ChainExecutor implements Executor {
@@ -80,8 +86,9 @@ export class ChainExecutor implements Executor {
   private readonly tokenPrograms = new Map<string, PublicKey>();
   private readonly quoteCache = new Map<string, { at: number; lamports: bigint }>();
 
-  isLive(req: { live: boolean }): boolean {
-    return req.live && canSendLive();
+  isLive(req: { live: boolean; exit?: boolean }): boolean {
+    // A sell of a position bought for real goes out even while the Live switch is off (only new buys stop).
+    return req.live && (canSendLive() || (!!req.exit && !!config.rpcUrl));
   }
 
   async solBalance(owner: string): Promise<bigint> {
@@ -122,8 +129,8 @@ export class ChainExecutor implements Executor {
   /** SOL value of `amount` of any token (a stablecoin, another coin) — for leaders who did not pay in SOL. */
   async valueInSol(mint: string, amount: bigint): Promise<bigint> {
     if (mint === WSOL_MINT) return amount;
-    const q = await this.jup.quote(mint, WSOL_MINT, amount, 100, 48, false);
-    return BigInt(q.outAmount);
+    const { quote } = await this.jup.route(mint, WSOL_MINT, amount, 100, false);
+    return BigInt(quote.outAmount);
   }
 
   async quoteSell(mint: string, tokens: bigint): Promise<bigint> {
@@ -134,7 +141,7 @@ export class ChainExecutor implements Executor {
       mint,
       (pool) => this.pf.venueFor(pool).quoteSell(pool, tokens),
       // price checks never wait on retries: they must not hold up the clock that fires timed sells
-      async () => BigInt((await this.jup.quote(mint, WSOL_MINT, tokens, 100, 48, false)).outAmount),
+      async () => BigInt((await this.jup.route(mint, WSOL_MINT, tokens, 100, false)).quote.outAmount),
     );
     this.quoteCache.set(key, { at: Date.now(), lamports });
     if (this.quoteCache.size > 5_000) this.quoteCache.clear();
@@ -245,34 +252,50 @@ export class ChainExecutor implements Executor {
     return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'buy', built.expectedOut, req.lamports + ixs.fee + this.txCost(req), before, ixs.fee);
   }
 
-  /** A Jupiter swap with our fee transfer appended, signed by the user; smaller routes are tried if it does not fit. */
-  private async jupiterTx(req: TradeRequest, inputMint: string, outputMint: string, amount: bigint, feeOn: (outAmount: bigint) => bigint, shortLived = false) {
+  /**
+   * A Jupiter swap with our fee and tip transfers appended, signed by the user.
+   *
+   * The route: within the small account limit when there is one, else Jupiter's default (a coin priced in USD1 or
+   * another token needs more hops). A buy waits for a coin that is seconds old to be picked up; a sell never waits
+   * (the engine retries it on its own clock). When the transaction does not fit in one packet with our transfers
+   * inside, a smaller route is tried, and last the same route WITHOUT the tip: it then goes out through the RPC
+   * with its priority fee only, which is slower to land but trades.
+   */
+  private async jupiterTx(req: TradeRequest, inputMint: string, outputMint: string, amount: bigint, feeOn: (outAmount: bigint) => bigint, buy = false) {
+    const slippageBps = Math.round(req.slippagePct * 100);
+    const found = await this.jup.route(inputMint, outputMint, amount, slippageBps, buy);
+    const attempts: { size: number | null; tip: boolean }[] = [{ size: null, tip: true }];
+    if (found.maxAccounts === ROUTE_SMALL) for (const size of SMALLER_ROUTE_SIZES) attempts.push({ size, tip: true });
+    attempts.push({ size: null, tip: false });
     let lastErr: unknown;
-    for (const size of ROUTE_SIZES) {
+    for (const attempt of attempts) {
       try {
-        const quote = await this.jup.quote(inputMint, outputMint, amount, Math.round(req.slippagePct * 100), size);
+        const quote = attempt.size === null ? found.quote : await this.jup.quote(inputMint, outputMint, amount, slippageBps, attempt.size, false);
         const { tx, lastValidBlockHeight } = await this.jup.swap(quote, req.wallet.publicKey, BigInt(Math.round(req.priorityFeeSol * 1e9)));
         const fee = config.feeWallet ? feeOn(BigInt(quote.outAmount)) : 0n;
         let signed: VersionedTransaction = tx;
         const extra: TransactionInstruction[] = [];
         if (fee > 0n) extra.push(SystemProgram.transfer({ fromPubkey: req.wallet.publicKey, toPubkey: new PublicKey(config.feeWallet), lamports: fee }));
-        const tip = tipInstruction(req.wallet.publicKey, req.tipSol, tipRoute(config.senderUrl));
+        const tip = attempt.tip ? tipInstruction(req.wallet.publicKey, req.tipSol, tipRoute(config.senderUrl)) : null;
         if (tip) extra.push(tip);
         if (extra.length) {
           signed = await appendInstruction(tx, extra, async (keys) => (await Promise.all(keys.map((k) => getConnection().getAddressLookupTable(k)))).map((r) => r.value!).filter(Boolean));
+        } else if (signed.serialize().length > MAX_TRANSACTION_BYTES) {
+          throw new Error(`transaction too large: ${signed.serialize().length} bytes`);
         }
         let lastValid = lastValidBlockHeight;
-        if (shortLived) {
+        if (buy && this.isLive(req)) {
           // A live buy: our own blockhash with only a few seconds left, in place of Jupiter's fresh one.
           const bh = await getShortBlockhash();
           signed.message.recentBlockhash = bh.blockhash;
           lastValid = bh.lastValidBlockHeight;
         }
         signed.sign([req.wallet]);
-        return { tx: signed, lastValidBlockHeight: lastValid, quote, fee };
+        return { tx: signed, lastValidBlockHeight: lastValid, quote, fee, tip: tip ? this.tip(req) : 0n };
       } catch (err) {
         lastErr = err;
-        if (!/overrun|too large|encoding/i.test(String(err))) throw err;
+        // Does not fit, or no route that small: the next, lighter attempt. Anything else is a real failure.
+        if (!/overrun|too large|encoding|no routes|could_not_find/i.test(String(err))) throw err;
       }
     }
     throw lastErr;
@@ -285,7 +308,7 @@ export class ChainExecutor implements Executor {
       const fee = config.feeWallet ? feeOnBuy() : 0n;
       const cost = this.txCost(req);
       if ((await this.solBalance(owner)) < req.lamports + fee + cost + this.reserve()) {
-        const q = await this.jup.quote(WSOL_MINT, req.mint, req.lamports, Math.round(req.slippagePct * 100));
+        const { quote: q } = await this.jup.route(WSOL_MINT, req.mint, req.lamports, Math.round(req.slippagePct * 100), true);
         return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: BigInt(q.outAmount), lamports: req.lamports + fee + cost, feeLamports: fee, simulated: true, note: 'test fill from the Jupiter quote (wallet too empty to simulate)' };
       }
       const built = await this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy);
@@ -294,7 +317,7 @@ export class ChainExecutor implements Executor {
       return { ok: true, signature: sim.signature, tokens: BigInt(built.quote.outAmount), lamports: req.lamports + built.fee + cost, feeLamports: built.fee, simulated: true, note: 'Jupiter route simulated on-chain, not sent (test mode)' };
     }
     const [built, before] = await Promise.all([this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy, true), this.tokenBalance(owner, req.mint).catch(() => null)]);
-    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'buy', BigInt(built.quote.outAmount), req.lamports + built.fee + this.txCost(req), before, built.fee);
+    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'buy', BigInt(built.quote.outAmount), req.lamports + built.fee + this.txCost(req), before, built.fee, built.tip);
   }
 
   // ── sell ───────────────────────────────────────────────────────────────
@@ -327,7 +350,7 @@ export class ChainExecutor implements Executor {
   private async jupiterSell(req: TradeRequest & { tokens: bigint }): Promise<FillResult> {
     const feeOnSell = (out: bigint) => feeLamports(out, req.feeBps);
     if (!this.isLive(req)) {
-      const q = await this.jup.quote(req.mint, WSOL_MINT, req.tokens, Math.round(req.slippagePct * 100));
+      const { quote: q } = await this.jup.route(req.mint, WSOL_MINT, req.tokens, Math.round(req.slippagePct * 100), false);
       const gross = BigInt(q.outAmount);
       const fee = config.feeWallet ? feeOnSell(gross) : 0n;
       const net = gross - fee - this.txCost(req);
@@ -337,7 +360,7 @@ export class ChainExecutor implements Executor {
     const tokens = req.tokens > held ? held : req.tokens;
     if (tokens <= 0n) return { ok: false, error: 'the wallet holds none of this coin' };
     const built = await this.jupiterTx(req, req.mint, WSOL_MINT, tokens, feeOnSell);
-    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'sell', tokens, BigInt(built.quote.outAmount) - built.fee - this.txCost(req), held, built.fee);
+    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'sell', tokens, BigInt(built.quote.outAmount) - built.fee - this.txCost(req), held, built.fee, built.tip);
   }
 
   /**
@@ -348,15 +371,17 @@ export class ChainExecutor implements Executor {
    * not be reached) does the wallet's balance decide, so a late landing is never left as orphaned coins. With
    * timed steps overlapping, another sell's balance change must not be mistaken for this one's.
    */
-  private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBefore: bigint | null, platformFee: bigint): Promise<FillResult> {
-    const tip = this.tip(req);
-    const sent = await sendTransaction(tx, true, tip);
+  private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBefore: bigint | null, platformFee: bigint, tipCarried?: bigint): Promise<FillResult> {
+    // The tip the transaction really carries decides its lanes (a Jupiter route too big for it goes without).
+    const tip = tipCarried ?? this.tip(req);
+    const sendOpts = { exit: !!req.exit, simulateFirst: !!req.checkFirst };
+    const sent = await sendTransaction(tx, true, tip, sendOpts);
     if (!sent.ok) return { ok: false, error: sent.error };
     // The owner switched live trading off while this was being built: it was only simulated. Nothing happened.
     if (sent.simulated) return { ok: false, error: 'live trading was switched off before this was sent' };
     // Until it lands, the same signed transaction is put out again about once a second (it can only land once).
     // A buy only for its first moments (it should land now or not at all); a sell until it lands.
-    const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight, { resend: () => resend(tx, tip), ...(side === 'buy' ? { resendForMs: config.buyResendMs } : {}) });
+    const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight, { resend: () => resend(tx, tip, sendOpts.exit), ...(side === 'buy' ? { resendForMs: config.buyResendMs } : {}) });
     const owner = req.wallet.publicKey.toBase58();
     if (!confirmed.landed) {
       // Out of compute units: the retry (the engine retries a failed trade) asks for twice as many.

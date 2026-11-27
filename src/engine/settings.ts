@@ -128,8 +128,12 @@ export function validateSettings(input: unknown): CopySettings {
 
   const s = obj(i.sell);
   const m = obj(s.mirror);
-  const mirror = { enabled: bool(m.enabled, d.sell.mirror.enabled), mode: m.mode === 'all' ? ('all' as const) : m.mode === 'exit' ? ('exit' as const) : ('same' as const) };
-  const timedOf = s.timedOf === 'bag' ? ('bag' as const) : ('left' as const);
+  const mode = m.mode === undefined || m.mode === null || m.mode === '' ? d.sell.mirror.mode : m.mode;
+  if (mode !== 'same' && mode !== 'all' && mode !== 'exit') throw new SettingsError('sell when they sell: the mode must be "same", "all" or "exit"');
+  const mirror = { enabled: bool(m.enabled, d.sell.mirror.enabled), mode: mode as 'same' | 'all' | 'exit' };
+  const basis = s.timedOf === undefined || s.timedOf === null || s.timedOf === '' ? 'left' : s.timedOf;
+  if (basis !== 'left' && basis !== 'bag') throw new SettingsError('timed sells: the basis must be "left" (what is left) or "bag" (the original bag)');
+  const timedOf = basis as 'left' | 'bag';
 
   const timedIn = Array.isArray(s.timed) ? s.timed : [];
   if (timedIn.length > LIMITS.maxStages) throw new SettingsError(`at most ${LIMITS.maxStages} timed sells`);

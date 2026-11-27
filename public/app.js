@@ -416,7 +416,10 @@ function openEditor(copy, preset) {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const on = (id) => $(`[data-rule="${id}"] [data-on]`, form).checked;
-    const rows = (sel, a, b) => $$(sel, form).map((r) => ({ [a]: Number($('[data-a]', r).value), [b]: Number($('[data-b]', r).value) }));
+    // An empty box is sent as empty (the server then says which box), never as 0: "after 0 s sell 100 %" would sell
+    // the whole bag the moment the buy lands.
+    const num = (el) => (el.value.trim() === '' ? null : Number(el.value.replace(',', '.')));
+    const rows = (sel, a, b) => $$(sel, form).map((r) => ({ [a]: num($('[data-a]', r)), [b]: num($('[data-b]', r)) }));
     const leaders = [...new Set($('#f-leader').value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean))];
     const nick = $('#f-name').value.trim();
     const body = {

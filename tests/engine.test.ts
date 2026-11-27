@@ -461,3 +461,41 @@ describe('one switch decides real or test: the site owner\'s', () => {
     expect(feed()[0]).toMatch(/\(test\)/);
   });
 });
+
+describe('found by the review of the engine (27 Nov 2026), continued', () => {
+  it('a buy heard from the logs (an estimate, about 1 % low) at the minimum is copied; a clearly smaller one is not', async () => {
+    addCopy({ minLeaderBuySol: 1 });
+    // The copied wallet's real 1 SOL buy reads 0.99 SOL from pump.fun's event (fees outside it).
+    await engine.onLeaderTrade(trade({ solLamports: 990_000_000n, approx: true })); await engine.idle();
+    expect(open()).toHaveLength(1);
+    // the full transaction is exact: 0.99 is under 1
+    await engine.onLeaderTrade(trade({ signature: 'x2', mint: 'Mint3333333333333333333333333333333333333333', solLamports: 990_000_000n })); await engine.idle();
+    // an estimate well under the minimum is still skipped
+    await engine.onLeaderTrade(trade({ signature: 'x3', mint: 'Mint4444444444444444444444444444444444444444', solLamports: 950_000_000n, approx: true })); await engine.idle();
+    expect(open()).toHaveLength(1);
+    expect(feed().filter((f) => /under your/.test(f))).toHaveLength(2);
+  });
+
+  it('after a sell lands, the wallet balance is read again (a buy right after a "not enough SOL" skip is not skipped on the old figure)', async () => {
+    const fx = new FakeExecutor(); fx.live = true; fx.sol = SOL;
+    const e = new Engine({ store, executor: fx, walletFor: () => wallet, now: () => clock, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01 });
+    addCopy({ buySol: 0.1, sell: { mirror: { enabled: true, mode: 'all' } } });
+    await e.onLeaderTrade(trade()); await e.idle();
+    fx.sol = SOL / 20n; // 0.05: too little for the next buy
+    await e.onLeaderTrade(trade({ signature: 'b2', mint: 'Mint5555555555555555555555555555555555555555' })); await e.idle();
+    expect(feed()[0]).toMatch(/Skipped/);
+    fx.sol = SOL; // the exit below refills the wallet
+    await e.onLeaderTrade(trade({ signature: 's1', side: 'sell', tokensBefore: 2_000_000n, tokensAfter: 0n, tokenAmount: 2_000_000n, slot: 2 })); await e.idle();
+    clock += 2000; // well within the 15 s cache
+    await e.onLeaderTrade(trade({ signature: 'b3', mint: 'Mint6666666666666666666666666666666666666666', slot: 3 })); await e.idle();
+    expect(store.activePositions(userId).map((p) => p.mint)).toContain('Mint6666666666666666666666666666666666666666');
+  });
+
+  it('leader buys older than 20 s are not copied (a late copy of a fast trader is a loss)', async () => {
+    addCopy();
+    await engine.onLeaderTrade(trade({ blockTime: Math.floor(clock / 1000) - 25 })); await engine.idle();
+    expect(open()).toHaveLength(0);
+    await engine.onLeaderTrade(trade({ signature: 'fresh', blockTime: Math.floor(clock / 1000) - 5 })); await engine.idle();
+    expect(open()).toHaveLength(1);
+  });
+});

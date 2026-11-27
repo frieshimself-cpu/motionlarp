@@ -106,7 +106,8 @@ Log in with the admin password. Only you have it; a user account is never an adm
   key. Green means it answered just now. No key or link is shown and none can be typed there. A red row also
   shows as a banner on the Admin tab.
 - **Settings.** The platform fee and the wallet it is paid to, the most a single buy may spend, and the
-  **Live trading** switch.
+  **Live trading** switch. Off stops new real buys; coins already bought with real SOL are still sold by their
+  rules (and with Sell now), so switching it off never leaves them stuck.
 - **License keys.** One key = one account. Create a key for each friend (and one for yourself), copy it when it
   is shown (once), send it to them; pasting it on the site is all they need. "New key" replaces a lost one. A key can carry its own fee (0 % for you, say).
   Revoke a key and its user is locked out and gets no new copies; open positions still sell by their rules.

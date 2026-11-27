@@ -135,10 +135,12 @@ function broadcast(tx: VersionedTransaction, tip: bigint): Promise<string>[] {
  * because every round trip before the send is time the coin's price keeps moving. Slippage limits still apply
  * on-chain, so a bad fill fails instead of filling badly.
  */
-export async function sendTransaction(tx: VersionedTransaction, live: boolean, tip = 0n): Promise<SendOutcome> {
+export async function sendTransaction(tx: VersionedTransaction, live: boolean, tip = 0n, opts: { exit?: boolean; simulateFirst?: boolean } = {}): Promise<SendOutcome> {
   if (!config.rpcUrl) return { ok: false, error: 'no RPC_URL configured' };
-  if (!(live && canSendLive())) return simulate(tx);
-  if (config.simulateLive) {
+  // The Live switch stops new real buys. A sell of a position bought for real (exit) still goes out.
+  if (!(live && (canSendLive() || opts.exit))) return simulate(tx);
+  // A retry is simulated first: one that cannot work (the curve moved on, the tokens already sold) costs nothing.
+  if (config.simulateLive || opts.simulateFirst) {
     const sim = await simulate(tx);
     if (!sim.ok) return sim;
   }
@@ -161,8 +163,8 @@ export async function sendTransaction(tx: VersionedTransaction, live: boolean, t
 }
 
 /** Puts the same signed transaction on every lane again (same signature: it can only land once). Never throws. */
-export function resend(tx: VersionedTransaction, tip = 0n): void {
-  if (!canSendLive()) return;
+export function resend(tx: VersionedTransaction, tip = 0n, exit = false): void {
+  if (!config.rpcUrl || !(canSendLive() || exit)) return;
   try {
     for (const attempt of broadcast(tx, tip)) attempt.catch(() => undefined);
   } catch {

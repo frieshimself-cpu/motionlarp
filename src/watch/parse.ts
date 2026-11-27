@@ -40,6 +40,9 @@ export interface LeaderTrade {
   blockTime: number | null;
   /** The coin's decimals, when the transaction's balances carried them (pump.fun coins: 6). */
   decimals?: number;
+  /** Read from pump.fun's event in the logs rather than the wallet's balances: the SOL is an estimate, about 1 %
+   *  under what the wallet really spent (a trading bot's own fee is not in the event). */
+  approx?: boolean;
 }
 
 export function accountKeys(tx: RawTransaction): string[] {
