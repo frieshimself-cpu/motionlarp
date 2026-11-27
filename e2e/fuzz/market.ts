@@ -71,7 +71,11 @@ export interface OpPlan {
 export interface QPlan { fail?: boolean; L: number }
 /** A balance read: fails, or answers after L ms with the balance as it is then (late) or as it was when asked. */
 export interface BPlan { fail?: boolean; L?: number; late?: boolean }
-export interface Tape { buy: OpPlan[]; sell: OpPlan[]; quote: QPlan[]; bal: (BPlan | null)[] }
+/** A database write that fails (profile dbfault): 'full' = "database or disk is full", 'io' = "disk I/O error".
+ *  `m`: the store method it was (for the reader; a replay goes by the write's number only). */
+export interface DbPlan { err: 'full' | 'io'; m?: string }
+/** `db` (dbfault only): the database writes that fail, by their number among the writes that change something. */
+export interface Tape { buy: OpPlan[]; sell: OpPlan[]; quote: QPlan[]; bal: (BPlan | null)[]; db?: (DbPlan | null)[] }
 
 export const emptyTape = (): Tape => ({ buy: [], sell: [], quote: [], bal: [] });
 export const CALM_OP: OpPlan = { L1: 200, L2: 0, L3: 100 };
@@ -99,6 +103,8 @@ export interface BuyCall {
   settled?: boolean;
   /** The buy was handed back with this, the quote's coin count, while the wallet received `tokens`. */
   quotedTokens?: bigint;
+  /** Signed, then not sent: its onSigned callback threw (with FUZZ_NO_RECORD_NO_SEND, as the fixed executor does). */
+  notSent?: boolean;
 }
 export interface SellCall {
   id: number; kind: 'sell'; gen: number; t0: number; owner: string; mint: string; pid?: number; ctx?: Ctx;
@@ -118,6 +124,12 @@ export interface SellCall {
   refineSeen?: boolean;
   /** The engine read this sell's own transaction afterwards (settleSell) and got its exact numbers. */
   settled?: boolean;
+  /** Signed, then not sent: its onSigned callback threw (with FUZZ_NO_RECORD_NO_SEND, as the fixed executor does). */
+  notSent?: boolean;
+  /** Set by run.ts: its row in sells_out could not be written (the write failed when it was signed). */
+  outFailed?: boolean;
+  /** Set by run.ts: times the engine's booking of this sale was rolled back (a database write failed). */
+  unbooked?: number;
 }
 
 export interface Hooks {
@@ -182,6 +194,13 @@ export class Market {
   calm = false;
   /** Until this moment every trade, quote and balance read fails (an RPC outage). */
   outageUntil = 0;
+  /**
+   * The executor as it is about to be fixed: a trade whose onSigned callback throws (the engine could not write the
+   * trade down before it goes out) is not sent; it answers { ok: false } at once and never reaches the chain. Off: as
+   * the executor is today, it ignores the throw and sends the trade anyway. Default from FUZZ_NO_RECORD_NO_SEND=1; a
+   * saved scenario that says `noRecordNoSend` sets it (run.ts).
+   */
+  noRecordNoSend = process.env.FUZZ_NO_RECORD_NO_SEND === '1';
   hooks!: Hooks;
 
   constructor(
@@ -350,7 +369,16 @@ export class Market {
         call.signature = `B${call.id}`;
         call.sentAt = this.sim.now;
         this.signed.set(call.signature, call);
-        try { req.onSigned?.(call.signature); } catch { /* the real executor ignores it too */ }
+        try {
+          req.onSigned?.(call.signature);
+        } catch (err) {
+          // Today's executor ignores it and sends the buy anyway; the fixed one does not send it.
+          if (this.noRecordNoSend) {
+            call.sentAt = undefined;
+            call.notSent = true;
+            return deliver({ ok: false, error: `could not be written down before sending it: ${(err as Error)?.message ?? String(err)}` });
+          }
+        }
         this.after(plan.L1 - signAt, () => {
           if (plan.unsure === 'lost') return this.after(plan.L2, () => deliver({ ok: false, error: UNKNOWN, uncertain: true }));
           if (plan.fail) { call.chainFailed = /errored/.test(plan.fail); return deliver({ ok: false, error: plan.fail }); }
@@ -475,7 +503,16 @@ export class Market {
         // As the real executor: told with its blockhash's last valid height, the fee it carries (from the quote) and
         // whether the market can pay for only part of it.
         const info = { lastValidBlockHeight: Math.floor(this.sim.now / BLOCK_MS) + VALID_BLOCKS, feeLamports: fee0, marketShort: !!plan.part };
-        try { req.onSigned?.(call.signature, info); } catch { /* the real executor ignores it too */ }
+        try {
+          req.onSigned?.(call.signature, info);
+        } catch (err) {
+          // Today's executor ignores it and sends the sell anyway; the fixed one does not send it (nothing lands).
+          if (this.noRecordNoSend) {
+            call.sentAt = undefined;
+            call.notSent = true;
+            return deliver({ ok: false, error: `could not be written down before sending it: ${(err as Error)?.message ?? String(err)}` });
+          }
+        }
       }
       const unknownLost = live && plan.unsure === 'lost';
       this.after(plan.L1, () => {
