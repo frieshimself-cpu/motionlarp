@@ -744,5 +744,6 @@ describe('test mode: the last step of a timed exit waits for a step that is stil
     await engine.idle(); // the +2 s step gives up; the last step then sells the rest
     expect(ex.sells.reduce((a, s) => a + s.tokens, 0n)).toBe(BAG);
     expect(open()).toHaveLength(0);
+    expect(feed().some((l) => /could pay for only part/.test(l))).toBe(false); // the market was not short: no such line
   });
 });

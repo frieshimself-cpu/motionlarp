@@ -97,6 +97,7 @@ export function friendlyError(text: string): string {
   if (/slippage|TooMuchSolRequired|TooLittleSolReceived|ExceededSlippage/i.test(text)) return 'price moved more than your slippage allows';
   if (/BondingCurveComplete|bonding curve is complete/i.test(text)) return 'the coin just moved to PumpSwap (it graduated): retried there';
   if (/not tradable|not_tradable/i.test(text)) return 'Jupiter will not trade this coin (almost no liquidity, flagged, or not listed yet)';
+  if (/not bought late/i.test(text)) return 'Jupiter has no market for this coin yet: the copy was skipped rather than bought seconds late';
   if (/no routes found|could_not_find_any_route/i.test(text)) return 'no market for this coin yet (Jupiter found no route)';
   if (/NotEnoughTokensToBuy/i.test(text)) return 'not enough coins left on the curve for this buy';
   if (/curve holds no SOL|curve holds too little SOL|\bOverflow\b/.test(text)) return 'the curve holds too little SOL to pay for this sell right now (it fills up again when someone buys): the rest is sold as soon as it can be';

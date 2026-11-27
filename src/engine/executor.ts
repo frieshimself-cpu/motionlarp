@@ -91,10 +91,32 @@ const FETCH_FILL_TRIES = 6;
  * (0.25 s, 1 s, ...) sell on PumpSwap; a copy buy in that moment is skipped.
  */
 const USE_JUPITER = new Set(['unresolved', 'unsupported_pool', 'unsupported_quote', 'unsupported_program']);
-/** Smaller routes leave room for our fee instruction; tried in order when a route does not fit. */
 /** Smaller routes to fall back to when a transaction does not fit with our own transfers inside. */
 const SMALLER_ROUTE_SIZES = [32, 20];
-const QUOTE_CACHE_MS = 4_000;
+/** Under the engine's 2 s price loop: every price check gets a fresh price (a 4 s cache showed a 6 s old one). */
+const QUOTE_CACHE_MS = 1_500;
+/** A coin Jupiter cannot route is not asked again on every price check for this long. */
+const NO_ROUTE_BACKOFF_MS = 30_000;
+const NO_ROUTE = /no routes|could_not_find|not tradable|not_tradable/i;
+
+/**
+ * The attempts to build a Jupiter trade with our own transfers inside, in order, when one does not fit in a packet:
+ * the best route with the tip; the best route without the tip (it then goes out through the RPC, slower to land but
+ * at the best price); smaller routes with the tip (only when they pay nearly as much: `smallerRouteOk`); and, for a
+ * sell only, the best route without any of our transfers (no tip, no platform fee): an exit is never blocked by the
+ * site's own transfers. A buy that fits none of them is skipped.
+ */
+export function jupiterAttempts(foundAt: number, side: 'buy' | 'sell'): { size: number | null; tip: boolean; fee: boolean }[] {
+  const out: { size: number | null; tip: boolean; fee: boolean }[] = [{ size: null, tip: true, fee: true }, { size: null, tip: false, fee: true }];
+  if (foundAt === ROUTE_SMALL) for (const size of SMALLER_ROUTE_SIZES) out.push({ size, tip: true, fee: true });
+  if (side === 'sell') out.push({ size: null, tip: false, fee: false });
+  return out;
+}
+
+/** A smaller route is taken only when it pays at least 99 % of what the best route pays. */
+export function smallerRouteOk(bestOut: bigint, smallerOut: bigint): boolean {
+  return smallerOut * 100n >= bestOut * 99n;
+}
 
 export class ChainExecutor implements Executor {
   readonly pf = new PfDispatcher();
@@ -102,6 +124,7 @@ export class ChainExecutor implements Executor {
   private readonly viaJupiter = new Map<string, number>();
   private readonly tokenPrograms = new Map<string, PublicKey>();
   private readonly quoteCache = new Map<string, { at: number; lamports: bigint }>();
+  private readonly quoteFails = new Map<string, { until: number; error: Error }>();
 
   isLive(req: { live: boolean; exit?: boolean }): boolean {
     // A sell of a position bought for real goes out even while the Live switch is off (only new buys stop).
@@ -154,17 +177,30 @@ export class ChainExecutor implements Executor {
     const key = `${mint}:${tokens}`;
     const hit = this.quoteCache.get(key);
     if (hit && Date.now() - hit.at < QUOTE_CACHE_MS) return hit.lamports;
-    const lamports = await this.route(
-      mint,
-      async (pool) => {
-        const out = await this.pf.venueFor(pool).quoteSell(pool, tokens);
-        // A quote of nothing for something is not a price (a finished curve, a drained pool): no price this time.
-        if (out === 0n && tokens > 0n) throw new Error('no price: the quote came back 0');
-        return out;
-      },
-      // price checks never wait on retries: they must not hold up the clock that fires timed sells
-      async () => BigInt((await this.jup.route(mint, WSOL_MINT, tokens, 100, false)).quote.outAmount),
-    );
+    // A coin Jupiter cannot route (liquidity pulled, flagged) is not asked again on every price check: Jupiter's
+    // request budget is shared by the whole site, and the trades need it.
+    const failed = this.quoteFails.get(mint);
+    if (failed && failed.until > Date.now()) throw failed.error;
+    let lamports: bigint;
+    try {
+      lamports = await this.route(
+        mint,
+        async (pool) => {
+          const out = await this.pf.venueFor(pool).quoteSell(pool, tokens);
+          // A quote of nothing for something is not a price (a finished curve, a drained pool): no price this time.
+          if (out === 0n && tokens > 0n) throw new Error('no price: the quote came back 0');
+          return out;
+        },
+        // price checks never wait on retries: they must not hold up the clock that fires timed sells
+        async () => BigInt((await this.jup.route(mint, WSOL_MINT, tokens, 100, false)).quote.outAmount),
+      );
+    } catch (err) {
+      if (NO_ROUTE.test(String(err))) {
+        this.quoteFails.set(mint, { until: Date.now() + NO_ROUTE_BACKOFF_MS, error: err instanceof Error ? err : new Error(String(err)) });
+        if (this.quoteFails.size > 5_000) this.quoteFails.clear();
+      }
+      throw err;
+    }
     this.quoteCache.set(key, { at: Date.now(), lamports });
     if (this.quoteCache.size > 5_000) this.quoteCache.clear();
     return lamports;
@@ -318,15 +354,17 @@ export class ChainExecutor implements Executor {
   private async jupiterTx(req: TradeRequest, inputMint: string, outputMint: string, amount: bigint, feeOn: (outAmount: bigint) => bigint, buy = false) {
     const slippageBps = Math.round(req.slippagePct * 100);
     const found = await this.jup.route(inputMint, outputMint, amount, slippageBps, buy);
-    const attempts: { size: number | null; tip: boolean }[] = [{ size: null, tip: true }];
-    if (found.maxAccounts === ROUTE_SMALL) for (const size of SMALLER_ROUTE_SIZES) attempts.push({ size, tip: true });
-    attempts.push({ size: null, tip: false });
     let lastErr: unknown;
-    for (const attempt of attempts) {
+    for (const attempt of jupiterAttempts(found.maxAccounts, inputMint === WSOL_MINT ? 'buy' : 'sell')) {
       try {
-        const quote = attempt.size === null ? found.quote : await this.jup.quote(inputMint, outputMint, amount, slippageBps, attempt.size, false);
+        let quote = found.quote;
+        if (attempt.size !== null) {
+          quote = await this.jup.quote(inputMint, outputMint, amount, slippageBps, attempt.size, false);
+          // A smaller route can be a worse one: taken only when it pays nearly as much as the best.
+          if (!smallerRouteOk(BigInt(found.quote.outAmount), BigInt(quote.outAmount))) throw new Error('no routes that small at a fair price');
+        }
         const { tx, lastValidBlockHeight } = await this.jup.swap(quote, req.wallet.publicKey, BigInt(Math.round(req.priorityFeeSol * 1e9)));
-        const fee = config.feeWallet ? feeOn(BigInt(quote.outAmount)) : 0n;
+        const fee = attempt.fee && config.feeWallet ? feeOn(BigInt(quote.outAmount)) : 0n;
         let signed: VersionedTransaction = tx;
         const extra: TransactionInstruction[] = [];
         if (fee > 0n) extra.push(SystemProgram.transfer({ fromPubkey: req.wallet.publicKey, toPubkey: new PublicKey(config.feeWallet), lamports: fee }));

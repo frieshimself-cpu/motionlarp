@@ -167,10 +167,10 @@ export class Engine {
     if (!meets) return skip(`they bought ${fmtSol(t.solLamports)}, under your ${fmtSol(minLamports)} minimum`);
     // One position per coin per user: not bought again (by this or another of their copies) until it has been exited.
     if (store.activePositionOfUser(copy.userId, t.mint)) return skip('already holding this coin');
+    if (s.oncePerCoin && store.hasTraded(copy.id, t.mint)) return skip('already traded this coin (buy once per coin is on)');
     // A sell of an earlier position of this coin still on its way (stuck, re-sent until it lands) would sell the new
     // coins when it lands: not bought again until it has landed or failed.
     if (this.sellOutFor(copy.userId, t.mint)) return skip('a sell of this coin is still on its way (it would sell the new coins)');
-    if (s.oncePerCoin && store.hasTraded(copy.id, t.mint)) return skip('already traded this coin (buy once per coin is on)');
     const maxBuy = typeof this.deps.maxSolPerBuy === 'function' ? this.deps.maxSolPerBuy() : this.deps.maxSolPerBuy;
     if (s.buySol > maxBuy) return skip(`${s.buySol} SOL is above the server limit of ${maxBuy} SOL per buy`);
     const wallet = this.deps.walletFor(copy.userId);
@@ -416,7 +416,7 @@ export class Engine {
           // while another step is still out: if that one fails for good, the last step sells what it left.
           const partial = !!order.everything && fill.tokens < tokens;
           const othersOut = !!order.everything && this.reservedExcept(p.id, key) > 0n;
-          this.settleSell(p.id, order, fill, sentAt, after, partial || othersOut);
+          this.settleSell(p.id, order, fill, sentAt, after, partial || othersOut, partial);
           this.solCache.delete(owner); // the wallet's SOL just changed
           const now = partial || othersOut ? store.position(p.id) : null;
           if (!now || now.status !== 'open' || now.tokensHeld <= 0n) return;
@@ -453,7 +453,7 @@ export class Engine {
 
   /** Books a finished sell. Synchronous from the re-read on, so overlapping sells cannot corrupt the position.
    *  `partial`: the market paid for only part of a sell of everything; the order stays owed (not marked done). */
-  private settleSell(positionId: number, order: SellOrder, fill: Extract<Awaited<ReturnType<Executor['sell']>>, { ok: true }>, sentAt: number, walletAfter: bigint | null, partial = false): void {
+  private settleSell(positionId: number, order: SellOrder, fill: Extract<Awaited<ReturnType<Executor['sell']>>, { ok: true }>, sentAt: number, walletAfter: bigint | null, keepOwed = false, marketShort = false): void {
     const { store } = this.deps;
     const p = store.position(positionId);
     if (!p) return;
@@ -472,7 +472,7 @@ export class Engine {
       tokensHeld: left,
       proceedsLamports: p.proceedsLamports + lamports,
       ...(closed && p.status === 'open' ? { status: 'closed' as const, closedAt: this.now() } : {}),
-      ...(partial && !closed ? {} : this.markDone(p, order)),
+      ...(keepOwed && !closed ? {} : this.markDone(p, order)),
     });
     if (sold === 0n && fill.simulated) return; // nothing was left for this step in test mode: no fill, no feed line
     const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
@@ -482,7 +482,7 @@ export class Engine {
       store.updateFillLamports(fillId, exact.lamports);
       if (now) store.updatePosition(p.id, { proceedsLamports: now.proceedsLamports + (exact.lamports - lamports) });
     }).catch(() => undefined);
-    store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, lamports, sentAt, fill.simulated, closed, partial && !closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
+    store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, lamports, sentAt, fill.simulated, closed, marketShort && !closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
   }
 
   /** "Sold 40% of the bag of X (copy) for 0.4 SOL — +2.0s after buy · 412K tokens (test). Position closed." */

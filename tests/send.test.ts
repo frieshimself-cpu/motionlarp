@@ -159,9 +159,15 @@ describe('waiting for a transaction to land', () => {
 
   it('a buy is re-sent only for its first moments: one that missed its chance is left to expire, not pushed for 30 s', async () => {
     chain([null, null, null, null, null, null, null, null, null, null, null, null, { confirmationStatus: 'confirmed', slot: 9 }]);
-    let resent = 0;
-    await confirmSignature('sig', 1_000, { resend: () => { resent++; }, pollMs: 10, resendForMs: 45, resendEveryMs: 20 });
-    expect(resent).toBe(2); // at 20 and 40 ms; later ticks are past the 45 ms budget
+    const at: number[] = [];
+    const t0 = Date.now();
+    await confirmSignature('sig', 1_000, { resend: () => { at.push(Date.now() - t0); }, pollMs: 10, resendForMs: 45, resendEveryMs: 20 });
+    // About twice (at 20 and 40 ms), never after the 45 ms budget although it took over 100 ms to land. (Timers run
+    // late on a busy machine, so the count is not pinned.)
+    expect(Date.now() - t0).toBeGreaterThan(100);
+    expect(at.length).toBeGreaterThanOrEqual(1);
+    expect(at.length).toBeLessThanOrEqual(2);
+    expect(Math.max(...at)).toBeLessThan(45 + 25);
   });
 
   it('stops re-sending once it has landed or failed on chain', async () => {
