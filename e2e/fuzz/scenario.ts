@@ -61,10 +61,13 @@ export const SABOTAGES = {
   'slot-blind': ['M3:landed-sale-dropped-as-never-landed', 'the engine is handed the chain tip at a slot no node is behind: "not found" from a node behind the tip is believed 10 blocks past a sell\'s last block (the margin stays, the slot check is gone)', 'lag', 300],
   // (the four below need the chain model of the reviewers' round: reads that take time, forks, answers without a slot,
   // slow periods; each is invisible without its part of it)
-  'status-first': ['M3:landed-sale-dropped-as-never-landed', 'the engine reads the status before the tip: it is handed the chain tip as it is 15 blocks later, at that block\'s slot (a tip read of about 6 s, the main link\'s 4 s limit and then the backup link, made after the status read), so a "not found" without a slot from a node behind is believed once that later tip is 30 blocks past the sell\'s last block (one with a slot is held to the slot that block can have at the latest, which a later tip at its own slot still bounds: the slot check is not fooled); seeds whose "not found" never carries a slot', 'lag', 400, { faults: { statusLag: 0.9, noSlot: 1 } }],
+  'status-first': ['M3:landed-sale-dropped-as-never-landed', 'the engine is handed the chain tip as it is 15 blocks later, at that block\'s slot: a stand-in for an engine that reads the status before the tip when that tip read takes about 6 s (the main link\'s 4 s limit, then the backup link). A real reordering moves the tip by one read\'s latency only, mostly tens of ms: the fuzzer does not catch it, the unit test that pins the order does (tests/restarts.test.ts). A "not found" without a slot from a node behind is believed once that later tip is 30 blocks past the sell\'s last block (one with a slot is held to the slot that block can have at the latest, which a later tip at its own slot still bounds: the slot check is not fooled); seeds whose "not found" never carries a slot', 'lag', 400, { faults: { statusLag: 0.9, noSlot: 1 } }],
   'margin-free': ['M3:landed-sale-dropped-as-never-landed', 'a "not found" that passes the slot check is believed as soon as the tip is past the last block the sell could land in (the 10-block margin gone, the slot check kept): only a node on a minority fork, which has not seen the main fork\'s last blocks, shows it; seeds whose status reads all come from such nodes, on a chain at 1.5 s a block, reads that never fail', 'lag', 600, { faults: { forkRead: 1, statusLag: 0, noSlot: 0, balFail: 0 }, slow: [{ at: 0, ms: 3_600_000, blockMs: 1_500 }] }],
   'slotless-believed': ['M3:landed-sale-dropped-as-never-landed', 'a "not found" that carries no slot is believed as if it came from a node as far along as the tip (an executor without slots taken at its word); seeds whose "not found" never carries a slot', 'lag', 300, { faults: { noSlot: 1 } }],
   'give-up-120s': ['NL1', 'a sell of unknown outcome still not found 120 s after it was sent is taken for one that never landed, whatever the chain says (the engine before the tip decided it): only a slow chain, on which a blockhash lives longer than 120 s, shows it; ghost seeds on a chain at 1.5 s a block', 'ghost', 300, { slow: [{ at: 0, ms: 3_600_000, blockMs: 1_500 }] }],
+  // (the two below: the executor's own wait calling a trade expired, and the buys' verdicts, both judged by the chain)
+  'confirm-old-rule': ['M3:landed-sale-dropped-as-never-landed', 'the fake executor\'s own wait calls a trade expired by the rule src/tx/confirm.ts had before 2cdd0b4 (past its last valid height on the word of a node whose slot is at least the tip\'s, or that tells no slot; 30 blocks past it whatever a node says, a trade seen at "processed" included): a sale that landed in its last blocks, looked at by a node on a fork or behind that has not seen it while the executor\'s polls have not seen it either, is taken for one that expired, and the engine sells again', 'lag', 300],
+  'buy-early': ['M3:landed-buy-marked-failed-as-never-landed', 'a buy of unknown outcome not found is marked failed as soon as the highest tip the engine has read is past its last valid height (the margin and the slot check gone): a buy that landed in the last blocks of its short blockhash, read by a node behind or on a fork that has not seen it, is marked failed and its coins are never sold; lag seeds with many buys of unknown outcome', 'lag', 300, { faults: { buyUnsure: 0.4 } }],
 } as const;
 export type Sabotage = keyof typeof SABOTAGES;
 
@@ -201,20 +204,31 @@ export function faultsFor(profile: Profile, r: Rng): Faults {
     // (more of them, and shorter) with sells on their way, sells of unknown outcome (landed or not), failures that never
     // land, and now and then a read that fails (the tip's, or a status read). Its nodes also disagree in the other ways
     // real ones do (nodeFaultsFor: forks, a tip node behind, a node behind on its confirmations, answers without a slot).
-    case 'lag': return { ...none, buyUnsure: 0.03, sellFail: 0.2, streak: 0.2, streakMax: 3, slow: 0.1, ghost: 0.35, balFail: 0.03, balLag, statusLag: r.pick([0.3, 0.8, 0.9]), statusLagMax: STATUS_LAG_LIMIT, lateLand: 0.6 };
+    // (buys of unknown outcome, and buys that fail or expire, so that buys too are settled from the chain where its nodes
+    // disagree)
+    case 'lag': return { ...none, buyFail: 0.03, buyUnsure: 0.06, sellFail: 0.2, streak: 0.2, streakMax: 3, slow: 0.1, ghost: 0.35, balFail: 0.03, balLag, statusLag: r.pick([0.3, 0.8, 0.9]), statusLagMax: STATUS_LAG_LIMIT, lateLand: 0.6 };
     // The same on a slow chain (slowFor: a block every 0.6 to 1.5 s for minutes, in every seed): a blockhash lives up to
     // nearly four minutes, so the engine's time limits are no longer safe stand-ins for the chain's own clock.
-    case 'slow': return { ...none, buyUnsure: 0.03, sellFail: 0.2, streak: 0.2, streakMax: 3, slow: 0.1, ghost: 0.35, balFail: 0.03, balLag, statusLag: r.pick([0.2, 0.5, 0.8]), statusLagMax: STATUS_LAG_LIMIT, lateLand: 0.6 };
+    case 'slow': return { ...none, buyFail: 0.03, buyUnsure: 0.06, sellFail: 0.2, streak: 0.2, streakMax: 3, slow: 0.1, ghost: 0.35, balFail: 0.03, balLag, statusLag: r.pick([0.2, 0.5, 0.8]), statusLagMax: STATUS_LAG_LIMIT, lateLand: 0.6 };
   }
 }
 
+/** Share of the lag and slow seeds whose status reads come mostly from nodes on a minority fork (fork-heavy). */
+const FORK_HEAVY_SHARE = 0.12;
+
 /** The nodes of a lag or slow seed beyond being behind the tip (market.ts): a status node on a minority fork, a tip
  *  node a little behind, a status node behind on its confirmations, a "not found" without a slot (all of a seed's, in
- *  some: an executor without slots). From their own random stream: the plan's draws stay as they are. */
+ *  some: an executor without slots). From their own random stream: the plan's draws stay as they are. A share of these
+ *  seeds is fork-heavy (from a stream of its own again, so every other seed is what it was): most status reads from
+ *  nodes on a minority fork (1 to 11 blocks: what the 10-block margin is for), few from nodes behind, their "not found"
+ *  mostly with a slot (the slotted rule, the one the margin belongs to). */
 export function nodeFaultsFor(profile: Profile, seed: number): Partial<Faults> {
   if (profile !== 'lag' && profile !== 'slow') return {};
   const r = Rng.derive(seed, 'nodes');
-  return { forkRead: r.pick([0.03, 0.1, 0.25]), tipBehind: r.pick([0, 0.1, 0.3]), confBehind: r.pick([0.03, 0.1, 0.2]), confBehindMax: 40, noSlot: r.pick([0, 0, 0.15, 0.5, 1]) };
+  const nodes: Partial<Faults> = { forkRead: r.pick([0.03, 0.1, 0.25]), tipBehind: r.pick([0, 0.1, 0.3]), confBehind: r.pick([0.03, 0.1, 0.2]), confBehindMax: 40, noSlot: r.pick([0, 0, 0.15, 0.5, 1]) };
+  const h = Rng.derive(seed, 'forks');
+  if (h.chance(FORK_HEAVY_SHARE)) return { ...nodes, forkRead: h.pick([0.6, 0.85, 1]), statusLag: h.pick([0, 0.1, 0.2]), noSlot: h.pick([0, 0, 0.15]) };
+  return nodes;
 }
 
 /** Shares of the seeds whose chain has slow periods: every 'slow' seed, a fifth of the 'lag' seeds, and 4 % of the
@@ -241,7 +255,16 @@ export function slowFor(seed: number, spanMs: number, share: number, heavy = fal
   }
   if (heavy && r.chance(0.5)) out.push({ at: Math.max(0, spanMs - r.int(0, 60_000)), ms: r.int(240_000, 600_000), blockMs: r.pick([800, 1_000, 1_200, 1_500]) });
   out.sort((a, b) => a.at - b.at);
-  return out;
+  // Periods that overlap are clipped: where two overlap, the chain goes at the earlier one's pace (Market.slowAt takes the
+  // first), so a later one starts where the earlier ends, and one inside another goes. The chain is the same as before;
+  // the periods, the transcript and the minutes counted now say what it does.
+  const clipped: SlowPeriod[] = [];
+  for (const w of out) {
+    const end = clipped.length ? clipped[clipped.length - 1]!.at + clipped[clipped.length - 1]!.ms : -Infinity;
+    if (w.at >= end) clipped.push(w);
+    else if (w.at + w.ms > end) clipped.push({ at: end, ms: w.at + w.ms - end, blockMs: w.blockMs });
+  }
+  return clipped;
 }
 
 /** The database faults of a dbfault or diskfull seed, from their own random stream (the plan's draws stay as they

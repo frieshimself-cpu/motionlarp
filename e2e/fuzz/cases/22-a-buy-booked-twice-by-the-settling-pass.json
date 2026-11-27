@@ -1,0 +1,233 @@
+{
+ "seed": 73,
+ "profile": "case",
+ "live": true,
+ "overAsk": "strict",
+ "priceMs": 0,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000,
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "c1",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "enabled": true,
+    "mode": "paper",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 5,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": true,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "all"
+     },
+     "timedOf": "bag",
+     "timed": [],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 8
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0.03,
+  "buyUnsure": 0.06,
+  "sellFail": 0.2,
+  "streak": 0.2,
+  "streakMax": 3,
+  "slow": 0.1,
+  "partial": 0,
+  "ghost": 0.35,
+  "quoteFail": 0,
+  "balFail": 0.03,
+  "balLag": 0,
+  "refineNull": 0,
+  "statusLag": 0.8,
+  "statusLagMax": 31,
+  "lateLand": 0.6,
+  "forkRead": 0.03,
+  "tipBehind": 0.3,
+  "confBehind": 0.1,
+  "confBehindMax": 40,
+  "noSlot": 0
+ },
+ "steps": [
+  {
+   "dt": 14000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 3
+   }
+  },
+  {
+   "dt": 4000,
+   "act": {
+    "a": "restart",
+    "kind": "crash",
+    "downMs": 1000
+   }
+  },
+  {
+   "dt": 2000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 1,
+    "sol": 0.05
+   }
+  },
+  {
+   "dt": 10000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "noRecordNoSend": true,
+ "tape": {
+  "buy": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "left": 46,
+    "late": 0
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100,
+    "left": 42,
+    "seen": 5
+   }
+  ],
+  "sell": [
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 200,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "quote": [
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   },
+   {
+    "L": 50
+   }
+  ],
+  "bal": [],
+  "tip": [
+   {
+    "L": 6293
+   },
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null
+  ],
+  "status": [
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null
+  ]
+ },
+ "about": "Found by the random runs of the second chain model (lag profile, seed 73, shrunk; the same in lag seeds 1249 and 2335 and slow seed 205). A crash leaves a buy \"opening\" (it lands late, in the last block of its short blockhash). After the restart the copied wallet buys another coin and our buy of it goes out. The safety pass 3 s after the start takes every opening position at once (src/engine/engine.ts, settleOpening: store.openingPositions()), and its read of the chain tip takes 6.3 s (the main link's 4 s limit, then the backup link). Meanwhile the new buy lands and its own step books it. The pass then comes to it: its \"still running in this process\" check (this.queues.has) no longer holds, the row it holds still says \"opening\", and the buy's own transaction says landed, so it is booked a second time: a second buy fill, a second \"Bought\" line, its coins, cost and opened time written again (\"its exit starts now\"). Any slow read inside that pass opens the same window (in lag seed 2335, a 6.4 s status read of another buy); had a sell of that position been booked in between, its coins would have been written back into the books.",
+ "expect": [
+  "M1:two-buy-fills"
+ ]
+}

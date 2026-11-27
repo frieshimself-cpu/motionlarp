@@ -11,16 +11,17 @@ import type { Scenario, Step } from './scenario.js';
 export interface Shrunk { scenario: Scenario; result: RunResult; runs: number; reproduced: boolean }
 
 const clone = <T>(v: T): T => structuredClone(v);
-const isCalm = (p: OpPlan | undefined) => !p || (!p.fail && !p.part && !p.ghost && !p.refineNull && !p.quoted && p.late === undefined && p.L1 === CALM_OP.L1 && p.L2 === CALM_OP.L2 && p.L3 === CALM_OP.L3);
+/** (a buy's short blockhash life, `left`, is not an odd outcome: the shrinker leaves it as it is) */
+const isCalm = (p: OpPlan | undefined) => !p || (!p.fail && !p.part && !p.ghost && !p.refineNull && !p.quoted && p.late === undefined && !p.seen && p.L1 === CALM_OP.L1 && p.L2 === CALM_OP.L2 && p.L3 === CALM_OP.L3);
 /** A status read's plan as an object (old tapes hold a number: how many blocks behind). */
 const statusPlan = (s: StatusPlan | number | null | undefined): StatusPlan | null => (typeof s === 'number' ? { lag: s } : s ?? null);
 /** What a status read's or a tip read's plan costs a reader: the node's oddities more than the time it took. */
-const statusCost = (s: StatusPlan | number | null | undefined) => { const p = statusPlan(s); return p ? (p.lag ? 50 : 0) + (p.fork ? 50 : 0) + (p.conf ? 30 : 0) + (p.noSlot ? 30 : 0) + (p.L ? 5 : 0) : 0; };
+const statusCost = (s: StatusPlan | number | null | undefined) => { const p = statusPlan(s); return p ? (p.lag ? 50 : 0) + (p.fork ? 50 : 0) + (p.conf ? 30 : 0) + (p.noSlot ? 30 : 0) + (p.unread ? 30 : 0) + (p.L ? 5 : 0) : 0; };
 const tipCost = (t: TipPlan | null | undefined) => (t ? (t.behind ? 40 : 0) + (t.L ? 5 : 0) : 0);
 
 function opCost(p: OpPlan | undefined): number {
   if (!p) return 0;
-  return (p.fail ? 300 : 0) + (p.part ? 200 : 0) + (p.ghost ? 200 : 0) + (p.late !== undefined ? 200 : 0) + (p.refineNull ? 100 : 0) + (p.L1 !== CALM_OP.L1 ? 100 : 0) + (p.L2 !== CALM_OP.L2 ? 100 : 0) + (p.L3 !== CALM_OP.L3 ? 50 : 0);
+  return (p.fail ? 300 : 0) + (p.part ? 200 : 0) + (p.ghost ? 200 : 0) + (p.late !== undefined ? 200 : 0) + (p.seen ? 100 : 0) + (p.refineNull ? 100 : 0) + (p.L1 !== CALM_OP.L1 ? 100 : 0) + (p.L2 !== CALM_OP.L2 ? 100 : 0) + (p.L3 !== CALM_OP.L3 ? 50 : 0);
 }
 const dtCost = (dt: number) => (dt % 1_000 === 0 ? 0 : dt % 500 === 0 ? 1 : dt % 100 === 0 ? 2 : 3);
 
@@ -124,7 +125,7 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
     for (let i = 0; i < (best.tape!.status?.length ?? 0) && runs < budget; i++) {
       const cur = statusPlan(best.tape!.status![i]);
       if (!cur) continue;
-      for (const key of ['fork', 'conf', 'noSlot', 'L'] as const) {
+      for (const key of ['fork', 'conf', 'noSlot', 'unread', 'L'] as const) {
         const now = statusPlan(best.tape!.status![i]);
         if (!now?.[key] || runs >= budget) continue;
         const cand = clone(best);
@@ -195,7 +196,7 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
       for (let i = 0; i < best.tape![kind].length && runs < budget; i++) {
         const p = best.tape![kind][i];
         if (isCalm(p)) continue;
-        for (const patch of [{ L2: 0 }, { L3: CALM_OP.L3 }, { L1: CALM_OP.L1 }, { refineNull: undefined }, { part: undefined }, { ghost: undefined }, { late: undefined }] as Partial<OpPlan>[]) {
+        for (const patch of [{ L2: 0 }, { L3: CALM_OP.L3 }, { L1: CALM_OP.L1 }, { seen: undefined }, { refineNull: undefined }, { part: undefined }, { ghost: undefined }, { late: undefined }] as Partial<OpPlan>[]) {
           const cur = best.tape![kind][i]!;
           const key = Object.keys(patch)[0] as keyof OpPlan;
           if (cur[key] === patch[key]) continue;
@@ -286,13 +287,15 @@ export function tapeSummary(t: Tape | undefined, db?: Scenario['db'], slow?: Sce
   if (!t) return 'random';
   const at = (p: OpPlan) => `at its last valid height ${p.late! < 0 ? '−' : '+'}${Math.abs(p.late!)}`;
   const lands = (p: OpPlan) => (p.late !== undefined ? `lands LATE, ${at(p)}` : `lands after ${p.L1} ms`);
-  const odd = (list: OpPlan[]) => list.map((p, i) => (isCalm(p) ? null : `#${i + 1}: ${p.fail ? `fails (${p.fail})${p.ghost ? ` but ${lands(p)}` : p.late !== undefined ? `, told ${at(p)}` : ''}` : `${lands(p)}, engine told ${p.L2} ms later${p.part ? `, fills ${p.part * 100}%` : ''}${p.quoted ? `, handed back with the quote's coin count (the wallet got ${p.quoted}x of it)` : ''}${p.refineNull ? ', exact SOL never read' : `, exact SOL ${p.L3} ms after that`}`}`)).filter(Boolean);
+  // (a sell that expires used to carry `late` +2 to +4, the moment it was told: its own looks tell it now)
+  const seen = (p: OpPlan) => (p.seen ? `, its polls see it ${p.seen} polls late` : '');
+  const odd = (list: OpPlan[]) => list.map((p, i) => (isCalm(p) ? null : `#${i + 1}: ${p.fail ? `fails (${p.fail})${p.ghost ? ` but ${lands(p)}` : ''}${seen(p)}` : `${lands(p)}, engine told ${p.L2} ms later${seen(p)}${p.part ? `, fills ${p.part * 100}%` : ''}${p.quoted ? `, handed back with the quote's coin count (the wallet got ${p.quoted}x of it)` : ''}${p.refineNull ? ', exact SOL never read' : `, exact SOL ${p.L3} ms after that`}`}`)).filter(Boolean);
   const out = [`buys: ${odd(t.buy).join('; ') || 'all ordinary'}`, `sells: ${odd(t.sell).join('; ') || 'all ordinary'}`];
   const ms = (L?: number) => (L ? `${L >= 1_000 ? `${(L / 1_000).toFixed(1)} s` : `${L} ms`}` : 'at once');
   const status = (t.status ?? []).map((s, i) => {
     const p = statusPlan(s);
-    if (!p || (!p.lag && !p.fork && !p.conf && !p.noSlot && (p.L ?? 0) < 1_000)) return null;
-    return `#${i + 1}: ${[ms(p.L), p.lag ? `${p.lag} blocks behind` : '', p.fork ? `on a fork, the main fork's last ${p.fork} unseen` : '', p.conf ? `${p.conf} behind on confirmations` : '', p.noSlot ? 'no slot' : ''].filter(Boolean).join(', ')}`;
+    if (!p || (!p.lag && !p.fork && !p.conf && !p.noSlot && !p.unread && (p.L ?? 0) < 1_000)) return null;
+    return `#${i + 1}: ${[ms(p.L), p.lag ? `${p.lag} blocks behind` : '', p.fork ? `on a fork, the main fork's last ${p.fork} unseen` : '', p.conf ? `${p.conf} behind on confirmations` : '', p.noSlot ? 'no slot' : '', p.unread ? 'cannot return a landed transaction yet' : ''].filter(Boolean).join(', ')}`;
   }).filter(Boolean);
   if (status.length) out.push(`status reads (odd ones): ${status.join('; ')}`);
   const tips = (t.tip ?? []).map((p, i) => (p && (p.behind || (p.L ?? 0) >= 1_000) ? `#${i + 1}: ${[ms(p.L), p.behind ? `${p.behind} blocks behind` : ''].filter(Boolean).join(', ')}` : null)).filter(Boolean);
