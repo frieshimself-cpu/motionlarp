@@ -469,6 +469,30 @@ export class Store {
   closedPositions(userId: number, limit = 100): Position[] {
     return this.all("SELECT * FROM positions WHERE user_id = ? AND status = 'closed' ORDER BY closed_at DESC LIMIT ?", userId, limit).map(toPosition);
   }
+  /**
+   * Totals over EVERY closed position of a user in one mode ('live' or 'paper'), and per copy: History's heading and
+   * each copy's line (they were sums of the newest 200 / 1,000 rows only, which a busy trader passes in two days).
+   */
+  closedTotals(userId: number, mode: 'live' | 'paper'): { trades: number; wins: number; pnlLamports: bigint; feesLamports: bigint; byCopy: Map<number, { closed: number; pnlLamports: bigint }> } {
+    const byCopy = new Map<number, { closed: number; pnlLamports: bigint }>();
+    let trades = 0;
+    let wins = 0;
+    let pnlLamports = 0n;
+    for (const r of this.all(
+      `SELECT copy_id, COUNT(*) AS n, SUM(CASE WHEN proceeds_lamports > cost_lamports THEN 1 ELSE 0 END) AS wins,
+              SUM(proceeds_lamports - cost_lamports) AS pnl
+       FROM positions WHERE user_id = ? AND status = 'closed' AND mode = ? GROUP BY copy_id`, userId, mode)) {
+      byCopy.set(num(r.copy_id), { closed: num(r.n), pnlLamports: big(r.pnl) });
+      trades += num(r.n);
+      wins += num(r.wins);
+      pnlLamports += big(r.pnl);
+    }
+    const fees = this.get(
+      `SELECT COALESCE(SUM(f.fee_lamports), 0) AS fees FROM fills f JOIN positions p ON p.id = f.position_id
+       WHERE f.user_id = ? AND p.status = 'closed' AND p.mode = ?`, userId, mode);
+    return { trades, wins, pnlLamports, feesLamports: big(fees?.fees ?? 0), byCopy };
+  }
+
   /** Closed positions per local day (offset in ms east of UTC) and mode, newest day first. */
   pnlByDay(userId: number, offsetMs: number): { day: number; mode: string; trades: number; wins: number; pnlLamports: bigint }[] {
     return this.all(

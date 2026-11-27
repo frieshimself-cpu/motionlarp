@@ -73,3 +73,40 @@ describe('a revoked key', () => {
     expect(store.user(uid)!.disabled).toBe(true);
   });
 });
+
+describe('History and each copy\'s line count every closed position (the trader closes about 100 a day)', () => {
+  it('the totals cover all of them, real trades only once there are any; the list says it shows the latest 200', async () => {
+    const { licenseHash, newLicenseKey } = await import('../src/licenses.js');
+    const key = newLicenseKey();
+    const lid = store.createLicense({ keyHash: licenseHash(key), hint: key.slice(-4), label: 'Busy', feeBps: null });
+    const uid = store.createUser('Busy', 'x');
+    store.redeemLicense(lid, uid);
+    // (a session made directly: the login door of this test file was locked on purpose by the test above)
+    const { createHash, randomBytes } = await import('node:crypto');
+    const token = randomBytes(16).toString('hex');
+    store.createSession(createHash('sha256').update(token).digest('hex'), uid, Date.now() + 3_600_000);
+    const c = new Client();
+    c.cookies.set('ml_session', token);
+    const { validateSettings } = await import('../src/engine/settings.js');
+    const copyId = store.createCopy(uid, validateSettings({ leader: 'wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih', buySol: 0.1, minLeaderBuySol: 0 }));
+    const s = store.copy(copyId)!.settings;
+    const close = (mode: 'live' | 'paper', cost: bigint, proceeds: bigint, fee: bigint) => {
+      const id = store.insertPosition({ userId: uid, copyId, mint: `M${Math.random()}`, mode, leaderSig: `s${Math.random()}`, sell: s.sell, copyName: 'x', leader: s.leader, now: Date.now() });
+      store.updatePosition(id, { status: 'closed', tokensBought: 1n, tokensHeld: 0n, costLamports: cost, proceedsLamports: proceeds, closedAt: Date.now() });
+      store.insertFill({ positionId: id, userId: uid, side: 'sell', reason: 'timed', tokens: 1n, lamports: proceeds, signature: 'x', simulated: mode === 'paper', error: null, feeLamports: fee });
+    };
+    for (let i = 0; i < 50; i++) close('paper', 1_000_000_000n, 3_000_000_000n, 5n); // test trades: big wins, never paid fees
+    for (let i = 0; i < 250; i++) close('live', 100_000_000n, i % 2 ? 110_000_000n : 95_000_000n, 1_000n);
+    const h = await c.call('GET', '/api/history');
+    expect(h.body.trades).toBe(250); // every real one, not the newest 200, and no test ones
+    expect(h.body.wins).toBe(125);
+    expect(h.body.totalPnlSol).toBeCloseTo((125 * 10_000_000 - 125 * 5_000_000) / 1e9, 9);
+    expect(h.body.totalFeesSol).toBeCloseTo((250 * 1_000) / 1e9, 12); // fees really paid only
+    expect((h.body.positions as unknown[]).length).toBe(200);
+    expect(h.body.shown).toBe(200);
+    const st = await c.call('GET', '/api/state');
+    const copy = (st.body.copies as { id: number; stats: { closed: number; pnlSol: number } }[]).find((x) => x.id === copyId)!;
+    expect(copy.stats.closed).toBe(250);
+    expect(copy.stats.pnlSol).toBeCloseTo((125 * 10_000_000 - 125 * 5_000_000) / 1e9, 9);
+  });
+});

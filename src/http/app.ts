@@ -341,14 +341,20 @@ export function createApp(deps: AppDeps): Server {
     return value;
   }
 
+  /** Real trades once there are any, test trades until then (as the profit cards do): never the two added together. */
+  function shownMode(uid: number): 'live' | 'paper' {
+    return store.closedTotals(uid, 'live').trades > 0 ? 'live' : 'paper';
+  }
+
   function copyStats(uid: number) {
     const stats = new Map<number, { open: number; closed: number; pnlSol: number }>();
     const bump = (id: number) => stats.get(id) ?? stats.set(id, { open: 0, closed: 0, pnlSol: 0 }).get(id)!;
     for (const p of store.activePositions(uid)) bump(p.copyId).open++;
-    for (const p of store.closedPositions(uid, 1000)) {
-      const s = bump(p.copyId);
-      s.closed++;
-      s.pnlSol += sol(p.proceedsLamports - p.costLamports);
+    // Every closed position of the shown kind (it was the newest 1,000, test and real added together).
+    for (const [copyId, t] of store.closedTotals(uid, shownMode(uid)).byCopy) {
+      const s = bump(copyId);
+      s.closed = t.closed;
+      s.pnlSol = sol(t.pnlLamports);
     }
     return stats;
   }
@@ -477,16 +483,14 @@ export function createApp(deps: AppDeps): Server {
     }
     if (path === '/api/history' && method === 'GET') {
       const closed = store.closedPositions(uid, 200);
-      let feesTotal = 0n;
       const views = closed.map((p) => {
         const fills = store.fills(p.id);
         const fees = fills.reduce((a, f) => a + f.feeLamports, 0n);
-        feesTotal += fees;
         return { ...positionView(p), feesSol: sol(fees), fills: fills.map((f) => ({ side: f.side, reason: f.reason, sol: sol(f.lamports), feeSol: sol(f.feeLamports), signature: f.simulated ? null : f.signature, simulated: f.simulated, at: f.createdAt })) };
       });
-      const total = closed.reduce((a, p) => a + (p.proceedsLamports - p.costLamports), 0n);
-      const wins = closed.filter((p) => p.proceedsLamports > p.costLamports).length;
-      return json(res, 200, { positions: views, totalPnlSol: sol(total), totalFeesSol: sol(feesTotal), trades: closed.length, wins, pnl: pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0)) });
+      // The heading counts every closed position of the shown kind (real once there are any), not the 200 listed.
+      const t = store.closedTotals(uid, shownMode(uid));
+      return json(res, 200, { positions: views, shown: views.length, totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0)) });
     }
 
     throw new HttpError(404, 'not found');
