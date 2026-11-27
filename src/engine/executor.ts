@@ -78,6 +78,9 @@ export interface Executor {
   /** Optional: what became of a buy, from its own transaction (restore after a crash or an unknown outcome). Throws
    *  when the RPC cannot be read. */
   settleBuy?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }>;
+  /** Optional: what became of a sell whose outcome was unknown, from its own transaction: landed (tokens sold, SOL
+   *  received net of every fee), failed, or not found (yet). Throws when the RPC cannot be read. */
+  settleSell?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }>;
 }
 
 const FETCH_FILL_TRIES = 6;
@@ -199,14 +202,31 @@ export class ChainExecutor implements Executor {
 
   /** What became of a buy, from its own transaction: landed (exact tokens and SOL), failed, or not found (yet). */
   async settleBuy(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
+    const r = await this.settled(signature, owner, mint);
+    if (r.state !== 'landed') return r;
+    if (r.tokens <= 0n) return { state: 'failed' };
+    return { state: 'landed', tokens: r.tokens, lamports: -r.lamports };
+  }
+
+  /** What became of a sell, from its own transaction: landed (tokens sold, SOL received net), failed, or not found. */
+  async settleSell(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
+    const r = await this.settled(signature, owner, mint);
+    if (r.state !== 'landed') return r;
+    if (r.tokens >= 0n) return { state: 'failed' };
+    return { state: 'landed', tokens: -r.tokens, lamports: r.lamports };
+  }
+
+  /** A transaction's fate and, when it landed, the wallet's exact change in the coin and in SOL. */
+  private async settled(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
     const status = (await getConnection().getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0];
     if (!status) return { state: 'not_found' };
     if (status.err) return { state: 'failed' };
     if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') return { state: 'not_found' };
     const got = await getTransaction(signature);
-    const change = got ? walletChange(got, owner, mint) : null;
-    if (!change || change.tokens <= 0n) return { state: 'failed' };
-    return { state: 'landed', tokens: change.tokens, lamports: -change.lamports };
+    if (!got) return { state: 'not_found' }; // confirmed, but this node cannot return it yet: asked again
+    const change = walletChange(got, owner, mint);
+    if (!change) return { state: 'failed' };
+    return { state: 'landed', tokens: change.tokens, lamports: change.lamports };
   }
 
   /** Looks the coin up ahead of its buy (cached for a minute), so the buy itself has one round trip less to wait for. */

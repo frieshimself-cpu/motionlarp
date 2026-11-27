@@ -25,9 +25,20 @@ class Market implements Executor {
   sells: { tokens: bigint; at: number }[] = [];
   attempts = 0;
   /** Decides each sell attempt: 'ok', 'fail', or a promise the test resolves later (an unconfirmed sell). */
-  plan: (n: number, req: Sell) => 'ok' | 'fail' | Promise<'ok' | 'fail'> = () => 'ok';
+  plan: (n: number, req: Sell) => 'ok' | 'fail' | 'unknown-landed' | 'unknown-lost' | Promise<'ok' | 'fail'> = () => 'ok';
+  /** Sells that landed while their sender was told "outcome unknown", by signature (what settleSell reads). */
+  landedUnknown = new Map<string, { tokens: bigint; lamports: bigint }>();
+  async settleSell(signature: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
+    const hit = this.landedUnknown.get(signature);
+    return hit ? { state: 'landed', ...hit } : { state: 'failed' };
+  }
   /** At most this many tokens sell on attempt n (a curve that cannot pay for more); null = all asked for. */
   sellCap: (n: number, req: Sell) => bigint | null = () => null;
+  /** Attempt n lands on chain the moment it is sent; the engine hears of it only when `plan` resolves. */
+  landsAtOnce: (n: number, req: Sell) => boolean = () => false;
+  /** Called on every wallet read (n counts them): lets a test act while the engine waits for the wallet. */
+  balanceHook: ((n: number) => Promise<void> | void) | null = null;
+  balanceReads = 0;
   constructor(private readonly clock: () => number) {}
   async buy(req: TradeRequest & { lamports: bigint }): Promise<FillResult> {
     const tokens = (req.lamports * BAG) / SOL;
@@ -38,8 +49,24 @@ class Market implements Executor {
   async sell(req: Sell): Promise<FillResult> {
     this.requests.push(req);
     const n = ++this.attempts;
+    req.onSigned?.(`S${n}`);
+    if (this.landsAtOnce(n, req)) {
+      if (this.live && req.tokens > this.held) return { ok: false, error: 'insufficient tokens' };
+      this.held -= this.live ? req.tokens : 0n;
+      this.sells.push({ tokens: req.tokens, at: this.clock() });
+      await this.plan(n, req); // the confirmation reaches the engine only now
+      return { ok: true, signature: `S${n}`, tokens: req.tokens, lamports: (req.tokens * SOL) / BAG, simulated: !this.live };
+    }
     const outcome = await this.plan(n, req);
     if (outcome === 'fail') return { ok: false, error: 'boom' };
+    if (outcome === 'unknown-lost') return { ok: false, error: 'sent, outcome unknown: confirmation unknown (RPC unreachable)', uncertain: true };
+    if (outcome === 'unknown-landed') {
+      // It landed; nobody could tell the engine.
+      this.held -= this.live ? req.tokens : 0n;
+      this.sells.push({ tokens: req.tokens, at: this.clock() });
+      this.landedUnknown.set(`S${n}`, { tokens: req.tokens, lamports: (req.tokens * SOL) / BAG });
+      return { ok: false, error: 'sent, outcome unknown: confirmation unknown (RPC unreachable)', uncertain: true };
+    }
     if (this.live && req.tokens > this.held) return { ok: false, error: 'insufficient tokens' };
     const cap = this.sellCap(n, req);
     const tokens = cap !== null && cap < req.tokens ? cap : req.tokens;
@@ -49,7 +76,7 @@ class Market implements Executor {
   }
   async quoteSell(_m: string, tokens: bigint) { return (tokens * SOL) / BAG; }
   async solBalance() { return 100n * SOL; }
-  async tokenBalance() { return this.held; }
+  async tokenBalance() { this.balanceReads++; await this.balanceHook?.(this.balanceReads); return this.held; }
   isLive(r: { live: boolean; exit?: boolean }) { return r.live && this.live && (this.switchOn || !!r.exit); }
 }
 
@@ -570,6 +597,152 @@ describe('a crash in the middle of a buy (found by reading Velo\'s history)', ()
     const after = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1], slowRetryMs: 1, zeroRecheckMs: 1 });
     await after.restore();
     expect(store.openingPositions()).toHaveLength(0);
+    expect(open()).toHaveLength(0);
+  });
+});
+
+describe('sells that overlap: one has landed on chain, the engine has not heard yet (found by the timing fuzzer)', () => {
+  it('their full exit right after our +2 s sell landed sells everything left (it sold 20 % and left 40 % in the wallet for good)', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let confirm!: (v: 'ok') => void;
+    ex.landsAtOnce = (n) => n === 1;
+    ex.plan = (n) => (n === 1 ? new Promise((r) => { confirm = r; }) : 'ok');
+    clock = 1_002_000; await engine.tick(); await sleep(5); // the +2 s sell has landed; its confirmation is slow
+    expect(ex.held).toBe(600_000n);
+    await engine.onLeaderTrade({ ...sellTrade(0n), signature: 'out' }); await sleep(5);
+    expect(ex.sells.map((s) => s.tokens)).toEqual([400_000n, 600_000n]); // everything that was left
+    confirm('ok'); await engine.idle();
+    expect(ex.held).toBe(0n);
+    expect(open()).toHaveLength(0);
+    expect(store.closedPositions(uid)[0]).toMatchObject({ tokensHeld: 0n, proceedsLamports: SOL });
+  });
+
+  it('Sell now right after our +2 s sell landed sells everything left too', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let confirm!: (v: 'ok') => void;
+    ex.landsAtOnce = (n) => n === 1;
+    ex.plan = (n) => (n === 1 ? new Promise((r) => { confirm = r; }) : 'ok');
+    clock = 1_002_000; await engine.tick(); await sleep(5);
+    const r = await engine.sellNow(uid, open()[0]!.id);
+    expect(r.ok).toBe(true);
+    expect(ex.sells.map((s) => s.tokens)).toEqual([400_000n, 600_000n]);
+    confirm('ok'); await engine.idle();
+    expect(ex.held).toBe(0n);
+    expect(store.closedPositions(uid)[0]).toMatchObject({ tokensHeld: 0n, proceedsLamports: SOL });
+  });
+
+  it('a stop loss and a timed step at once: the position is not closed with coins still in the wallet, the later step sells them', async () => {
+    ex.live = true;
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: false, mode: 'same' }, timedOf: 'bag', timed: [{ afterSec: 2, percent: 50 }, { afterSec: 60, percent: 100 }], stopLoss: [{ lossPct: 20, percent: 50 }], deadCoin: { enabled: false, idleSec: 120 } } }));
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let confirm!: (v: 'ok') => void;
+    ex.landsAtOnce = (n) => n === 1;
+    ex.plan = (n) => (n === 1 ? new Promise((r) => { confirm = r; }) : 'ok');
+    clock = 1_002_000; await engine.tick(); await sleep(5); // the +2 s step (500k) landed, not confirmed
+    ex.quoteSell = async (_m, tokens) => (tokens * SOL * 7n) / (BAG * 10n); // down 30 %
+    (engine as unknown as { lastQuoteAt: Map<number, number> }).lastQuoteAt.set(open()[0]!.id, -1e12); // price checked now
+    clock = 1_003_000; await engine.tick(); await sleep(5); // the stop loss sells half of what is free
+    expect(ex.sells.map((s) => s.tokens)).toEqual([500_000n, 250_000n]);
+    confirm('ok'); await sleep(5); await engine.idle();
+    expect(open()[0]).toMatchObject({ status: 'open', tokensHeld: 250_000n });
+    clock = 1_060_000; await engine.tick(); await engine.idle();
+    expect(ex.held).toBe(0n);
+    expect(open()).toHaveLength(0);
+  });
+
+  it('a sell booked while another one waits for the wallet keeps its SOL (the other no longer overwrites it)', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let confirm!: (v: 'ok') => void;
+    ex.landsAtOnce = (n) => n === 1;
+    ex.plan = (n) => (n === 1 ? new Promise((r) => { confirm = r; }) : 'ok');
+    clock = 1_002_000; await engine.tick(); await sleep(5);
+    // Their exit: its sell confirms at once; while the engine reads the wallet after it, our +2 s sell is booked.
+    const start = ex.balanceReads;
+    ex.balanceHook = async (n) => { if (n === start + 2) { confirm('ok'); await sleep(10); } };
+    await engine.onLeaderTrade({ ...sellTrade(0n), signature: 'out' }); await sleep(30); await engine.idle();
+    expect(ex.sells.map((s) => s.tokens)).toEqual([400_000n, 600_000n]);
+    expect(store.closedPositions(uid)[0]).toMatchObject({ tokensHeld: 0n, proceedsLamports: SOL });
+  });
+
+  it('a sell still on its way after the position closed: the coin is not bought again until it has landed or failed', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let settle!: (v: 'ok' | 'fail') => void;
+    ex.plan = (n) => (n === 1 ? new Promise((r) => { settle = r; }) : 'ok'); // the +2 s sell is stuck
+    for (const sec of [2, 4, 6]) { clock = 1_000_000 + sec * 1000; await engine.tick(); await sleep(5); } // the last step sells all the wallet holds
+    expect(open()).toHaveLength(0);
+    await engine.onLeaderTrade(buyTrade({ slot: 10 })); await sleep(5);
+    expect(open()).toHaveLength(0);
+    expect(feed().some((l) => /a sell of this coin is still on its way/.test(l))).toBe(true);
+    settle('ok'); await engine.idle(); // it fails (nothing left) or lands: either way it is over
+    await engine.onLeaderTrade(buyTrade({ slot: 11 })); await engine.idle();
+    expect(open()).toHaveLength(1);
+  });
+
+  it('their sell while our buy\'s outcome is unknown is not dropped: it runs once the buy is settled', async () => {
+    ex.live = true;
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: true, mode: 'all' }, timedOf: 'left', timed: [], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } } }));
+    ex.buy = async (req) => { req.onSigned?.('BUYSIG'); ex.held += BAG; return { ok: false, error: 'sent, outcome unknown', uncertain: true }; };
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    await engine.onLeaderTrade({ ...sellTrade(1_000_000n), signature: 'half' }); await engine.idle(); // they sell half
+    expect(ex.sells).toHaveLength(0);
+    await engine.restore(); await engine.idle(); // the buy is settled: it landed
+    expect(ex.sells.map((s) => s.tokens)).toEqual([BAG]);
+    expect(open()).toHaveLength(0);
+  });
+});
+
+describe('a sell whose outcome nobody could tell us (found by the timing fuzzer)', () => {
+  it('it is settled from its own transaction: landed, it is booked and never sold a second time', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.plan = (n) => (n === 1 ? 'unknown-landed' : 'ok');
+    await at(2); await at(4); await at(6);
+    expect(ex.sells.map((s) => s.tokens)).toEqual([400_000n, 300_000n, 300_000n]); // not 400k twice
+    expect(open()).toHaveLength(0);
+    const closed = store.closedPositions(uid)[0]!;
+    expect(closed).toMatchObject({ tokensHeld: 0n, proceedsLamports: SOL }); // the first sale's SOL is booked
+  });
+
+  it('it did not land: it is retried like any failed sell', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.plan = (n) => (n === 1 ? 'unknown-lost' : 'ok');
+    await at(2);
+    expect(ex.sells.map((s) => s.tokens)).toEqual([400_000n]); // the retry sold it
+    await at(4); await at(6);
+    expect(ex.held).toBe(0n);
+    expect(store.closedPositions(uid)[0]).toMatchObject({ tokensHeld: 0n, proceedsLamports: SOL });
+  });
+});
+
+describe('test mode: the last step of a timed exit waits for a step that is still trying (found by the timing fuzzer)', () => {
+  it('when the +2 s step gives up after the last step ran, the last step sells what it left', async () => {
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: false, mode: 'same' }, timedOf: 'bag', timed: [{ afterSec: 2, percent: 50 }, { afterSec: 4, percent: 100 }], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } } }));
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let fails = 0;
+    let release!: () => void;
+    const slow = new Promise<void>((r) => { release = r; });
+    // The +2 s step's tries all fail; its first try is slow, so it is "out" when the last step comes due.
+    ex.plan = (_n, req) => {
+      if (req.closeIfEmpty || fails >= 100) return 'ok'; // the last step (it asks to close the account) goes through
+      fails++;
+      return fails === 1 ? slow.then(() => 'fail' as const) : 'fail';
+    };
+    clock = 1_002_000; await engine.tick(); await sleep(5);
+    clock = 1_004_000; await engine.tick(); await sleep(5); // the last step sells the half that is not out
+    release();
+    await engine.idle(); // the +2 s step gives up; the last step then sells the rest
+    expect(ex.sells.reduce((a, s) => a + s.tokens, 0n)).toBe(BAG);
     expect(open()).toHaveLength(0);
   });
 });
