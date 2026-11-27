@@ -187,9 +187,20 @@ describe('waiting for a transaction to land', () => {
   });
 
   it('not expired on the word of a node behind the one that gave the height: one that landed in its last blocks is found on the next look', async () => {
-    // the height says it has run out; the last look's status comes from a node seven slots behind, which has not seen it yet
-    chain([...Array.from({ length: 11 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }], 2_000, (n) => (n <= 10 ? 1_000 + 2_000 - 7 : 1_000 + 2_000));
+    // the height says it has run out (a few blocks past it, not yet well past); the last look's status comes from a node
+    // seven slots behind, which has not seen it yet
+    chain([...Array.from({ length: 11 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }], 1_006, (n) => (n <= 10 ? 1_000 + 1_006 - 7 : 1_000 + 1_006));
     expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 9 });
+  });
+
+  it('a status seen only at "processed" when it has run out is not taken for landed (a block the chain then dropped): expired once it is gone', async () => {
+    chain([...Array.from({ length: 10 }, () => null), { confirmationStatus: 'processed', slot: 5 }, null], 2_000);
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: false, reason: 'expired before landing', certain: true });
+  });
+
+  it('a status node that is always some slots behind is believed once the chain is well past it (it waited for the 150 s cap)', async () => {
+    chain([null], 1_000 + 1 + 31, () => 1_000 + 1_000 + 1 + 31 - 5);
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: false, reason: 'expired before landing', certain: true });
   });
 
   it('not expired at the last block it can still land in: the chain takes a blockhash one block past the height it is said to be valid up to', async () => {

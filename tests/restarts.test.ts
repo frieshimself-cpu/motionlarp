@@ -947,7 +947,7 @@ describe('a database that cannot be written (a full disk)', () => {
 });
 
 describe('Sell now\'s answer', () => {
-  const CLOSED = 'Nothing was left to sell: the position was closed just before (see the feed).';
+  const CLOSED = 'Nothing was left to sell: the position was closed just before.';
 
   it('pressed while their exit is out: it waits behind it, and answers that nothing was left (it answered "position is not open", an error)', async () => {
     const s = server({ ...none, mirror: { enabled: true, mode: 'exit' } });
@@ -978,7 +978,7 @@ describe('Sell now\'s answer', () => {
     const insertFill = s.store.insertFill.bind(s.store);
     let broken = true;
     s.store.insertFill = (f) => { if (broken && f.side === 'sell') { broken = false; throw new Error('disk I/O error'); } return insertFill(f); };
-    expect(await s.engine.sellNow(s.uid, 1)).toEqual({ ok: true, note: 'Sold: it shows in the feed and History within a few seconds.' });
+    expect(await s.engine.sellNow(s.uid, 1)).toEqual({ ok: true, note: 'Sold: it shows in the feed and History once the server has written it down (normally within seconds).' });
     expect(s.chain.calls).toBe(1);
     await s.engine.settleLeftovers(); await s.engine.idle();
     expect(s.position()).toMatchObject({ status: 'closed', proceedsLamports: SOL });
@@ -992,7 +992,7 @@ describe('Sell now\'s answer', () => {
     let broken = true;
     s.store.insertFill = (f) => { if (broken && f.side === 'sell') { broken = false; throw new Error('disk I/O error'); } return insertFill(f); };
     s.at(2_000); await s.tick(); // the step sells everything; its booking fails
-    expect(await s.engine.sellNow(s.uid, 1)).toEqual({ ok: true, note: 'All of it was just sold by another sell of ours: it shows within a few seconds.' });
+    expect(await s.engine.sellNow(s.uid, 1)).toEqual({ ok: true, note: 'All of it was just sold by another sell of ours: it shows once the server has written it down (normally within seconds).' });
     await s.engine.settleLeftovers(); await s.engine.idle();
     expect(s.position()).toMatchObject({ status: 'closed', proceedsLamports: SOL });
     expect(s.chain.sent).toHaveLength(1);
@@ -1353,5 +1353,87 @@ describe('one write that fails does not stop the others', () => {
     expect(s.store.position(b)!.status).toBe('failed'); // never sent: failed (it used to stop the pass at the first)
     await s.engine.restore();
     expect(s.store.position(a)!.status).toBe('failed');
+  });
+});
+
+describe('what the third round of reviewers found', () => {
+  it('a sell left by a crash is dropped once the chain is well past it, though the node that reads its status is always some slots behind (it waited for the 180 s fallback)', async () => {
+    const s = server({ ...none, mirror: { enabled: true, mode: 'exit' } });
+    const chain = s.chain as unknown as { chainTip: () => Promise<{ height: number; slot: number }>; settleSell: (sig: string) => Promise<Record<string, unknown>> };
+    chain.chainTip = async () => ({ height: s.chain.height, slot: 1_000 + s.chain.height });
+    const settle = chain.settleSell.bind(s.chain);
+    chain.settleSell = async (sig: string) => { const r = await settle(sig); return r.state === 'not_found' ? { ...r, slot: 1_000 + s.chain.height - 5 } : r; };
+    await s.buy();
+    s.chain.plan = () => 'gone';
+    void s.their('sell'); await sleep(5);
+    s.crash();
+    s.chain.plan = () => 'ok';
+    s.chain.height = 120; // past it and its margin, but the status node is behind the tip node
+    s.at(50_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(1);
+    s.chain.height = 132; // well past it
+    s.at(60_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(0);
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+
+  it('a coin that kept trading while its price could not be written (a full disk longer than the dead-coin time) is not sold as dead once the disk is back', async () => {
+    const s = server({ ...none, deadCoin: { enabled: true, idleSec: 5 } });
+    await s.buy();
+    s.at(1_000); await s.tick();
+    const disk = diskFull(s.store);
+    disk.on();
+    for (let t = 2_000; t <= 12_000; t += 1_000) { s.chain.price = BigInt(1_000 + t / 100); s.at(t); await s.tick(); } // it trades: the price moves every second
+    disk.off();
+    s.chain.price = 1_130n; s.at(13_000); await s.tick();
+    expect(s.chain.sent).toHaveLength(0); // it used to be sold as a dead coin at once
+    expect(s.position().lastChangeAt).toBeGreaterThanOrEqual(1_000_000 + 12_000);
+  });
+
+  it('a test sell whose booking cannot be committed is tried again on growing pauses, not every 250 ms for good', async () => {
+    const s = server({ ...none, timed: [{ afterSec: 2, percent: 100 }] });
+    s.chain.test = true;
+    await s.buy();
+    const db = s.store.db as unknown as { exec: (sql: string) => void };
+    const exec = db.exec.bind(s.store.db);
+    let failing = true;
+    db.exec = (sql: string) => { if (sql === 'COMMIT' && failing) throw Object.assign(new Error('database or disk is full'), { code: 'ERR_SQLITE_ERROR', errcode: 13 }); return exec(sql); };
+    for (let t = 2_000; t <= 12_000; t += 200) { s.at(t); await s.tick(); }
+    expect(s.chain.calls).toBeLessThanOrEqual(6); // at +2 s, then 250 ms, 1 s, 2 s, 4 s later
+    failing = false;
+    for (let t = 12_200; t <= 30_000; t += 200) { s.at(t); await s.tick(); }
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+
+  it('Sell now pressed while the server stops and the sell cannot be written down says so, instead of promising it goes out after the restart', async () => {
+    const s = server(none);
+    await s.buy();
+    s.engine.stop();
+    const disk = diskFull(s.store);
+    disk.on();
+    const r = await s.engine.sellNow(s.uid, 1);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/could not be written down/);
+    expect(r.error).not.toMatch(/goes out as soon as it is back/);
+  });
+
+  it('Sell now that finds the wallet holding none of the coin says nothing was sold (the page said "Sold")', async () => {
+    const s = server(none);
+    await s.buy();
+    s.chain.held = 0n; // sold elsewhere
+    expect(await s.engine.sellNow(s.uid, 1)).toEqual({ ok: true, note: 'Nothing was sold: the wallet holds none of this coin any more (sold elsewhere?), so the position is closed.' });
+    expect(s.position().status).toBe('closed');
+  });
+
+  it('Sell now whose own sale landed, could not be booked at once, and was paid for only in part says so', async () => {
+    const s = server(none);
+    await s.buy();
+    s.chain.marketCap = 400_000n;
+    const insertFill = s.store.insertFill.bind(s.store);
+    let broken = true;
+    s.store.insertFill = (f) => { if (broken && f.side === 'sell') { broken = false; throw new Error('disk I/O error'); } return insertFill(f); };
+    const r = await s.engine.sellNow(s.uid, 1);
+    expect(r.ok).toBe(true);
+    expect(r.note).toMatch(/^Sold part of it/);
   });
 });

@@ -335,10 +335,11 @@ export class ChainExecutor implements Executor {
   private async settled(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' } | { state: 'not_found'; slot?: number }> {
     const res = await getConnection().getSignatureStatuses([signature], { searchTransactionHistory: true });
     const status = res.value[0];
-    const notFound = () => ({ state: 'not_found' as const, ...(res.context?.slot !== undefined ? { slot: res.context.slot } : {}) });
-    if (!status) return notFound();
+    if (!status) return { state: 'not_found', ...(res.context?.slot !== undefined ? { slot: res.context.slot } : {}) };
     if (status.err) return { state: 'failed' };
-    if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') return notFound();
+    // Seen only at "processed": not landed yet, and not proof that it never will be (its block may still be confirmed),
+    // so no slot goes with it: only the chain being well past it then drops it (see Engine.neverLands).
+    if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') return { state: 'not_found' };
     const got = await getTransaction(signature);
     // Confirmed, but this node cannot return it yet: not "not found" (that would read as "never landed" and sell
     // again); the caller asks again.

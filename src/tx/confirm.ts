@@ -2,7 +2,7 @@
 // timeout; RPC errors while polling are retried, not taken as failure. While waiting, the same signed transaction is
 // re-sent about once a second: one that was dropped on the way to a block leader gets another chance at the next
 // leader instead of sitting until it expires (about 30 s).
-import { getConnection, LAST_BLOCK_PAST_VALID } from '../chain/connection.js';
+import { getConnection, LAST_BLOCK_PAST_VALID, WELL_PAST_BLOCKS } from '../chain/connection.js';
 
 export type ConfirmOutcome = { landed: true; slot?: number } | { landed: false; reason: string; certain: boolean };
 
@@ -64,9 +64,13 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
           // two nodes: one some blocks behind has not seen a transaction that landed in its last blocks yet).
           const res = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
           const last = res.value[0];
-          if (last && !last.err && last.confirmationStatus) return { landed: true, slot: last.slot };
+          // (only a confirmed status counts: one seen at "processed" may be in a block the chain then drops)
+          const final = !!last && (last.confirmationStatus === 'confirmed' || last.confirmationStatus === 'finalized' || !last.confirmationStatus);
+          if (final && !last!.err) return { landed: true, slot: last!.slot };
+          if (final) return { landed: false, reason: `transaction errored: ${JSON.stringify(last!.err)}`, certain: true };
           const seenFrom = (res as { context?: { slot?: number } }).context?.slot;
-          if (seenFrom === undefined || seenFrom >= tip.absoluteSlot) return { landed: false, reason: 'expired before landing', certain: true };
+          const wellPast = tip.blockHeight > lastValidBlockHeight + LAST_BLOCK_PAST_VALID + WELL_PAST_BLOCKS;
+          if (wellPast || (!last && (seenFrom === undefined || seenFrom >= tip.absoluteSlot))) return { landed: false, reason: 'expired before landing', certain: true };
         }
       }
       // In a block: no more pushing for now. If that block is dropped the status goes away and pushing resumes.

@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 550 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 567 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -579,6 +579,28 @@ counted from the late booking (now: the 5 s pass, its timed sells counting from 
 **1** of 2,000 (seed 1411, the known quoted coin count case: a failed write delayed the buy's exact count until a new
 position of the coin had opened), `diskfull` **0** of 2,000; default mix 0 of 3,000; all 22 saved cases pass; the
 self-test (now with a booking dropped and a sale booked twice) catches every planted fault.
+
+**A third round of reviewers** (money and database faults, chain reads and restarts, what the user sees, the fuzzer,
+the speed of the hot paths) read the fixes above. Fixed from it, each with a test that fails on the code before:
+- A status seen only at "processed" is not taken as "not found" from a node far enough along (its block may still be
+  confirmed: a sale that landed was dropped and its rule sold again), nor, while the transaction waits for its
+  confirmation, as landed once it has run out (a block the chain then dropped).
+- A status node that is always some slots behind the one that gave the height is believed once the chain is well past
+  the last block the sell could land in (about 12 s): a crash leftover waited for the 180 s fallback, and a sell that
+  never landed was given its verdict only at the 150 s cap.
+- A price that cannot be written (a full disk) is kept in memory and the rules judge by it: a coin that kept trading
+  through a full disk longer than the dead-coin time was sold as dead once the disk was back, and a stop loss level
+  passed meanwhile was not judged at all.
+- What a booking changes in memory (an order's retry, the rest of a full exit owed) follows only once the booking is
+  written: undone by a COMMIT that failed, a test sell's retry count was lost and it was tried every 250 ms for good.
+- Sell now pressed while the server stops, when the sell cannot be written down to go out after the restart, says so
+  (it promised a sell nothing would make); Sell now that finds the wallet holding none of the coin says nothing was sold
+  (the page said "Sold"); a press whose own sale landed and was paid for only in part says so; "Nothing was left to
+  sell" no longer sends the user to a feed line that may not be there.
+
+The fuzzer on this code, seeds flagged: default mix 0 of 3,000; crash, ghost and diskfull 0 of 2,000 each; outage and
+partial 0 of 1,500 each; dbfault 1 of 2,000 (seed 1411, the known quoted coin count case); all saved cases pass; the
+self-test catches every planted fault. `npm test`: 567 tests.
 
 ## Not yet verified
 
