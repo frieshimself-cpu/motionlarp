@@ -476,7 +476,9 @@ export function createApp(deps: AppDeps): Server {
         return json(res, 200, { ok: true });
       }
       const s = validated(await readJson(req));
-      refuseSecondCopy(uid, s.leader, id);
+      // Only a move onto a wallet another copy follows is refused: two copies of one wallet saved before the rule
+      // must still be pausable and editable (the pause switch sends the whole copy).
+      if (s.leader !== existing.settings.leader) refuseSecondCopy(uid, s.leader, id);
       store.updateCopy(uid, id, s);
       return json(res, 200, { ok: true, id });
     }

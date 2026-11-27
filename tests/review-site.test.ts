@@ -144,6 +144,16 @@ describe('B6: one copy per wallet', () => {
     expect((await c.call('PUT', `/api/copies/${b.body.id}`, { leader: THIRD, name: 'B', buySol: 0.1 })).status).toBe(200);
   });
 
+  it('two copies of one wallet saved before this rule can still each be paused and edited (only a move onto the wallet is refused)', async () => {
+    const { uid, c } = userClient('Before the rule');
+    const a = store.createCopy(uid, validateSettings({ leader: OTHER, name: 'Old A', buySol: 0.1 }));
+    const b = store.createCopy(uid, validateSettings({ leader: OTHER, name: 'Old B', buySol: 0.2 }));
+    expect((await c.call('PUT', `/api/copies/${a}`, { leader: OTHER, name: 'Old A', buySol: 0.1, enabled: false })).status).toBe(200);
+    expect((await c.call('PUT', `/api/copies/${b}`, { leader: OTHER, name: 'Old B', buySol: 0.3 })).status).toBe(200);
+    expect(store.copy(a)!.settings.enabled).toBe(false);
+    expect(store.copy(b)!.settings.buySol).toBe(0.3);
+  });
+
   it('two different accounts may copy the same wallet', async () => {
     const one = userClient('One');
     const two = userClient('Two');
