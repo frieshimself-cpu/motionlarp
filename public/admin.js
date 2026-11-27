@@ -48,7 +48,7 @@ function render() {
         <div class="card stat"><div class="label">Users</div><div class="value">${s.totals.users}</div><div class="foot">${s.licenses.filter((l) => l.status === 'unused').length} unused keys</div></div>
         <div class="card stat"><div class="label">Open positions</div><div class="value">${s.totals.open}</div><div class="foot">watching ${s.server.watching} wallets</div></div>
         <div class="card stat"><div class="label">Fees earned</div><div class="value">${fmtSol(s.totals.feesLiveSol, 4)} <small>SOL</small></div><div class="foot">real trades · test mode would have: ${fmtSol(s.totals.feesTestSol, 4)}</div></div>
-        <div class="card stat"><div class="label">Trading</div><div class="value">${s.server.mode === 'offline' ? 'Offline' : s.server.live ? 'Live' : 'Test'}</div><div class="foot">${st.rpcSet ? `Helius connected${s.server.sender ? ` · Sender ${esc(s.server.sender)}` : ''}` : 'add your Helius link below'}</div></div>
+        <div class="card stat"><div class="label">Trading</div><div class="value">${s.server.mode === 'offline' ? 'Offline' : s.server.live ? 'Live' : 'Test'}</div><div class="foot">${st.rpcSet ? `Sender ${esc(s.server.sender ?? '—')} · feed: ${esc(s.server.feed ?? 'standard')}` : 'add your Helius link below'}</div></div>
       </section>
 
       <div class="stack">

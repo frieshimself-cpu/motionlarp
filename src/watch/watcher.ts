@@ -22,6 +22,8 @@ export interface WatcherDeps {
   valueInSol?: (mint: string, amount: bigint) => Promise<bigint>;
   /** Transaction fetches in flight at once (a very busy wallet must not flood the RPC). */
   maxConcurrentFetches?: number;
+  /** True while the Helius transaction stream is delivering full transactions (see handleStreamTx). */
+  streamHealthy?: () => boolean;
 }
 
 const SEEN_CAP = 20_000;
@@ -164,12 +166,17 @@ export class Watcher {
   handle(signature: string, leader: string, logs?: string[], slot?: number): void {
     const key = `${signature}:${leader}`;
     if (this.seen.has(key)) return;
-    this.seen.add(key);
     const truncated = logs?.some((l) => /log truncated/i.test(l));
+    const fromSocket = logs !== undefined;
+    const plainBuy = logs && slot !== undefined && !truncated ? fastBuysFromLogs(logs, signature, leader, slot) : null;
+    // The Helius stream brings this transaction in full (no fetch) a moment from now: leave it to the stream. It
+    // stays unmarked, so the poll still picks it up if the stream never delivers it.
+    if (fromSocket && !plainBuy && this.deps.streamHealthy?.()) return;
+    this.markSeen(key);
     if (logs && logs.length && !truncated && !mightTrade(logs)) return;
     // Fast path: a plain pump.fun buy is copied straight from the logs, no fetch. (The engine's slot check keeps a
     // later sell that was handled first from being undone by this buy.)
-    const fast = logs && slot !== undefined ? fastBuysFromLogs(logs, signature, leader, slot) : null;
+    const fast = plainBuy;
     if (fast) {
       for (const t of fast) {
         log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, fast: true, sig: signature.slice(0, 12) });
@@ -179,13 +186,36 @@ export class Watcher {
       }
       return;
     }
+    const job = this.process(signature, leader).catch((err) => log.warn('leader transaction failed', { signature, error: safeErrorMessage(err) }));
+    this.pending.add(job);
+    void job.finally(() => this.pending.delete(job));
+  }
+
+  private markSeen(key: string): void {
+    this.seen.add(key);
     if (this.seen.size > SEEN_CAP) {
       const first = this.seen.values().next().value;
       if (first) this.seen.delete(first);
     }
-    const job = this.process(signature, leader).catch((err) => log.warn('leader transaction failed', { signature, error: safeErrorMessage(err) }));
-    this.pending.add(job);
-    void job.finally(() => this.pending.delete(job));
+  }
+
+  /**
+   * A full transaction pushed by the Helius stream: parsed and passed on without any fetch, once per copied wallet
+   * it involves, in order behind that wallet's earlier transactions.
+   */
+  handleStreamTx(tx: RawTransaction): void {
+    const signature = tx.transaction.signatures[0];
+    if (!signature || tx.meta?.err) return;
+    const keys = new Set(tx.transaction.message.accountKeys.map((k) => (typeof k === 'string' ? k : k.pubkey)));
+    for (const leader of this.cursors.keys()) {
+      if (!keys.has(leader)) continue;
+      const key = `${signature}:${leader}`;
+      if (this.seen.has(key)) continue;
+      this.markSeen(key);
+      const job = this.deliver(leader, signature, Promise.resolve(tx), 'stream').catch((err) => log.warn('leader transaction failed', { signature, error: safeErrorMessage(err) }));
+      this.pending.add(job);
+      void job.finally(() => this.pending.delete(job));
+    }
   }
 
   private active = 0;
@@ -215,9 +245,14 @@ export class Watcher {
         release();
       }
     })();
+    await this.deliver(leader, signature, fetched, 'fetch');
+  }
+
+  /** Hand a transaction's trades to the engine, strictly after this wallet's earlier transactions. */
+  private async deliver(leader: string, signature: string, source: Promise<RawTransaction | null>, via: 'fetch' | 'stream'): Promise<void> {
     const prev = this.delivery.get(leader) ?? Promise.resolve();
     const mine = prev.then(async () => {
-      const tx = await fetched;
+      const tx = await source;
       if (!tx) {
         this.seen.delete(`${signature}:${leader}`); // let a later poll try again
         return;
@@ -227,7 +262,7 @@ export class Watcher {
           // Paid (or paid out) in a stablecoin or another coin: its SOL value is what "bought at least X SOL" means.
           t.solLamports = await this.deps.valueInSol(t.counter.mint, t.counter.amount).catch(() => 0n);
         }
-        log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, lagMs: t.blockTime ? Date.now() - t.blockTime * 1000 : null, sig: signature.slice(0, 12) });
+        log.info('leader trade', { leader, side: t.side, mint: t.mint, sol: Number(t.solLamports) / 1e9, via, lagMs: t.blockTime ? Date.now() - t.blockTime * 1000 : null, sig: signature.slice(0, 12) });
         await this.deps.onTrade(t);
       }
     });

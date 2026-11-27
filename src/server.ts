@@ -13,6 +13,7 @@ import { parseFeeConfig } from './fee.js';
 import { applyStoredSettings, saveOwnerSettings, settingsView, type OwnerSettingsPatch } from './owner-settings.js';
 import { rpc } from './chain/rpc.js';
 import { chooseSender, GLOBAL_SENDER, pingRegion } from './tx/sender-region.js';
+import { HeliusStream, streamUrlFor } from './watch/helius-stream.js';
 import { Watcher, websocketSubscriber } from './watch/watcher.js';
 
 if (!/^[0-9a-fA-F]{64}$/.test(config.masterKey)) {
@@ -57,9 +58,20 @@ function walletFor(userId: number): Keypair | null {
 }
 
 const engine = new Engine({ store, executor, walletFor, priceMs: config.priceMs, maxSolPerBuy: () => config.maxSolPerBuy, feeReserveSol: config.feeReserveSol, feeBpsFor });
-const watcher = config.rpcUrl
-  ? new Watcher({ leaders: () => store.watchedLeaders(), onTrade: (t) => engine.onLeaderTrade(t), pollMs: config.pollMs, subscribe: websocketSubscriber(), valueInSol: (mint, amount) => executor.valueInSol(mint, amount) })
+// With a Helius link, copied wallets' transactions also arrive in full on Helius's stream (no fetch needed); the
+// standard subscription and the poll stay on as its backup. HELIUS_STREAM=off switches the stream off.
+const streamUrl = process.env.HELIUS_STREAM === 'off' ? null : streamUrlFor(config.rpcUrl);
+let stream: HeliusStream | null = null;
+const watcher: Watcher | null = config.rpcUrl
+  ? new Watcher({
+      leaders: () => store.watchedLeaders(), onTrade: (t) => engine.onLeaderTrade(t), pollMs: config.pollMs, subscribe: websocketSubscriber(),
+      valueInSol: (mint, amount) => executor.valueInSol(mint, amount), streamHealthy: () => stream?.healthy() ?? false,
+    })
   : null;
+if (watcher && streamUrl) {
+  stream = new HeliusStream({ url: streamUrl, leaders: () => store.watchedLeaders(), onTransaction: (tx) => watcher.handleStreamTx(tx) });
+}
+const feedNote = () => (stream ? `Helius stream ${stream.status()}` : 'standard');
 
 const mode = () => (!config.rpcUrl ? 'offline' : canSendLive() ? 'live' : 'test');
 const app = createApp({
@@ -79,7 +91,7 @@ const app = createApp({
   trustProxy: config.trustProxy,
   feeBpsFor,
   maxCopiesPerUser: config.maxCopiesPerUser,
-  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: senderNote }),
+  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: senderNote, feed: feedNote() }),
 });
 
 // Every second. Ticks may overlap: the engine runs one price check per position at a time, and timed sells fire
@@ -130,6 +142,12 @@ app.listen(config.port, config.host, () => {
   if (config.rpcUrl && !config.liveTrading) log.info('test mode: copies are simulated and filled from live quotes; nothing is sent (the owner turns live trading on at /admin)');
   startBlockhashRefresher();
   watcher?.start();
+  if (stream) {
+    const s = stream;
+    s.start();
+    // A copy added or removed changes the wallet list: the subscription follows within two seconds.
+    setInterval(() => s.sync(), 2_000).unref();
+  }
   if (config.rpcUrl) setTimeout(() => void engine.restore().catch(() => undefined), 3_000);
 });
 
@@ -138,6 +156,7 @@ async function shutdown(signal: string) {
   clearInterval(clock);
   clearInterval(safety);
   watcher?.stop();
+  stream?.stop();
   stopBlockhashRefresher();
   app.close();
   // Live buys can take a while to confirm: give them up to 2 minutes (restore() settles anything cut off).

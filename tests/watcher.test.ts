@@ -124,6 +124,74 @@ describe('Watcher', () => {
     expect(trades).toHaveLength(1);
   });
 
+  describe('with the Helius transaction stream', () => {
+    const sellTx = JSON.parse(readFileSync('tests/fixtures/tx/curve_wallet_sell.json', 'utf8')) as RawTransaction;
+    const SELLER = 'GEXh5zqvGrydevffihQ37KKz2s2mQxfDP6tDkQcaCVCM';
+    function streamSetup(healthy: () => boolean) {
+      const fetched: string[] = [];
+      const trades: LeaderTrade[] = [];
+      let sigs: SignatureInfo[] = [];
+      let logCb: ((sig: string, logs?: string[], slot?: number) => void) | null = null;
+      const w = new Watcher({
+        leaders: () => [SELLER], onTrade: async (t) => { trades.push(t); }, pollMs: 0, fetchRetryMs: 1, streamHealthy: healthy,
+        getSignatures: async () => sigs,
+        getTransaction: async (s) => { fetched.push(s); return s === sellTx.transaction.signatures[0] ? sellTx : null; },
+        subscribe: (_l, cb) => { logCb = cb; return () => {}; },
+      });
+      return { w, trades, fetched, push: (s: SignatureInfo[]) => { sigs = [...s, ...sigs]; }, ws: (s: string, logs?: string[], slot?: number) => logCb?.(s, logs, slot) };
+    }
+    const SELL_SIG = sellTx.transaction.signatures[0]!;
+    const sellLogs = ['Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]'];
+
+    it('a sell arrives as a full transaction: passed on at once, never fetched', async () => {
+      const { w, trades, fetched } = streamSetup(() => true);
+      await w.sync();
+      w.handleStreamTx(sellTx);
+      await w.drain();
+      expect(trades).toHaveLength(1);
+      expect(trades[0]).toMatchObject({ side: 'sell', leader: SELLER, tokensAfter: 0n });
+      expect(fetched).toEqual([]);
+    });
+
+    it('while the stream is healthy the standard socket does not fetch what the stream will bring', async () => {
+      const { w, ws, trades, fetched } = streamSetup(() => true);
+      await w.sync();
+      ws(SELL_SIG, sellLogs, 5);
+      await w.drain();
+      expect(fetched).toEqual([]);
+      w.handleStreamTx(sellTx);
+      w.handleStreamTx(sellTx); // delivered twice by the stream: handled once
+      await w.drain();
+      expect(trades).toHaveLength(1);
+    });
+
+    it('if the stream missed one, the poll still catches it', async () => {
+      const { w, ws, trades, push } = streamSetup(() => true);
+      await w.sync();
+      ws(SELL_SIG, sellLogs, 5); // seen by the socket, left for the stream… which never delivers
+      push([{ signature: SELL_SIG, slot: 9, err: null, blockTime: 9 }]);
+      await w.sync();
+      expect(trades).toHaveLength(1);
+    });
+
+    it('stream down: the standard socket fetches as before', async () => {
+      const { w, ws, trades, fetched } = streamSetup(() => false);
+      await w.sync();
+      ws(SELL_SIG, sellLogs, 5);
+      await w.drain();
+      expect(fetched).toEqual([SELL_SIG]);
+      expect(trades).toHaveLength(1);
+    });
+
+    it('a transaction of a wallet nobody copies is ignored', async () => {
+      const { w, trades } = streamSetup(() => true);
+      await w.sync();
+      w.handleStreamTx(buyTx); // LEADER is not in this watcher's list
+      await w.drain();
+      expect(trades).toEqual([]);
+    });
+  });
+
   it('unsubscribes a leader nobody follows any more', async () => {
     let leaders = [LEADER];
     let unsubscribed = 0;
