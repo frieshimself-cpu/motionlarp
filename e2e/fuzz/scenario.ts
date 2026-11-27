@@ -1,7 +1,7 @@
 // A scenario: who copies whom with which settings, and the list of things that happen. Everything in it is plain
 // data (JSON), generated from a seed, so a failing scenario can be saved, shrunk and replayed exactly.
 import { PRESETS } from '../../src/engine/settings.js';
-import type { Faults, Tape } from './market.js';
+import { STATUS_LAG_LIMIT, type Faults, type SlowPeriod, type Tape } from './market.js';
 import { Rng } from './sim.js';
 
 /** Fixed addresses (valid 32-byte keys; none of them is used on any chain by this test). */
@@ -54,9 +54,17 @@ export const SABOTAGES = {
   // (the two below check "every sale that landed is booked exactly once": the code may name the kind too)
   'drop-booking': ['M3:sold-but-not-booked', 'the first real sale\'s booking fails and its row in sells_out is deleted: nobody ever books it'],
   'book-twice': ['M3:sale-booked-twice', 'the first real sale\'s fill is written a second time'],
-  // (a third entry: the profile its seeds are drawn from, when calm seeds never meet the fault)
+  // (a third entry: the profile its seeds are drawn from, when calm seeds never meet the fault; a fourth: how many of
+  // its seeds, 150 by default; a fifth: what those seeds' chain is made of, for a fault that only one kind of node or
+  // chain shows: the control runs on the same, and must stay clean)
   'early-drop': ['M3:landed-sale-dropped-as-never-landed', 'the engine is handed a chain tip 10 blocks high at a slot no node is behind: a sell left behind that is not found is dropped once the chain is past its last block, without the margin or the slot check', 'lag'],
-  'slot-blind': ['M3:landed-sale-dropped-as-never-landed', 'the engine is handed the chain tip at a slot no node is behind: "not found" from a node behind the tip is believed 10 blocks past a sell\'s last block (the margin stays, the slot check is gone)', 'lag'],
+  'slot-blind': ['M3:landed-sale-dropped-as-never-landed', 'the engine is handed the chain tip at a slot no node is behind: "not found" from a node behind the tip is believed 10 blocks past a sell\'s last block (the margin stays, the slot check is gone)', 'lag', 300],
+  // (the four below need the chain model of the reviewers' round: reads that take time, forks, answers without a slot,
+  // slow periods; each is invisible without its part of it)
+  'status-first': ['M3:landed-sale-dropped-as-never-landed', 'the engine reads the status before the tip: it is handed the chain tip as it is 15 blocks later, at that block\'s slot (a tip read of about 6 s, the main link\'s 4 s limit and then the backup link, made after the status read), so "not found" from a node behind is believed once that later tip is 30 blocks past the sell\'s last block', 'lag', 400, { faults: { statusLag: 0.9 } }],
+  'margin-free': ['M3:landed-sale-dropped-as-never-landed', '"not found" at a slot at least the tip\'s is believed as soon as the tip is past the last block the sell could land in (the 10-block margin gone, the slot check kept): only a node on a minority fork, which has not seen the main fork\'s last blocks, shows it; seeds whose status reads all come from such nodes, on a chain at 1.5 s a block, reads that never fail', 'lag', 600, { faults: { forkRead: 1, statusLag: 0, noSlot: 0, balFail: 0 }, slow: [{ at: 0, ms: 3_600_000, blockMs: 1_500 }] }],
+  'slotless-believed': ['M3:landed-sale-dropped-as-never-landed', 'a "not found" that carries no slot is believed as if it came from a node as far along as the tip (an executor without slots taken at its word); seeds whose "not found" never carries a slot', 'lag', 300, { faults: { noSlot: 1 } }],
+  'give-up-120s': ['NL1', 'a sell of unknown outcome still not found 120 s after it was sent is taken for one that never landed, whatever the chain says (the engine before the tip decided it): only a slow chain, on which a blockhash lives longer than 120 s, shows it; ghost seeds on a chain at 1.5 s a block', 'ghost', 300, { slow: [{ at: 0, ms: 3_600_000, blockMs: 1_500 }] }],
 } as const;
 export type Sabotage = keyof typeof SABOTAGES;
 
@@ -106,6 +114,8 @@ export interface Scenario {
   /** The executor's coming fix (market.ts, `noRecordNoSend`): written into a scenario shrunk with
    *  FUZZ_NO_RECORD_NO_SEND=1, so that its replay runs the same way. */
   noRecordNoSend?: boolean;
+  /** The chain's slow periods (profile slow; some lag seeds and some of the default mix): a block every 0.6 to 1.5 s. */
+  slow?: SlowPeriod[];
 }
 
 const PCTS = [5, 10, 20, 25, 30, 33.3, 40, 50, 60, 75, 90, 100, 100, 100];
@@ -157,9 +167,11 @@ export function genSettings(r: Rng, leader: string, name: string): Record<string
   };
 }
 
-// 'slowread', 'dbfault' and 'diskfull' are not in the default mix (so every earlier seed stays what it was): only
-// with --profile. 'lag' is in it, drawn from its own random stream (see generate): every other seed stays what it was.
-export const PROFILES = ['instant', 'calm', 'flaky', 'outage', 'partial', 'ghost', 'crash', 'slowread', 'dbfault', 'diskfull', 'lag'] as const;
+// 'slowread', 'dbfault', 'diskfull' and 'slow' are not in the default mix (so every earlier seed stays what it was):
+// only with --profile. 'lag' is in it, drawn from its own random stream (see generate): every other seed stays what it
+// was. Slow periods of the chain come in every 'slow' seed and, from their own stream, in some 'lag' seeds and some of
+// the default mix.
+export const PROFILES = ['instant', 'calm', 'flaky', 'outage', 'partial', 'ghost', 'crash', 'slowread', 'dbfault', 'diskfull', 'lag', 'slow'] as const;
 export type Profile = (typeof PROFILES)[number];
 /** Profiles whose buys may be handed back with the quote's coin count (market.ts `quoted`). */
 const QUOTED: readonly string[] = ['slowread', 'dbfault', 'diskfull'];
@@ -185,11 +197,51 @@ export function faultsFor(profile: Profile, r: Rng): Faults {
     case 'dbfault':
     case 'diskfull': return { ...none, buyUnsure: 0.03, sellFail: 0.08, streak: 0.2, streakMax: 3, slow: 0.05, balLag, refineNull: 0.1, quoted: 0.3 };
     // The engine's rule for a sell left behind by a crash (src/engine/engine.ts, neverLands): status reads that come
-    // from a node up to 25 blocks behind the tip, sales that land in the last blocks their blockhash allows, crashes
+    // from a node up to 31 blocks behind the tip, sales that land in the last blocks their blockhash allows, crashes
     // (more of them, and shorter) with sells on their way, sells of unknown outcome (landed or not), failures that never
-    // land, and now and then a read that fails (the tip's, or a status read).
-    case 'lag': return { ...none, buyUnsure: 0.03, sellFail: 0.2, streak: 0.2, streakMax: 3, slow: 0.1, ghost: 0.35, balFail: 0.03, balLag, statusLag: r.pick([0.3, 0.8, 0.9]), statusLagMax: 25, lateLand: 0.6 };
+    // land, and now and then a read that fails (the tip's, or a status read). Its nodes also disagree in the other ways
+    // real ones do (nodeFaultsFor: forks, a tip node behind, a node behind on its confirmations, answers without a slot).
+    case 'lag': return { ...none, buyUnsure: 0.03, sellFail: 0.2, streak: 0.2, streakMax: 3, slow: 0.1, ghost: 0.35, balFail: 0.03, balLag, statusLag: r.pick([0.3, 0.8, 0.9]), statusLagMax: STATUS_LAG_LIMIT, lateLand: 0.6 };
+    // The same on a slow chain (slowFor: a block every 0.6 to 1.5 s for minutes, in every seed): a blockhash lives up to
+    // nearly four minutes, so the engine's time limits are no longer safe stand-ins for the chain's own clock.
+    case 'slow': return { ...none, buyUnsure: 0.03, sellFail: 0.2, streak: 0.2, streakMax: 3, slow: 0.1, ghost: 0.35, balFail: 0.03, balLag, statusLag: r.pick([0.2, 0.5, 0.8]), statusLagMax: STATUS_LAG_LIMIT, lateLand: 0.6 };
   }
+}
+
+/** The nodes of a lag or slow seed beyond being behind the tip (market.ts): a status node on a minority fork, a tip
+ *  node a little behind, a status node behind on its confirmations, a "not found" without a slot (all of a seed's, in
+ *  some: an executor without slots). From their own random stream: the plan's draws stay as they are. */
+export function nodeFaultsFor(profile: Profile, seed: number): Partial<Faults> {
+  if (profile !== 'lag' && profile !== 'slow') return {};
+  const r = Rng.derive(seed, 'nodes');
+  return { forkRead: r.pick([0.03, 0.1, 0.25]), tipBehind: r.pick([0, 0.1, 0.3]), confBehind: r.pick([0.03, 0.1, 0.2]), confBehindMax: 40, noSlot: r.pick([0, 0, 0.15, 0.5, 1]) };
+}
+
+/** Shares of the seeds whose chain has slow periods: every 'slow' seed, a fifth of the 'lag' seeds, and 4 % of the
+ *  rest of the default mix. */
+const SLOW_SHARE = { slow: 1, lag: 0.2, mix: 0.04 } as const;
+
+/**
+ * The chain's slow periods for a seed (bursts of skipped slots: a block every 0.6 to 1.5 s, for one to six minutes),
+ * from their own random stream (every other draw of the seed stays as it was); undefined when it has none. `spanMs`:
+ * how long the steps take, about (the periods start inside it, and may run on past it). `heavy` (profile slow): two to
+ * four periods of two to eight minutes, none quicker than 0.8 s a block (a blockhash then outlives two minutes), the
+ * first from the start in half the seeds, and in half of them one more from about the end of the steps (the sells left
+ * at the end are settled on a slow chain too).
+ */
+export function slowFor(seed: number, spanMs: number, share: number, heavy = false): SlowPeriod[] | undefined {
+  const r = Rng.derive(seed, 'slow');
+  if (!(share > 0) || !r.chance(share)) return undefined;
+  const out: SlowPeriod[] = [];
+  const n = heavy ? r.int(2, 4) : r.pick([1, 1, 2, 2, 3]);
+  for (let i = 0; i < n; i++) {
+    // (one in four from the start, one in two for 'slow': what is sent then lives through it)
+    const at = i === 0 && r.chance(heavy ? 0.5 : 0.25) ? 0 : r.int(0, Math.max(1, spanMs - 1));
+    out.push({ at, ms: heavy ? r.int(120_000, 480_000) : r.int(60_000, 360_000), blockMs: r.pick(heavy ? [800, 1_000, 1_200, 1_500] : [600, 800, 1_000, 1_200, 1_500]) });
+  }
+  if (heavy && r.chance(0.5)) out.push({ at: Math.max(0, spanMs - r.int(0, 60_000)), ms: r.int(240_000, 600_000), blockMs: r.pick([800, 1_000, 1_200, 1_500]) });
+  out.sort((a, b) => a.at - b.at);
+  return out;
 }
 
 /** The database faults of a dbfault or diskfull seed, from their own random stream (the plan's draws stay as they
@@ -226,7 +278,8 @@ export function generate(seed: number, steps: number, opt: GenOptions = {}): Sce
   const profile: Profile = opt.profile ?? ((mixed: Profile) => (!opt.core && Rng.derive(seed, 'lag').chance(LAG_SHARE) ? 'lag' : mixed))(r.weighted(opt.core
     ? [[11, 'instant'], [27, 'calm'], [40, 'flaky'], [14, 'outage'], [8, 'partial']] as const
     : [[10, 'instant'], [24, 'calm'], [36, 'flaky'], [12, 'outage'], [7, 'partial'], [5, 'ghost'], [6, 'crash']] as const));
-  const lag = profile === 'lag';
+  // ('slow' is 'lag' on a slow chain: the same kind of seed)
+  const lag = profile === 'lag' || profile === 'slow';
   // ('lag' is mostly real: only a real sell is written down, and left behind by a crash)
   const live = r.chance(lag ? 0.9 : 0.62);
   const nUsers = r.chance(0.35) ? 2 : 1;
@@ -267,8 +320,9 @@ export function generate(seed: number, steps: number, opt: GenOptions = {}): Sce
     const key = `${leader}:${mint}`;
     const kind = r.weighted([
       [30, 'tick'], [holds.size ? 12 : 30, 'buy'], [holds.size ? 9 : 0, 'sellPart'], [holds.size ? 7 : 0, 'sellAll'], [12, 'price'], [5, 'sellNow'],
-      // ('lag' restarts more: a crash with sells on their way is what leaves them behind)
-      [2, 'pause'], [1.5, 'resume'], [2, 'edit'], [1.2, 'delete'], [restarts < (lag ? 4 : 2) ? (lag ? 8 : 3) : 0, 'restart'], [profile === 'outage' ? 3 : 0, 'outage'], [0.7, 'maxBuy'], [0.7, 'userOff'],
+      // ('lag' restarts more: a crash with sells on their way is what leaves them behind; 'slow' half as often, so that
+      // sells of unknown outcome are also settled by the engine that sent them)
+      [2, 'pause'], [1.5, 'resume'], [2, 'edit'], [1.2, 'delete'], [restarts < (lag ? (profile === 'slow' ? 3 : 4) : 2) ? (lag ? (profile === 'slow' ? 4 : 8) : 3) : 0, 'restart'], [profile === 'outage' ? 3 : 0, 'outage'], [0.7, 'maxBuy'], [0.7, 'userOff'],
       [switches ? 1.2 : 0, 'liveSwitch'],
     ] as const);
     let act: Action = { a: 'tick' };
@@ -308,9 +362,13 @@ export function generate(seed: number, steps: number, opt: GenOptions = {}): Sce
   }
   const sc: Scenario = {
     seed, profile, live, overAsk: ((strict: boolean) => (strict && !QUOTED.includes(profile) ? 'strict' : 'clamp'))(r.chance(0.5)) /* (the real executor clamps: with a quote's coin count in the books a strict market would only show its own harshness) */, priceMs: r.pick([0, 200, 2_000, 2_000]), retry: r.chance(0.5) ? 'prod' : 'fast',
-    maxSolPerBuy, users, mints, copies, faults: faultsFor(profile, r), steps: out, finale: { dump: r.chance(0.3), leadersExit: r.chance(0.35) },
+    maxSolPerBuy, users, mints, copies, faults: { ...faultsFor(profile, r), ...nodeFaultsFor(profile, seed) }, steps: out, finale: { dump: r.chance(0.3), leadersExit: r.chance(0.35) },
   };
-  const db = dbFaultsFor(profile, seed, out.reduce((a, s) => a + s.dt, 0));
+  const span = out.reduce((a, s) => a + s.dt, 0);
+  const db = dbFaultsFor(profile, seed, span);
   if (db) sc.db = db;
+  // Slow periods of the chain, from their own stream: a seed without them is exactly what it was.
+  const slow = slowFor(seed, span, profile === 'slow' ? SLOW_SHARE.slow : profile === 'lag' ? SLOW_SHARE.lag : !opt.profile && !opt.core ? SLOW_SHARE.mix : 0, profile === 'slow');
+  if (slow) sc.slow = slow;
   return sc;
 }

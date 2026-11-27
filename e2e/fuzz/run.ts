@@ -24,7 +24,7 @@ import { log } from '../../src/log.js';
 import { pnlSummary } from '../../src/pnl.js';
 import { Store, type EventKind, type Fill, type Position, type PositionPatch } from '../../src/store.js';
 import type { LeaderTrade } from '../../src/watch/parse.js';
-import { als, DEN, emptyTape, Exec, Market, STATUS_LAG_LIMIT, VALID_BLOCKS, type BuyCall, type Ctx, type DbPlan, type SellCall, type StatusAnswer, type Tape } from './market.js';
+import { als, DEN, emptyTape, Exec, Market, STATUS_LAG_LIMIT, VALID_BLOCKS, type BuyCall, type Ctx, type DbPlan, type SellCall, type StatusAnswer, type Tape, type TipRead } from './market.js';
 import { LEADERS, MINTS, type Action, type Scenario } from './scenario.js';
 import { Rng, Sim, SimSpin } from './sim.js';
 
@@ -78,11 +78,13 @@ export interface RunResult {
    * The chain model at work: sells left behind (`orphans`: written down in sells_out and taken up by an engine that did
    * not send them, or by the same one after its booking failed), how many had in truth landed, and how each ended:
    * `booked` as landed, or dropped as never landed by the engine's `slotted` rule (a few blocks past its last block,
-   * from a node at least as far along as the tip), `wellPast` (from any node), the 180 s `fallback`, as `failed` on
-   * chain, or `other`; `landedDropped`: those dropped although they had landed (never booked: the bug class). Also the
-   * sales that landed in the last blocks of their blockhash (`lateLandings`), status reads of sells (`statusReads`),
-   * those answered by a node behind the tip (`laggedReads`) and those of them that missed a sale or failure already in
-   * a block (`laggedMisses`), and chain tips read (`tipReads`).
+   * from a node at least as far along as the tip), `wellPast` (from any node), a time limit (`fallback`), as `failed` on
+   * chain, or `other`; `landedDropped`: those taken for sells that never landed although they had landed (never booked:
+   * the bug class). Sells of unknown outcome settled by the engine (`unknownSettled`), and its verdicts: landed
+   * (`unkLanded`), failed on chain, by the slotted or the well-past rule, by a time limit, other (`unkFailed` ...
+   * `unkOther`); `premature`: verdicts "it never landed" while it could still land. The market's counts (Market.counts:
+   * late landings, tip and status reads by node, reads that took 4 s or more, reads in a slow period), and the chain's
+   * slow periods (`slowPeriods`, `slowSeconds`).
    */
   chain: Record<string, number>;
   transcript: string[];
@@ -173,15 +175,25 @@ interface Track {
 
 const START = 1_800_000_000_000;
 const SOL = 1_000_000_000n;
-/** The engine's drop rule for a sell left behind (src/engine/engine.ts, neverLands and settleOrphans), mirrored only to
- *  count which of its branches dropped each one: "not found" believed this many blocks past the last block it could
- *  land in from a node at least as far along as the tip read (NOT_FOUND_MARGIN_BLOCKS), from any node WELL_PAST_BLOCKS
- *  past it, and whatever the chain says this long after it was sent (SELL_OUT_EXPIRES_MS). */
+/** The engine's rule for "it never landed" (src/engine/engine.ts, neverLands), mirrored only to count which of its
+ *  branches gave each verdict: "not found" believed this many blocks past the last block a sell could land in from a
+ *  node at least as far along as the tip read before it (NOT_FOUND_MARGIN_BLOCKS), from any node WELL_PAST_BLOCKS past
+ *  it; anything else that drops a sell not found is a time limit (for a sell left behind: 180 s after it was sent when
+ *  the tip cannot be read, SELL_OUT_EXPIRES_MS; ten minutes whatever it says, NOT_FOUND_GIVE_UP_MS). Whether a verdict
+ *  was right is judged by the chain, never by this copy. */
 const NOT_FOUND_MARGIN_BLOCKS = 10;
 const SELL_OUT_EXPIRES_MS = 180_000;
+const NOT_FOUND_GIVE_UP_MS = 600_000;
+/** Self-test 'status-first': the tip handed to the engine is the chain's this many blocks later (about 6 s at full
+ *  speed: a tip read that took the main link's 4 s limit and then the backup link's answer, read after the status). */
+const STATUS_FIRST_BLOCKS = 15;
 /** How a sell left behind (sells_out, taken up by a new engine) ended: booked as landed, or dropped by one of the
- *  engine's rules (the slotted one, well past, the 180 s fallback), because it failed on chain, or for another reason. */
-type OrphanFate = 'booked' | 'slotted' | 'wellPast' | 'fallback' | 'failed' | 'other';
+ *  engine's rules (the slotted one, well past, a time limit), because it failed on chain, or for another reason. */
+type OrphanFate = 'booked' | 'slotted' | 'wellPast' | 'fallback' | 'failed' | 'other' | 'planted';
+/** Which of the engine's rules gave a verdict "it never landed", from the status read it acted on and the tip it had
+ *  read just before: failed on chain, the slotted rule, the well-past rule, a time limit (none of those: not found and
+ *  dropped all the same), other (no read at that moment), or a self-test's planted rule (the answer was changed). */
+type Rule = 'failed' | 'slotted' | 'wellPast' | 'time' | 'other' | 'planted';
 const lamports = (sol: number) => BigInt(Math.round(sol * 1e9));
 const short = (s: string) => `${s.slice(0, 4)}`;
 const okey = (o: SellOrder) => `${o.reason}:${o.stage ?? ''}:${o.tag ?? ''}`;
@@ -280,14 +292,18 @@ class Run {
   private dropped = false;
   /** Sells left behind that an engine took up, by signature, and how each ended (null: not yet). */
   private readonly orphanFate = new Map<string, OrphanFate | null>();
-  /** Those of them dropped as never landed although they had landed. */
+  /** Sales taken by the engine for sells that never landed although they had landed (or landed after). */
   private landedDropped = 0;
+  /** The engine's verdicts on sells of unknown outcome it settled (Engine.settleUnknownSell), by what it found. */
+  private readonly unknown = { landed: 0, failed: 0, slotted: 0, wellPast: 0, time: 0, other: 0, planted: 0 };
+  /** Verdicts "it never landed" given while the sell could still land (NL1). */
+  private premature = 0;
   /** The engine's clock runs this far ahead of the virtual one (self-tests 'clock-ahead' and 'clock-behind'). */
   private skew = 0;
 
   constructor(private readonly sc: Scenario, private readonly opt: RunOptions) {
     this.tape = sc.tape ? structuredClone(sc.tape) : emptyTape();
-    this.market = new Market(this.sim, sc.live, sc.overAsk, sc.faults, Rng.derive(sc.seed, 'faults'), this.tape, !!sc.tape, Rng.derive(sc.seed, 'slots'));
+    this.market = new Market(this.sim, sc.live, sc.overAsk, sc.faults, Rng.derive(sc.seed, 'faults'), this.tape, !!sc.tape, Rng.derive(sc.seed, 'slots'), Rng.derive(sc.seed, 'reads'), sc.slow ?? []);
     if (sc.noRecordNoSend !== undefined) this.market.noRecordNoSend = sc.noRecordNoSend;
     this.maxBuy = sc.maxSolPerBuy;
     this.dbOn = !!(sc.db?.p || sc.db?.full?.length);
@@ -335,7 +351,8 @@ class Run {
     sim.afterEvent = () => this.afterEvent();
     try {
       market.hooks = {
-        buyAsk: (c) => this.buyAsk(c), buyDone: (c) => this.buyDone(c), sellAsk: (c) => this.sellAsk(c), sellLanded: (c) => this.sellLanded(c), sellDone: (c) => this.sellDone(c), sellSettled: (c, answer, final) => this.sellSettled(c, answer, final),
+        buyAsk: (c) => this.buyAsk(c), buyDone: (c) => this.buyDone(c), sellAsk: (c) => this.sellAsk(c), sellLanded: (c) => this.sellLanded(c), sellDone: (c) => this.sellDone(c), sellSettled: (c, answer) => this.sellSettled(c, answer),
+        tipRead: (tip, behind, sentAt, at) => this.line(`exec chain tip read${at > sentAt ? ` (answered after ${at - sentAt} ms)` : ''}: ${tip ? `height ${tip.height}, slot ${tip.slot}${behind ? ` (from a node ${behind} block${behind === 1 ? '' : 's'} behind)` : ''}` : 'FAILED (the RPC did not answer)'}; the chain at ${this.market.height()} confirmed, ${this.market.processedHeight()} produced`),
         reading: (ctx, d) => { const tr = ctx && ctx.gen === this.gen ? this.pos.get(ctx.positionId) : undefined; if (tr) tr.reading = Math.max(0, tr.reading + d); },
         refined: (c) => {
           const q = c.kind === 'buy' && c.quotedTokens !== undefined;
@@ -378,8 +395,13 @@ class Run {
         if (sc.sabotage === 'min-zero') store.db.prepare('UPDATE copies SET settings = ? WHERE id = ?').run(JSON.stringify({ ...s, minLeaderBuySol: 0 }), id);
       }
       this.line(`market: Live switch ${sc.live ? 'ON (real trades)' : 'OFF (test mode)'}, over-ask ${sc.overAsk}, profile ${sc.profile}, priceMs ${sc.priceMs}, retries ${sc.retry}, max per buy ${sc.maxSolPerBuy} SOL, wallets ${sc.users.map((u) => `${u.sol} SOL`).join(' / ')}`);
-      if (sc.faults.statusLag) this.line(`chain: ${Math.round(sc.faults.statusLag * 100)}% of the status reads of a sell come from a node up to ${Math.min(sc.faults.statusLagMax ?? STATUS_LAG_LIMIT, STATUS_LAG_LIMIT)} blocks behind the tip`);
-      if (sc.faults.lateLand) this.line(`chain: ${Math.round(sc.faults.lateLand * 100)}% of the real sells that land do so in the last blocks of their blockhash (last valid height −3 to +1, about a minute after they are signed)`);
+      const f = sc.faults;
+      const pct = (p: number) => `${Math.round(p * 100)}%`;
+      if (f.statusLag) this.line(`chain: ${pct(f.statusLag)} of the status reads of a sell come from a node up to ${Math.min(f.statusLagMax ?? STATUS_LAG_LIMIT, STATUS_LAG_LIMIT)} blocks behind the tip`);
+      const nodes = [f.forkRead ? `${pct(f.forkRead)} from a node on a 1-3 slot minority fork` : '', f.confBehind ? `${pct(f.confBehind)} from a node up to ${f.confBehindMax ?? 40} blocks behind on its confirmations` : '', f.noSlot ? `${pct(f.noSlot)} of their "not found" without a slot` : '', f.tipBehind ? `${pct(f.tipBehind)} of the tip reads from a node 1-3 blocks behind` : ''].filter(Boolean);
+      if (nodes.length) this.line(`chain: status reads ${nodes.join(', ')}`);
+      if (f.lateLand) this.line(`chain: ${pct(f.lateLand)} of the real sells that land do so in the last blocks of their blockhash (last valid height −3 to +1, about a minute after they are signed, longer on a slow chain)`);
+      for (const w of sc.slow ?? []) this.line(`chain: SLOW from +${(w.at / 1000).toFixed(3)}s for ${(w.ms / 1000).toFixed(0)}s, a block about every ${w.blockMs} ms (a blockhash's 151 blocks last about ${Math.round((151 * w.blockMs) / 1000)} s)`);
       if (sc.db?.p) this.line(`database: one write in ${Math.round(1 / sc.db.p)} fails at random (once each), until the quiet phase`);
       for (const w of sc.db?.full ?? []) this.line(`database: from +${(w.at / 1000).toFixed(3)}s for ${w.ms / 1000}s every write fails (${DB_ERRORS[w.err][0]}); reads work`);
       if (!market.noRecordNoSend) this.line('executor: a trade whose onSigned callback throws is sent all the same (FUZZ_NO_RECORD_NO_SEND=0, the executor before 67c9307)');
@@ -425,9 +447,14 @@ class Run {
     };
   }
 
-  /** The chain model's counts, and how the sells left behind ended (RunResult.chain). */
+  /** The chain model's counts, and how the sells left behind and the sells of unknown outcome ended (RunResult.chain). */
   private chainStats(): Record<string, number> {
-    const out: Record<string, number> = { ...this.market.counts, orphans: this.orphanFate.size, orphansLanded: 0, booked: 0, slotted: 0, wellPast: 0, fallback: 0, failed: 0, other: 0, unsettled: 0, landedDropped: this.landedDropped };
+    const u = this.unknown;
+    const out: Record<string, number> = {
+      ...this.market.counts, orphans: this.orphanFate.size, orphansLanded: 0, booked: 0, slotted: 0, wellPast: 0, fallback: 0, failed: 0, other: 0, planted: 0, unsettled: 0, landedDropped: this.landedDropped,
+      unknownSettled: u.landed + u.failed + u.slotted + u.wellPast + u.time + u.other + u.planted, unkLanded: u.landed, unkFailed: u.failed, unkSlotted: u.slotted, unkWellPast: u.wellPast, unkTime: u.time, unkOther: u.other, unkPlanted: u.planted,
+      premature: this.premature, slowPeriods: this.sc.slow?.length ?? 0, slowSeconds: Math.round((this.sc.slow ?? []).reduce((a, w) => a + w.ms, 0) / 1000),
+    };
     for (const [sig, fate] of this.orphanFate) {
       if (this.sellCallOf(sig)?.landedAt !== undefined) out.orphansLanded!++;
       out[fate ?? 'unsettled'] = (out[fate ?? 'unsettled'] ?? 0) + 1;
@@ -444,47 +471,128 @@ class Run {
 
   /** What became of a real sell, in truth, for the transcript: landed, failed on chain, still on its way, never lands. */
   private fateText(c: SellCall): string {
-    if (c.landedAt !== undefined) return `it landed at height ${this.market.height(c.landedAt)}`;
+    if (c.landedAt !== undefined) return `it landed in the block at height ${c.landedBlock ?? this.market.processedHeight(c.landedAt)}`;
     if (c.chainFailed) return 'it failed on chain';
     const p = c.plan;
     if (c.live && !c.notSent && c.doneAt === undefined && p.unsure !== 'lost' && (!p.fail || p.ghost)) return `it is still on its way${p.late !== undefined && c.lastValid !== undefined ? ` (to land late, at height ${c.lastValid + p.late}; its last valid height ${c.lastValid})` : ''}`;
     return 'it never lands';
   }
 
+  /** Which of the engine's rules gave a verdict "it never landed" on the sell `sig` now (see Rule): from the status read
+   *  of it that has just arrived, and the tip the engine had read just before it sent that read. */
+  private ruleOf(sig: string, lastValid: number | undefined): Rule {
+    const read = this.exec.reads.get(sig);
+    if (!read || read.at !== this.sim.now) return 'other';
+    if (read.planted) return 'planted';
+    if (read.state === 'failed') return 'failed';
+    if (read.state !== 'not_found') return 'other';
+    const last = lastValid !== undefined ? lastValid + LAST_BLOCK_PAST_VALID : undefined;
+    const tip = read.tip;
+    if (last !== undefined && tip && tip.height > last + WELL_PAST_BLOCKS) return 'wellPast';
+    if (last !== undefined && tip && tip.slot !== undefined && read.slot !== undefined && tip.height > last + NOT_FOUND_MARGIN_BLOCKS && read.slot >= tip.slot) return 'slotted';
+    return 'time';
+  }
+
+  /** The reads a verdict on the sell `sig` acted on, for the transcript. */
+  private readsText(sig: string, lastValid: number | undefined): string {
+    const read = this.exec.reads.get(sig);
+    const now = read?.at === this.sim.now ? read : undefined;
+    const tip = now?.tip;
+    const last = lastValid !== undefined ? lastValid + LAST_BLOCK_PAST_VALID : undefined;
+    const node = !now ? '' : now.fork ? `a node on a minority fork (the main fork's last ${now.fork} block${now.fork === 1 ? '' : 's'} unseen)` : now.lag ? `a node ${now.lag} blocks behind` : 'an up-to-date node';
+    return `${tip ? `tip read before it at height ${tip.height} (slot ${tip.slot ?? '?'})` : tip === null ? 'the tip read before it FAILED' : 'no tip read before it'}${last !== undefined ? `, its last block ${last}` : ''}${now ? `, status from ${node}${now.slot !== undefined ? ` (slot ${now.slot})` : ' (no slot)'}` : ', no status read at that moment'}; the chain at ${this.market.height()} confirmed, ${this.market.processedHeight()} produced`;
+  }
+
+  /** A sell that the chain may still put in a block: sent, neither landed nor failed, and the last block it can land in
+   *  (one past its last valid height) not produced yet. */
+  private couldStillLand(c: SellCall): boolean {
+    return c.live && !!c.signature && !c.notSent && c.lastValid !== undefined && c.landedAt === undefined && !c.chainFailed && this.market.processedHeight() < c.lastValid + LAST_BLOCK_PAST_VALID;
+  }
+
+  /**
+   * The engine took a real sell for one that never landed (dropped it when left behind, or gave up on it when its
+   * outcome was unknown), by `rule`. The chain judges it, not a copy of the rule: a sale that landed (before, or after:
+   * see sellLanded) is never booked once taken for one that did not, and its rule sells again (M3); a sell that can
+   * still land (the last block it can land in is not produced yet) was given up too soon whatever happens next (NL1).
+   */
+  private neverLandedVerdict(c: SellCall, who: 'left-behind' | 'unknown-outcome', rule: string, text: string): void {
+    c.verdict ??= { at: this.sim.now, rule: who === 'left-behind' ? rule : `unknown-outcome:${rule}` };
+    const last = c.lastValid !== undefined ? c.lastValid + LAST_BLOCK_PAST_VALID : '?';
+    if (c.landedAt !== undefined) {
+      this.landedDropped++;
+      this.problem('M3', `landed-sale-dropped-as-never-landed:${c.verdict.rule}`, `p${c.pid}: sell#${c.id} (${orderText(c.ctx?.order)}) landed in the block at height ${c.landedBlock} (its last block ${last}), sold ${c.sold} for ${c.exact} lamports, and the engine took it for one that never landed (${text}): nothing will book it, and its rule may sell again`);
+    } else if (this.couldStillLand(c)) {
+      this.premature++;
+      this.problem('NL1', `never-landed-while-it-could-still-land:${who}:${rule}`, `p${c.pid}: sell#${c.id} (${orderText(c.ctx?.order)}) was taken for one that never landed (${text}) while the chain had produced blocks only up to height ${this.market.processedHeight()}, short of ${last}, the last block it can land in: it can still land (${this.fateText(c)})`);
+    }
+  }
+
   /**
    * The engine deletes the row of a sell outside a booking. For a sell left behind (one of the engine's `orphans`) that
    * is its drop: it never landed, or failed. Which of the engine's rules let it go is counted (the drop rule's coverage),
-   * from the status read it has just made, the chain tip it read just before, and the time since the sell was sent. A
-   * sale that had landed is never booked once dropped, and its rule sells again: the bug class this guards (M3).
+   * from the status read it has just made and the chain tip it read just before sending that read; whether it was
+   * right is judged by the chain (neverLandedVerdict).
    */
   private orphanDropped(sig: string): void {
     const o = (this.engine as unknown as { orphans?: Map<string, { lastValid?: number; sentAt: number; positionId: number }> }).orphans?.get(sig);
     if (!o || this.orphanFate.get(sig)) return;
-    const read = this.exec.reads.get(sig);
-    const last = o.lastValid !== undefined ? o.lastValid + LAST_BLOCK_PAST_VALID : undefined;
-    let fate: OrphanFate = 'other';
-    if (read && read.at === this.sim.now) {
-      if (read.state === 'failed') fate = 'failed';
-      else if (read.state === 'not_found') {
-        const tip = read.tip;
-        if (last !== undefined && tip && tip.height > last + WELL_PAST_BLOCKS) fate = 'wellPast';
-        else if (last !== undefined && tip && read.slot !== undefined && tip.height > last + NOT_FOUND_MARGIN_BLOCKS && read.slot >= tip.slot) fate = 'slotted';
-        else if (this.sim.now + this.skew - o.sentAt > SELL_OUT_EXPIRES_MS) fate = 'fallback';
-      }
-    }
+    const rule = this.ruleOf(sig, o.lastValid);
+    const fate: OrphanFate = rule === 'time' ? 'fallback' : rule;
     this.orphanFate.set(sig, fate);
     const c = this.sellCallOf(sig);
     const RULE: Record<OrphanFate, string> = {
       booked: 'booked', slotted: `${NOT_FOUND_MARGIN_BLOCKS} blocks past its last block, from a node at least as far along as the tip`, wellPast: `${WELL_PAST_BLOCKS} blocks past its last block, from any node`,
-      fallback: `${SELL_OUT_EXPIRES_MS / 1000} s after it was sent`, failed: 'it failed on chain',
-      other: read?.at === this.sim.now ? 'by none of the engine\'s rules, as the chain stood' : 'without a read of it (nothing could be learnt about it)',
+      fallback: `not found ${((this.sim.now + this.skew - o.sentAt) / 1000).toFixed(1)} s after it was sent, by none of the tip's rules (a time limit: ${SELL_OUT_EXPIRES_MS / 1000} s when the tip cannot be read, ${NOT_FOUND_GIVE_UP_MS / 1000} s whatever it says)`, failed: 'it failed on chain', planted: 'by the self-test\'s planted rule',
+      other: this.exec.reads.get(sig)?.at === this.sim.now ? 'by none of the engine\'s rules, as the chain stood' : 'without a read of it (nothing could be learnt about it)',
     };
-    const tip = read?.at === this.sim.now ? read.tip : undefined;
-    const how = `${tip ? `tip at height ${tip.height} (slot ${tip.slot})` : 'no tip read'}${last !== undefined ? `, its last block ${last}` : ''}${read?.at === this.sim.now ? `, status from ${read.lag ? `a node ${read.lag} blocks behind` : 'an up-to-date node'}${read.slot !== undefined ? ` (slot ${read.slot})` : ''}` : ''}`;
-    this.line(`sell#${c?.id ?? '?'} p${o.positionId} left behind is DROPPED as never landed: ${RULE[fate]} (${how}); in truth ${c ? this.fateText(c) : '?'}`);
-    if (c?.landedAt !== undefined) {
-      this.landedDropped++;
-      this.problem('M3', `landed-sale-dropped-as-never-landed:${fate}`, `p${o.positionId}: sell#${c.id} (${orderText(c.ctx?.order)}) landed at height ${this.market.height(c.landedAt)} (its last block ${last ?? '?'}), sold ${c.sold} for ${c.exact} lamports, and the engine dropped it as never landed (${RULE[fate]}; ${how}): nothing will book it, and its rule may sell again`);
+    const text = `${RULE[fate]}; ${this.readsText(sig, o.lastValid)}`;
+    this.line(`sell#${c?.id ?? '?'} p${o.positionId} left behind is DROPPED as never landed: ${text}; in truth ${c ? this.fateText(c) : '?'}`);
+    if (c) this.neverLandedVerdict(c, 'left-behind', fate, text);
+  }
+
+  /**
+   * The engine has settled a sell of unknown outcome from its own transaction (Engine.settleUnknownSell returned): it
+   * landed (the engine books it now), it never landed (a failure: its rule may sell again; judged by the chain), or it
+   * is still unknown (the engine is stopping: written down, the next start settles it).
+   */
+  private unknownSettled(signature: string | null, r: { ok: boolean; error?: string; uncertain?: boolean }): void {
+    const c = signature ? this.sellCallOf(signature) : undefined;
+    if (!c || !signature) return;
+    const ctx = c.ctx;
+    const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
+    if (!r.ok && r.uncertain) { this.line(`sell#${c.id} p${c.pid ?? '?'} outcome still unknown, the engine is stopping (${this.fateText(c)})`); return; }
+    const landed = r.ok;
+    if (landed) this.unknown.landed++;
+    else {
+      const rule = this.ruleOf(signature, c.lastValid);
+      this.unknown[rule]++;
+      const text = `${rule === 'planted' ? 'by the self-test\'s planted rule' : rule === 'time' ? `not found ${((this.sim.now + this.skew - c.t0) / 1000).toFixed(1)} s after it was sent, by none of the tip's rules (a time limit)` : rule === 'failed' ? 'it failed on chain' : rule === 'other' ? 'without a status read at that moment' : rule === 'slotted' ? `${NOT_FOUND_MARGIN_BLOCKS} blocks past its last block, from a node at least as far along as the tip` : `${WELL_PAST_BLOCKS} blocks past its last block, from any node`}; ${this.readsText(signature, c.lastValid)}`;
+      this.line(`sell#${c.id} p${c.pid ?? '?'} of unknown outcome is taken by the engine for one that NEVER LANDED ("${r.error}"): ${text}; in truth ${this.fateText(c)}`);
+      this.neverLandedVerdict(c, 'unknown-outcome', rule, text);
+    }
+    // The harness's own record of the current engine's sells (what is reserved, what failed, what was booked).
+    if (!tr || !ctx || c.gen !== this.gen) return;
+    const mine = tr.flying.get(ctx.inv);
+    // Landed: the engine books it now, its coins reserved until then. Not landed: the reservation ends with the answer.
+    if (landed && mine?.call === c) mine.answered = true;
+    queueMicrotask(() => {
+      if (!landed && tr.flying.get(ctx.inv)?.call === c) tr.flying.delete(ctx.inv);
+      if (ctx.kind !== 'bag') tr.queueFlying = Math.max(0, tr.queueFlying - 1);
+    });
+    if (!landed && ctx.order) {
+      const failKey = ctx.kind === 'bag' ? `bag#${ctx.inv}` : okey(ctx.order);
+      tr.failed.set(failKey, (tr.failed.get(failKey) ?? 0) + 1);
+      if (ctx.kind === 'bag') tr.bagFailedAt = this.sim.now;
+    } else if (ctx.order) {
+      // Booked from its own transaction: the same accounting as a sell that was confirmed in time.
+      const k = okey(ctx.order);
+      const o = ctx.order;
+      if ((c.sold ?? 0n) > 0n && onceOrder(o)) {
+        const hit = tr.success.get(k);
+        if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
+        else { hit.n++; if (!hit.firstPartial) this.problem('DF1', `fired-twice:${orderKind(ctx, o)}`, `p${tr.pid} ${orderText(o)} sold a second time (sell#${c.id}, ${c.sold} tokens)`); }
+      }
+      if (ctx.kind !== 'bag' && o.percent >= 100 && c.sold === c.asked && !this.blind && this.sc.faults.partial === 0) tr.fullExitSold.set(ctx.inv, c);
     }
   }
 
@@ -505,16 +613,7 @@ class Run {
     this.stopping = false;
     const gen = this.gen;
     this.exec = new Exec(this.market, gen);
-    if (sc.sabotage === 'early-drop' || sc.sabotage === 'slot-blind') {
-      // Self-test: the engine is handed the chain tip at a slot no status node is behind, so "not found" from a node
-      // behind the tip is believed (the slot check is gone); 'early-drop' also hands it a tip NOT_FOUND_MARGIN_BLOCKS
-      // higher than it is: a sell left behind that is not found is then dropped as soon as the chain is past the last
-      // block it could land in (one past its last valid height), without the margin either.
-      const exec = this.exec;
-      const real = exec.chainTip.bind(exec);
-      const ahead = sc.sabotage === 'early-drop' ? NOT_FOUND_MARGIN_BLOCKS : 0;
-      exec.chainTip = () => real().then((t) => ({ height: t.height + ahead, slot: 0 }));
-    }
+    this.plant(this.exec);
     const skew = sc.sabotage === 'clock-ahead' ? 3_000 : sc.sabotage === 'clock-behind' ? -3_000 : 0;
     this.skew = skew;
     const feeOff = sc.sabotage === 'fee-off' ? 7 : 0;
@@ -575,12 +674,68 @@ class Run {
     sim.schedule(30_000, safety);
   }
 
-  /** Wraps the engine's own steps so every executor call and every booking knows which order it belongs to. */
+  /**
+   * Self-test: a weaker rule for "it never landed" planted around the engine, through what its executor hands it (the
+   * engine itself is never changed):
+   *  - 'early-drop', 'slot-blind': the tip at a slot no status node is behind, so "not found" from a node behind the tip
+   *    is believed (the slot check is gone); 'early-drop' also NOT_FOUND_MARGIN_BLOCKS higher than it is (the margin is
+   *    gone too: dropped as soon as the chain is past the last block the sell could land in);
+   *  - 'status-first': the tip as the chain is STATUS_FIRST_BLOCKS later, at that block's slot (an engine that reads the
+   *    status first and the tip after it, when a slow status read has let the chain move on);
+   *  - 'margin-free': a "not found" at a slot at least the tip's is turned into "failed" once the tip read before it is
+   *    past the last block the sell could land in (dropped without the margin, the slot check kept);
+   *  - 'slotless-believed': a "not found" without a slot is handed over with the tip's slot (believed as from a node as
+   *    far along as the tip);
+   *  - 'give-up-120s': a sell of unknown outcome (not one left behind) still not found 120 s after it was sent is
+   *    handed over as "failed" (given up whatever the chain says, as the engine did before the tip decided it).
+   */
+  private plant(exec: Exec): void {
+    const sab = this.sc.sabotage;
+    if (sab === 'early-drop' || sab === 'slot-blind' || sab === 'status-first') {
+      const real = exec.chainTip.bind(exec);
+      exec.chainTip = () => real().then((t) => {
+        const tip = sab === 'status-first'
+          ? { height: t.height + STATUS_FIRST_BLOCKS, slot: this.market.slotAt(t.height + STATUS_FIRST_BLOCKS) }
+          : { height: t.height + (sab === 'early-drop' ? NOT_FOUND_MARGIN_BLOCKS : 0), slot: 0 };
+        exec.lastTip = { at: this.sim.now, tip };
+        return tip;
+      });
+    }
+    if (sab === 'margin-free' || sab === 'slotless-believed' || sab === 'give-up-120s') {
+      const real = exec.settleSell.bind(exec);
+      exec.settleSell = (signature, owner, mint) => {
+        // (the tip the engine was handed just before it sent this read, and whether the sell is one left behind)
+        const tip: TipRead['tip'] | undefined = exec.lastTip?.at === this.sim.now ? exec.lastTip.tip : undefined;
+        const leftBehind = !!(this.engine as unknown as { orphans?: Map<string, unknown> }).orphans?.has(signature);
+        const c = this.sellCallOf(signature);
+        return real(signature, owner, mint).then((r) => {
+          if (r.state !== 'not_found' || !c || c.lastValid === undefined) return r;
+          const last = c.lastValid + LAST_BLOCK_PAST_VALID;
+          // (the read the harness counts the verdict by is marked: the engine was told something else)
+          const mark = <T>(changed: T): T => { const rd = exec.reads.get(signature); if (rd?.at === this.sim.now) rd.planted = true; return changed; };
+          if (sab === 'margin-free' && tip?.slot !== undefined && r.slot !== undefined && r.slot >= tip.slot && tip.height > last) return mark({ state: 'failed' as const });
+          if (sab === 'slotless-believed' && r.slot === undefined && tip?.slot !== undefined) return mark({ state: 'not_found' as const, slot: tip.slot });
+          if (sab === 'give-up-120s' && !leftBehind && c.uncertain && this.sim.now - c.t0 > 120_000) return mark({ state: 'failed' as const });
+          return r;
+        });
+      };
+    }
+  }
+
+  /** Wraps the engine's own steps so every executor call and every booking knows which order it belongs to, and the
+   *  engine's verdicts on sells of unknown outcome are seen. */
   private instrument(engine: Engine, gen: number): void {
     const e = engine as unknown as Record<string, unknown>;
-    for (const name of ['sell', 'bagStep', 'buy']) {
+    for (const name of ['sell', 'bagStep', 'buy', 'settleUnknownSell']) {
       if (typeof e[name] !== 'function') throw new Error(`fuzz harness: Engine.${name}() not found: the engine's internals changed, update e2e/fuzz/run.ts`);
     }
+    // Its verdict on a sell of unknown outcome, seen before the engine acts on it (this handler is registered first).
+    const settleUnknown = (e.settleUnknownSell as (...a: unknown[]) => Promise<{ ok: boolean; error?: string; uncertain?: boolean }>).bind(engine);
+    e.settleUnknownSell = (signature: string | null, ...rest: unknown[]) => {
+      const res = settleUnknown(signature, ...rest);
+      void res.then((r) => this.unknownSettled(signature, r), () => undefined);
+      return res;
+    };
     const sell = (e.sell as (...a: unknown[]) => Promise<{ ok: boolean; error?: string }>).bind(engine);
     e.sell = (positionId: number, order: SellOrder, ...rest: unknown[]) => {
       const inv = ++this.inv;
@@ -1241,12 +1396,12 @@ class Run {
   }
 
   /** A real sell has just changed the wallet. It must belong to a position that is still open, and must not be one the
-   *  engine has already dropped as never landed (nothing would book it). */
+   *  engine has already taken for a sell that never landed (dropped, or given up: nothing would book it). */
   private sellLanded(c: SellCall): void {
-    const fate = c.signature ? this.orphanFate.get(c.signature) : undefined;
-    if (fate && fate !== 'booked') {
+    const v = c.verdict;
+    if (v) {
       this.landedDropped++;
-      this.problem('M3', `landed-sale-dropped-as-never-landed:${fate}`, `p${c.pid}: sell#${c.id} (${orderText(c.ctx?.order)}) landed at height ${this.market.height()} (its last valid height ${c.lastValid ?? '?'}), sold ${c.sold}, after the engine had dropped it as never landed (${fate}): nothing will book it, and its rule may sell again`);
+      this.problem('M3', `landed-sale-dropped-as-never-landed:${v.rule}`, `p${c.pid}: sell#${c.id} (${orderText(c.ctx?.order)}) landed in the block at height ${c.landedBlock} (its last valid height ${c.lastValid ?? '?'}), sold ${c.sold}, ${((this.sim.now - v.at) / 1000).toFixed(1)} s after the engine had taken it for one that never landed (${v.rule}): nothing will book it, and its rule may sell again`);
     }
     const p = c.pid !== undefined ? this.store.position(c.pid) : undefined;
     if (!p || p.status === 'open') return;
@@ -1255,64 +1410,35 @@ class Run {
   }
 
   /**
-   * The engine read a sell from its own transaction and was told `answer` (landed, failed, or not found, from a node
-   * that may be some blocks behind the tip). What the engine does next goes by what it was told, not by what happened:
-   * a sale that landed is still "not found" to a node that has not reached its block. A final answer ends the wait for
-   * a sell of unknown outcome.
+   * The engine read a sell from its own transaction and was told `answer` when it arrived (landed, failed, not found,
+   * or seen in a block the node has not confirmed: the executor throws), from a node that may be behind the tip, on a
+   * minority fork, or behind on its confirmations. What the engine does next goes by what it was told, not by what
+   * happened: a sale that landed is still "not found" to a node that has not reached its block. Its verdict on a sell
+   * of unknown outcome is seen where it gives it (unknownSettled); a sell left behind, where it drops it (orphanDropped).
    */
-  private sellSettled(c: SellCall, answer: StatusAnswer, final: boolean): void {
+  private sellSettled(c: SellCall, answer: StatusAnswer): void {
     const ctx = c.ctx;
     const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
     const landed = answer.state === 'landed';
-    const node = answer.lag ? `a node ${answer.lag} block${answer.lag === 1 ? '' : 's'} behind` : 'an up-to-date node';
-    const said = landed ? `it landed (sold ${c.sold} for ${c.exact})` : answer.state === 'failed' ? 'it failed' : `not found (slot ${answer.slot})${c.uncertain && c.gen === this.gen && final ? ' 120 s after it was sent: never found, it did not land' : ''}`;
-    const truth = answer.state === 'not_found' && (c.landedAt !== undefined || c.chainFailed) ? ` — in truth ${this.fateText(c)}, after the block that node has reached` : '';
-    this.line(`exec sell#${c.id} p${c.pid ?? '?'} read again from its own transaction (${node}; the chain at ${this.market.height()}, its last block ${c.lastValid !== undefined ? c.lastValid + LAST_BLOCK_PAST_VALID : '?'}): ${said}${truth}`);
+    const node = answer.fork ? `a node on a minority fork that has not seen the main fork's last ${answer.fork} block${answer.fork === 1 ? '' : 's'}` : answer.lag ? `a node ${answer.lag} block${answer.lag === 1 ? '' : 's'} behind` : 'an up-to-date node';
+    const conf = answer.conf ? `, ${answer.conf} blocks behind on its confirmations` : '';
+    const took = answer.at > answer.sentAt ? `, answered after ${answer.at - answer.sentAt} ms` : '';
+    const said = landed ? `it landed (sold ${c.sold} for ${c.exact})` : answer.state === 'failed' ? 'it failed'
+      : answer.state === 'processed' ? 'seen in a block it has not confirmed yet (the executor throws: asked again)' : `not found (${answer.slot !== undefined ? `slot ${answer.slot}` : 'no slot'})`;
+    const truth = (answer.state === 'not_found' || answer.state === 'processed') && (c.landedAt !== undefined || c.chainFailed) ? ` — in truth ${this.fateText(c)}` : '';
+    this.line(`exec sell#${c.id} p${c.pid ?? '?'} read again from its own transaction (${node}${conf}${took}; the chain at ${this.market.height()} confirmed, ${this.market.processedHeight()} produced, its last block ${c.lastValid !== undefined ? c.lastValid + LAST_BLOCK_PAST_VALID : '?'}): ${said}${truth}`);
     // A sell of an earlier engine that the new one settles: landed, it is booked now (once: a step sold again
     // meanwhile is DF1); it stays on its way until the engine deletes its row.
     const orphan = tr ? [...tr.flying.values()].find((f) => f.orphan && f.call === c) : undefined;
-    if (orphan) {
-      if (landed && !orphan.answered && tr && ctx?.order) {
-        orphan.answered = true;
-        const o = ctx.order;
-        if ((c.sold ?? 0n) > 0n && onceOrder(o)) {
-          const k = okey(o);
-          const hit = tr.success.get(k);
-          if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
-          else { hit.n++; if (!hit.firstPartial) this.problem('DF1', `fired-twice:${orderKind(ctx, o)}`, `p${tr.pid} ${orderText(o)} sold a second time (sell#${c.id}, ${c.sold} tokens, sent before the restart)`); }
-        }
-      }
-      return;
-    }
-    // (a sell the engine was already told about is read again only for its exact figures: nothing is settled)
-    if (!c.uncertain) return;
-    if (!tr || !ctx || c.gen !== this.gen || !final) return;
-    // The fake chain kept honest: "not found" that the engine takes as final (120 s after it was sent) comes only when
-    // the sell can no longer land and from a node that has seen every block it could have landed in.
-    if (answer.state === 'not_found' && (c.landedAt !== undefined || c.lastValid === undefined || this.market.height() <= c.lastValid + LAST_BLOCK_PAST_VALID || this.market.height() - answer.lag < c.lastValid + LAST_BLOCK_PAST_VALID)) {
-      this.problem('E4', 'fake-chain-final-not-found-while-it-could-land', `sell#${c.id}: "not found" taken as final at height ${this.market.height()} from a node ${answer.lag} blocks behind, its last block ${c.lastValid !== undefined ? c.lastValid + LAST_BLOCK_PAST_VALID : '?'}; in truth ${this.fateText(c)}`);
-    }
-    const mine = tr.flying.get(ctx.inv);
-    // Landed: the engine books it now, its coins reserved until then. Not landed: the reservation ends with the answer.
-    if (landed && mine?.call === c) mine.answered = true;
-    queueMicrotask(() => {
-      if (!landed && tr.flying.get(ctx.inv)?.call === c) tr.flying.delete(ctx.inv);
-      if (ctx.kind !== 'bag') tr.queueFlying = Math.max(0, tr.queueFlying - 1);
-    });
-    if (!landed && ctx.order) {
-      const failKey = ctx.kind === 'bag' ? `bag#${ctx.inv}` : okey(ctx.order);
-      tr.failed.set(failKey, (tr.failed.get(failKey) ?? 0) + 1);
-      if (ctx.kind === 'bag') tr.bagFailedAt = this.sim.now;
-    } else if (ctx.order) {
-      // Booked from its own transaction: the same accounting as a sell that was confirmed in time.
-      const k = okey(ctx.order);
+    if (orphan && landed && !orphan.answered && tr && ctx?.order) {
+      orphan.answered = true;
       const o = ctx.order;
       if ((c.sold ?? 0n) > 0n && onceOrder(o)) {
+        const k = okey(o);
         const hit = tr.success.get(k);
         if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
-        else { hit.n++; if (!hit.firstPartial) this.problem('DF1', `fired-twice:${orderKind(ctx, o)}`, `p${tr.pid} ${orderText(o)} sold a second time (sell#${c.id}, ${c.sold} tokens)`); }
+        else { hit.n++; if (!hit.firstPartial) this.problem('DF1', `fired-twice:${orderKind(ctx, o)}`, `p${tr.pid} ${orderText(o)} sold a second time (sell#${c.id}, ${c.sold} tokens, sent before the restart)`); }
       }
-      if (ctx.kind !== 'bag' && o.percent >= 100 && c.sold === c.asked && !this.blind && this.sc.faults.partial === 0) tr.fullExitSold.set(ctx.inv, c);
     }
   }
 

@@ -51,17 +51,34 @@ export interface Faults {
   /** Chance that a real buy is handed back with the quote's coin count (the wallet and the transaction could not be
    *  read within a second of the confirmation); the exact count follows later with the exact SOL (`refine`). */
   quoted?: number;
-  /** Chance that a status read of a sell (settleSell) is answered by a node some blocks behind the chain's tip, and
-   *  how many blocks behind at most (1 to this, at most STATUS_LAG_LIMIT). Such a node sees the chain as it was then: a
-   *  sale that landed after that is "not found" by it, and its answer carries the slot it has reached. */
+  /** Chance that a status read of a sell (settleSell) is answered by a node some blocks behind the chain's confirmed
+   *  tip, and how many blocks behind at most (1 to this, at most STATUS_LAG_LIMIT). Such a node sees the chain as it
+   *  was then: a sale that landed after that is "not found" by it, and its answer carries the slot it has reached. */
   statusLag?: number;
   statusLagMax?: number;
+  /** Chance that a status read is answered by a node on a minority fork of 1 to 3 slots: it has not seen the main
+   *  fork's last 1 to 3 blocks, and the context slot of its "not found" (its own fork's newest) is at least the tip's. */
+  forkRead?: number;
+  /** Chance that a status node is behind on its confirmations: it has the newest blocks, but has confirmed only up to
+   *  1 to `confBehindMax` blocks less. A sale in a block it has and has not confirmed: settleSell throws "seen in a
+   *  block, not confirmed yet", as the executor does, until a node that has confirmed it answers. */
+  confBehind?: number;
+  confBehindMax?: number;
+  /** Chance that a tip read (chainTip) is answered by a node 1 to 3 blocks behind the confirmed tip. */
+  tipBehind?: number;
+  /** Chance that a status answer "not found" carries no slot (an executor that cannot tell how far along the node
+   *  that answered was). */
+  noSlot?: number;
   /** Chance that a real sell that lands does so in the last blocks its blockhash allows: at a height from its last
    *  valid height − 3 to one past it (the chain takes a blockhash one block longer), about a minute after it was
    *  signed, instead of within the 30 s of `L1`. Where it is on, a sell that never lands ("expired before landing") is
    *  told so only once the chain is past the last block it could land in, as the executor tells it. */
   lateLand?: number;
 }
+
+/** A slow period of the chain: from `at` ms after the start, for `ms`, a block about every `blockMs` (whole leader
+ *  windows of four slots are skipped, as when leaders are offline, besides the usual one slot in ten). */
+export interface SlowPeriod { at: number; ms: number; blockMs: number }
 
 export interface OpPlan {
   fail?: string;
@@ -77,10 +94,10 @@ export interface OpPlan {
   /** Reported "sent, outcome unknown"; in truth it landed, or it never did. (A sell: `ghost` means 'landed'.) */
   unsure?: 'landed' | 'lost';
   refineNull?: boolean;
-  /** A real sell that lands late (`lateLand`): in the block at its last valid height plus this (−3 to +1), `lateAt` ms
-   *  into that block. Replaces L1 (a replay lands it in the same block of its blockhash's life, whenever it was sent).
-   *  A sell that never lands ("expired before landing") is told so in the block at its last valid height plus this
-   *  (+2 to +4): the chain is past the last block it could land in. */
+  /** A real sell that lands late (`lateLand`): in the block at its last valid height plus this (−3 to +1). Replaces L1
+   *  (a replay lands it in the same block of its blockhash's life, whenever it was sent). A sell that never lands
+   *  ("expired before landing") is told so when the block at its last valid height plus this (+2 to +4) is produced:
+   *  the chain is past the last block it could land in. (`lateAt`: in tapes before the slot clock; not used.) */
   late?: number;
   lateAt?: number;
 }
@@ -90,10 +107,18 @@ export interface BPlan { fail?: boolean; L?: number; late?: boolean }
 /** A database write that fails (profile dbfault): 'full' = "database or disk is full", 'io' = "disk I/O error".
  *  `m`: the store method it was (for the reader; a replay goes by the write's number only). */
 export interface DbPlan { err: 'full' | 'io'; m?: string }
+/** A read of the chain's tip (chainTip): answered after `L` ms (from the chain as it is then), by a node `behind`
+ *  blocks behind the confirmed tip. */
+export interface TipPlan { L?: number; behind?: number }
+/** A status read of a sell (settleSell): answered after `L` ms, from the chain as it is then, by a node `lag` blocks
+ *  behind the confirmed tip, or on a minority fork that has not seen the main fork's last `fork` blocks; behind on its
+ *  confirmations by `conf` blocks; its "not found" without a slot (`noSlot`). None of them: an up-to-date node, whose
+ *  context slot (its processed bank's) is ahead of a confirmed tip read at the same moment. */
+export interface StatusPlan { L?: number; lag?: number; fork?: number; conf?: number; noSlot?: boolean }
 /** `db` (dbfault only): the database writes that fail, by their number among the writes that change something.
- *  `status` (statusLag only): how many blocks behind the tip the node answering each status read of a sell is, by the
- *  read's number (a hole: up to date). */
-export interface Tape { buy: OpPlan[]; sell: OpPlan[]; quote: QPlan[]; bal: (BPlan | null)[]; db?: (DbPlan | null)[]; status?: (number | null)[] }
+ *  `tip`, `status`: each read of the chain's tip and each status read of a sell, by the read's number (a hole: answered
+ *  at once by an up-to-date node; a number, in tapes before reads had a latency: `lag`). */
+export interface Tape { buy: OpPlan[]; sell: OpPlan[]; quote: QPlan[]; bal: (BPlan | null)[]; db?: (DbPlan | null)[]; status?: (StatusPlan | number | null)[]; tip?: (TipPlan | null)[] }
 
 export const emptyTape = (): Tape => ({ buy: [], sell: [], quote: [], bal: [] });
 export const CALM_OP: OpPlan = { L1: 200, L2: 0, L3: 100 };
@@ -137,12 +162,18 @@ export interface SellCall {
   landedAt?: number; doneAt?: number; delivered: boolean; severed?: boolean; ok?: boolean; error?: string; ghost?: boolean;
   /** The engine was told "sent, outcome unknown". */
   uncertain?: boolean;
-  /** It failed on chain (a later read of the transaction says so), at `failedAt`. */
+  /** It failed on chain (a later read of the transaction says so), at `failedAt`, in the block at `failedBlock`. */
   chainFailed?: boolean;
   failedAt?: number;
+  failedBlock?: number;
+  /** A real sale: the block it landed in (at `landedAt`, when that block was produced). */
+  landedBlock?: number;
   /** A real sell: the last block height its blockhash is valid for (as the executor tells it when it is signed). It can
    *  land up to one block past it, never later. */
   lastValid?: number;
+  /** Set by run.ts: the engine took it for a sell that never landed (dropped it, or gave up on it), when and by which
+   *  rule (a sale that lands after that is never booked: M3). */
+  verdict?: { at: number; rule: string };
   sold?: bigint; est?: bigint; exact?: bigint; fee?: bigint; signature?: string; refined?: 'exact' | 'null';
   refineSeen?: boolean;
   /** The engine read this sell's own transaction afterwards (settleSell) and got its exact numbers. */
@@ -162,21 +193,27 @@ export interface Hooks {
   /** The moment the wallet changed (before the engine is told). */
   sellLanded(c: SellCall): void;
   sellDone(c: SellCall): void;
-  /** The engine read what became of a sell from its own transaction, and was told `answer` (by a node `answer.lag`
-   *  blocks behind the tip: what landed after the block it has reached is "not found" to it). `final`: the engine takes
-   *  the answer as the end of a sell of unknown outcome (landed, failed, or not found 120 s after it was sent). */
-  sellSettled(c: SellCall, answer: StatusAnswer, final: boolean): void;
+  /** The engine read what became of a sell from its own transaction, and was told `answer` when it arrived (by a node
+   *  that may be behind the tip, on a minority fork, or behind on its confirmations: see StatusAnswer). What the engine
+   *  makes of it is observed in run.ts (its verdicts), not assumed here. */
+  sellSettled(c: SellCall, answer: StatusAnswer): void;
+  /** The engine was handed the chain's tip (null: the read failed), from a node `behind` blocks behind the confirmed
+   *  tip, read from `sentAt` to `at`. */
+  tipRead(tip: { height: number; slot: number } | null, behind: number, sentAt: number, at: number): void;
   /** A balance read for a piece of engine work started (+1) or came back (-1). */
   reading(ctx: Ctx | undefined, d: number): void;
   refined(c: BuyCall | SellCall): void;
   problem(code: string, kind: string, message: string): void;
 }
 
-/** What a status read of a sell told the engine: landed, failed, or not found with the slot the answering node had
- *  reached; `lag`: how many blocks behind the tip that node was (0: up to date); `at`: when. */
-export interface StatusAnswer { state: 'landed' | 'failed' | 'not_found'; slot?: number; lag: number; at: number }
-/** A chain tip handed to the engine (null: the read failed), and when. */
-export interface TipRead { at: number; tip: { height: number; slot: number } | null }
+/** What a status read of a sell told the engine when it arrived (`at`; sent at `sentAt`): landed, failed, not found
+ *  with the context slot of the node that answered (none: an answer without a slot), or 'processed' (the node has the
+ *  sale, or its failure, in a block it has not confirmed: the executor throws "seen in a block, not confirmed yet").
+ *  The node: `lag` blocks behind the confirmed tip (0: up to date), on a minority fork that has not seen the main
+ *  fork's last `fork` blocks, behind on its confirmations by `conf` blocks; `seen`: the newest main block it has. */
+export interface StatusAnswer { state: 'landed' | 'failed' | 'not_found' | 'processed'; slot?: number; lag: number; fork?: number; conf?: number; seen: number; at: number; sentAt: number }
+/** A chain tip handed to the engine (null: the read failed), and when it arrived. */
+export interface TipRead { at: number; tip: { height: number; slot?: number } | null }
 
 const NEVER = new Promise<never>(() => undefined);
 const lam = (sol: number) => BigInt(Math.round(Math.max(0, sol || 0) * 1e9));
@@ -184,10 +221,11 @@ const lam = (sol: number) => BigInt(Math.round(Math.max(0, sol || 0) * 1e9));
 export class Exec implements Executor {
   /** False once the engine it belongs to is gone: its pending and future calls never return. */
   alive = true;
-  /** The last chain tip this engine was handed, and the last status read of each sell it made with the tip it had read
-   *  at that same moment (the harness counts which of the engine's rules dropped a sell left behind). */
+  /** The last chain tip this engine was handed (when it arrived), and the last status read of each sell it made, with
+   *  the tip it had been handed just before it sent that read (the engine reads the tip, then the status: the harness
+   *  pairs a verdict with the two reads it acted on, to count which of the engine's rules gave it). */
   lastTip?: TipRead;
-  readonly reads = new Map<string, StatusAnswer & { tip?: TipRead['tip'] }>();
+  readonly reads = new Map<string, StatusAnswer & { tip?: TipRead['tip']; planted?: boolean }>();
   constructor(readonly m: Market, readonly gen: number) {}
   isLive(req: { live: boolean; exit?: boolean }): boolean { return this.m.isLive(req); }
   buy(req: TradeRequest & { lamports: bigint }): Promise<FillResult> { return this.m.buy(this, req); }
@@ -203,21 +241,37 @@ export class Exec implements Executor {
 }
 
 /**
- * One block every 400 ms; a transaction's blockhash is valid for 150 blocks after it is signed (about a minute), and
- * the chain takes it one block longer (src/chain/connection.ts, LAST_BLOCK_PAST_VALID). A sell lands within 30 s of
- * being signed (planOp's L1), or late, in the last blocks it can (`lateLand`: from its last valid height − 3 to one
- * past it), or never: none ever lands after that. Every block has a slot, strictly increasing with the height, about
- * one slot in ten skipped (no block in it).
+ * The clock is the slot: one every 400 ms. A slot has a block or is skipped (about one in ten; in a slow period, whole
+ * leader windows of four slots as well, so a block comes every 0.6 to 1.5 s for minutes); the height grows by one per
+ * block, never on a skipped slot. A block is produced at the start of its slot (the newest, "processed", tip) and
+ * confirmed CONFIRM_MS later (the tip a node gives at "confirmed", which the engine reads). A transaction's blockhash is
+ * valid for 150 blocks after it is signed (a minute at full speed, nearly four in a slow period), and the chain takes it
+ * one block longer (src/chain/connection.ts, LAST_BLOCK_PAST_VALID). A real sell lands L1 after it was signed (within
+ * 30 s) in the block being built then (the next one, when that slot is skipped), or late, in the last blocks it can
+ * (`lateLand`: its last valid height − 3 to one past it), or never: none ever lands after that.
  */
-const BLOCK_MS = 400;
+const SLOT_MS = 400;
 export const VALID_BLOCKS = 150;
 const SKIPPED_SLOTS = 0.1;
-/** How far behind the tip a status node may be, in blocks: under the engine's WELL_PAST_BLOCKS (30), beyond which it
- *  believes "not found" from any node (a node more than 30 blocks behind is that rule's documented, accepted limit). */
-export const STATUS_LAG_LIMIT = 25;
-/** The engine takes a sell of unknown outcome that is still not found this long after it was sent for one that never
- *  landed (Engine.settleUnknownSell). */
-const UNKNOWN_GIVES_UP_MS = 120_000;
+/** Slots per leader window: in a slow period a window is skipped whole. */
+const LEADER_SLOTS = 4;
+/** A block is confirmed (optimistically, by the cluster) this long after it is produced. */
+const CONFIRM_MS = 400;
+/** How far behind the confirmed tip a status node may be, in blocks: the engine's WELL_PAST_BLOCKS (30) believes "not
+ *  found" from any node once the tip it read is more than 30 blocks past the last block a sell could land in, which is
+ *  exactly safe for a node up to 31 blocks behind; a node further behind is that rule's documented, accepted limit. */
+export const STATUS_LAG_LIMIT = 31;
+
+/** How long a read of the chain takes (ms): mostly tens of ms; sometimes up to a second; sometimes the main link's
+ *  time limit (src/config.ts rpcTimeoutMs, 4 s) and then the backup link's answer (src/chain/connection.ts
+ *  boundedFetch), up to about 8.5 s. */
+export function readLatency(r: Rng): number {
+  const x = r.next();
+  if (x < 0.86) return r.int(8, 90);
+  if (x < 0.95) return r.int(90, 1_000);
+  if (x < 0.99) return 4_000 + r.int(30, 700);
+  return 4_000 + r.int(700, 4_500);
+}
 
 export class Market {
   readonly price = new Map<string, bigint>();
@@ -236,15 +290,30 @@ export class Market {
   private readonly flying = new Map<string, number>();
   private readonly hasAccount = new Set<string>();
   private readonly streaks = new Map<string, number>();
-  private readonly cursor = { buy: 0, sell: 0, quote: 0, bal: 0, status: 0 };
+  private readonly cursor = { buy: 0, sell: 0, quote: 0, bal: 0, status: 0, tip: 0 };
   private n = 0;
-  /** The height the scenario starts at, its slot, and the slots of the blocks since (drawn as the chain gets there). */
+  /** The moment, the slot and the height the scenario starts at (a block in that slot). */
+  private readonly t0: number;
+  private readonly s0: number;
   private readonly h0: number;
-  private readonly slots: number[];
-  /** What the chain model did (reported with the run): sales that landed late, status reads from a node behind, and
-   *  those of them that did not see a sale (or a failure) that was already in a block. */
-  readonly counts = { lateLandings: 0, statusReads: 0, laggedReads: 0, laggedMisses: 0, tipReads: 0 };
-  /** Quiescence: every call succeeds promptly, whatever the tape says. */
+  /** Drawn as the chain gets there (or as a block ahead is asked for): the slot index (from s0) of every block since the
+   *  start (`blockIdx[k]`: the block at height h0 + k), and the newest block at every slot index (`atIdx[i]`: its k). */
+  private readonly blockIdx: number[] = [0];
+  private readonly atIdx: number[] = [0];
+  /** The leader window last drawn in a slow period, and whether it is skipped whole. */
+  private skipWin = -1;
+  private winSkipped = false;
+  /** What the chain model did (reported with the run): sales that landed late; tip reads (from a node a little behind);
+   *  status reads (from a node behind the tip, and those that missed a sale or failure already in a block; from a node
+   *  on a minority fork, and those that missed one; from a node behind on its confirmations; answered 'processed', so
+   *  the executor threw; "not found" without a slot); reads that took the main link's time limit (4 s or more); reads
+   *  answered during a slow period. */
+  readonly counts = {
+    lateLandings: 0, tipReads: 0, tipBehind: 0, statusReads: 0, laggedReads: 0, laggedMisses: 0, forkReads: 0, forkMisses: 0,
+    confBehindReads: 0, processedReads: 0, slotlessReads: 0, slowReads: 0, readsInSlow: 0,
+  };
+  /** Quiescence: every trade, quote and balance read succeeds promptly, whatever the tape says (a read of the chain's
+   *  tip or of a sell's status never fails either, but keeps its node and the time it takes: see planTip). */
   calm = false;
   /** Until this moment every trade, quote and balance read fails (an RPC outage). */
   outageUntil = 0;
@@ -270,27 +339,99 @@ export class Market {
     /** The slots' own random stream (run.ts derives it from the seed): the chain's slots replay with the seed, and the
      *  outcomes' stream is left as it was. */
     private readonly slotRng: Rng,
+    /** The reads' own random stream (run.ts derives it from the seed): how long each read of the chain takes and which
+     *  node answers it, recorded on the tape (`tip`, `status`). The outcomes' stream is left as it was. */
+    private readonly readRng: Rng,
+    /** The chain's slow periods (from the start, in ms). */
+    private readonly slow: readonly SlowPeriod[],
   ) {
-    this.h0 = this.height();
+    this.t0 = sim.now;
+    this.h0 = Math.floor(sim.now / SLOT_MS);
     // (slots run ahead of heights, as on mainnet, where every skipped slot since genesis widened the gap)
-    this.slots = [this.h0 + 1_000_000];
+    this.s0 = this.h0 + 1_000_000;
   }
 
-  // ── the chain's height and slots ──────────────────────────────────────
-  /** The chain's (confirmed) block height at a moment (now by default). */
-  height(at = this.sim.now): number {
-    return Math.floor(at / BLOCK_MS);
+  // ── the chain: slots, blocks, heights ─────────────────────────────────
+  /** The slot index (from the start) of a moment. */
+  private idx(at: number): number {
+    return Math.floor((at - this.t0) / SLOT_MS);
   }
-  /** The slot of the block at height h: strictly increasing with the height, about one slot in ten skipped. */
-  slotAt(h: number): number {
-    const i = h - this.h0;
-    if (i < 0) return this.slots[0]! + i; // (before the scenario: nothing skipped)
-    while (this.slots.length <= i) {
-      let gap = 1;
-      while (this.slotRng.chance(SKIPPED_SLOTS)) gap++;
-      this.slots.push(this.slots[this.slots.length - 1]! + gap);
+  /** The slow period a moment falls in, if any. */
+  slowAt(at: number): SlowPeriod | undefined {
+    const ms = at - this.t0;
+    return this.slow.find((w) => ms >= w.at && ms < w.at + w.ms);
+  }
+  /** Draws the chain's slots up to slot index i (each is skipped or has the next block). */
+  private grow(i: number): void {
+    while (this.atIdx.length <= i) {
+      const j = this.atIdx.length;
+      const k = this.atIdx[j - 1]!;
+      if (this.skipped(j)) this.atIdx.push(k);
+      else { this.blockIdx.push(j); this.atIdx.push(k + 1); }
     }
-    return this.slots[i]!;
+  }
+  private skipped(j: number): boolean {
+    const w = this.slowAt(this.t0 + j * SLOT_MS);
+    if (w) {
+      // A slow period: whole leader windows are skipped, so that a block comes about every blockMs on average.
+      const win = Math.floor((this.s0 + j) / LEADER_SLOTS);
+      if (win !== this.skipWin) {
+        this.skipWin = win;
+        this.winSkipped = this.slotRng.chance(Math.min(0.95, Math.max(0, 1 - SLOT_MS / ((1 - SKIPPED_SLOTS) * w.blockMs))));
+      }
+      if (this.winSkipped) return true;
+    }
+    return this.slotRng.chance(SKIPPED_SLOTS);
+  }
+  /** Draws the chain until the block k (from the start) exists. */
+  private growToBlock(k: number): void {
+    while (this.blockIdx.length <= k) this.grow(this.atIdx.length + 64);
+  }
+  /** The newest block at a moment (now by default): the "processed" tip. */
+  processedHeight(at = this.sim.now): number {
+    const i = this.idx(at);
+    if (i < 0) return this.h0 + i; // (before the scenario: nothing skipped)
+    this.grow(i);
+    return this.h0 + this.atIdx[i]!;
+  }
+  /** The chain's confirmed height at a moment (now by default): the newest block produced CONFIRM_MS before. This is
+   *  the tip the executor reads (getEpochInfo('confirmed')), and the height a blockhash's life is counted from. */
+  height(at = this.sim.now): number {
+    return this.processedHeight(at - CONFIRM_MS);
+  }
+  /** The slot of the block at height h: strictly increasing with the height. */
+  slotAt(h: number): number {
+    const k = h - this.h0;
+    if (k < 0) return this.s0 + k;
+    this.growToBlock(k);
+    return this.s0 + this.blockIdx[k]!;
+  }
+  /** The slot at a moment (now by default), whether it has a block or not. */
+  slotNow(at = this.sim.now): number {
+    return this.s0 + this.idx(at);
+  }
+  /** When the block at height h is produced (the start of its slot). */
+  timeOf(h: number): number {
+    const k = h - this.h0;
+    if (k < 0) return this.t0 + k * SLOT_MS;
+    this.growToBlock(k);
+    return this.t0 + this.blockIdx[k]! * SLOT_MS;
+  }
+  /** The height of the first block produced at or after a moment. */
+  nextBlock(at: number): number {
+    const i = Math.max(0, Math.ceil((at - this.t0) / SLOT_MS));
+    this.grow(i);
+    let k = this.atIdx[i]!;
+    if (this.blockIdx[k]! < i) k++;
+    this.growToBlock(k);
+    return this.h0 + k;
+  }
+  /** When a transaction that reaches the leader at a moment goes into a block: then, into the block being built in that
+   *  slot; or, when that slot is skipped, at the start of the next block. */
+  landingAt(at: number): number {
+    const i = Math.max(0, this.idx(at));
+    this.grow(i);
+    return this.blockIdx[this.atIdx[i]!] === i ? at : this.timeOf(this.nextBlock(at));
   }
 
   /** As the real executor: a sell of a position bought for real goes out even while the Live switch is off. */
@@ -369,8 +510,8 @@ export class Market {
       if (plan.fail && f.ghost > 0 && r.chance(f.ghost)) { if (r.chance(0.7)) plan.ghost = true; else plan.unsure = 'lost'; }
       // (only a sell that lands can land late; and where sells land late, one that never lands is told "expired before
       // landing" as the executor tells it, once the chain is past the last block it could land in: on its way until then)
-      if ((f.lateLand ?? 0) > 0 && (!plan.fail || plan.ghost) && r.chance(f.lateLand!)) { plan.late = r.int(-3, 1); plan.lateAt = r.int(0, BLOCK_MS - 1); }
-      else if ((f.lateLand ?? 0) > 0 && plan.fail === EXPIRED && !plan.ghost && !plan.unsure) { plan.late = r.int(2, 4); plan.lateAt = r.int(0, BLOCK_MS - 1); }
+      if ((f.lateLand ?? 0) > 0 && (!plan.fail || plan.ghost) && r.chance(f.lateLand!)) plan.late = r.int(-3, 1);
+      else if ((f.lateLand ?? 0) > 0 && plan.fail === EXPIRED && !plan.ghost && !plan.unsure) plan.late = r.int(2, 4);
     }
     if (f.refineNull > 0 && r.chance(f.refineNull)) plan.refineNull = true;
     this.tape[kind][i] = plan;
@@ -403,18 +544,40 @@ export class Market {
     if (plan.fail || plan.L) this.tape.bal[i] = plan;
     return plan;
   }
-  /** How many blocks behind the tip the node answering this status read of a sell is (0: up to date). */
-  private planStatus(): number {
-    if (this.calm) return 0;
+  /** How long this read of the chain's tip takes, and whether its node is a little behind (from the reads' stream). The
+   *  chain's nodes stay what they are in the quiet phase (a read never fails there): a sell left behind whose last blocks
+   *  come after the scenario's steps is read as any other. */
+  private planTip(): TipPlan {
+    const i = this.cursor.tip++;
+    const hit = this.tape.tip?.[i];
+    if (hit) return hit;
+    if (this.replay) return {};
+    const f = this.faults;
+    const r = this.readRng;
+    const plan: TipPlan = {};
+    if (!f.instant) plan.L = readLatency(r);
+    if ((f.tipBehind ?? 0) > 0 && r.chance(f.tipBehind!)) plan.behind = r.int(1, 3);
+    if (plan.L || plan.behind) (this.tape.tip ??= [])[i] = plan;
+    return plan;
+  }
+  /** How long this status read of a sell takes, and which node answers it (from the reads' stream; in the quiet phase
+   *  too, see planTip). */
+  private planStatus(): StatusPlan {
     const i = this.cursor.status++;
     const hit = this.tape.status?.[i];
-    if (hit) return Math.min(hit, STATUS_LAG_LIMIT);
-    if (this.replay) return 0;
+    if (typeof hit === 'number') return { lag: Math.min(hit, STATUS_LAG_LIMIT) };
+    if (hit) return { ...hit, ...(hit.lag ? { lag: Math.min(hit.lag, STATUS_LAG_LIMIT) } : {}) };
+    if (this.replay) return {};
     const f = this.faults;
-    if (!((f.statusLag ?? 0) > 0) || !this.rng.chance(f.statusLag!)) return 0;
-    const lag = this.rng.int(1, Math.max(1, Math.min(f.statusLagMax ?? STATUS_LAG_LIMIT, STATUS_LAG_LIMIT)));
-    (this.tape.status ??= [])[i] = lag;
-    return lag;
+    const r = this.readRng;
+    const plan: StatusPlan = {};
+    if (!f.instant) plan.L = readLatency(r);
+    if ((f.statusLag ?? 0) > 0 && r.chance(f.statusLag!)) plan.lag = r.int(1, Math.max(1, Math.min(f.statusLagMax ?? STATUS_LAG_LIMIT, STATUS_LAG_LIMIT)));
+    else if ((f.forkRead ?? 0) > 0 && r.chance(f.forkRead!)) plan.fork = r.int(1, 3);
+    if ((f.confBehind ?? 0) > 0 && r.chance(f.confBehind!)) plan.conf = r.int(1, Math.max(1, f.confBehindMax ?? 40));
+    if ((f.noSlot ?? 0) > 0 && r.chance(f.noSlot!)) plan.noSlot = true;
+    if (Object.keys(plan).length) (this.tape.status ??= [])[i] = plan;
+    return plan;
   }
 
   // ── Executor ──────────────────────────────────────────────────────────
@@ -533,51 +696,102 @@ export class Market {
   }
 
   /** The chain's confirmed tip: its height and that block's slot, from one node (as the executor reads it with
-   *  getEpochInfo('confirmed')); it can be read only when the RPC answers. */
+   *  getEpochInfo('confirmed')), as the chain is when the answer arrives (`tip` plan: after L ms; from a node a little
+   *  behind); it can be read only when the RPC answers. */
   chainTip(exec: Exec): Promise<{ height: number; slot: number }> {
     if (!exec.alive) return NEVER;
     this.counts.tipReads++;
-    if (this.planBal().fail || this.outage()) {
-      exec.lastTip = { at: this.sim.now, tip: null };
-      return Promise.reject(new Error('429 Too Many Requests'));
-    }
-    const height = this.height();
-    const tip = { height, slot: this.slotAt(height) };
-    exec.lastTip = { at: this.sim.now, tip };
-    return Promise.resolve({ ...tip });
+    const down = this.planBal().fail || this.outage();
+    const plan = this.planTip();
+    const sentAt = this.sim.now;
+    return new Promise((resolve, reject) => {
+      this.after(plan.L ?? 0, () => {
+        if (!exec.alive) return; // (the engine is gone: nobody is waiting)
+        if ((plan.L ?? 0) >= 4_000) this.counts.slowReads++;
+        if (this.slowAt(this.sim.now)) this.counts.readsInSlow++;
+        if (down) {
+          exec.lastTip = { at: this.sim.now, tip: null };
+          this.hooks.tipRead(null, 0, sentAt, this.sim.now);
+          return reject(new Error('429 Too Many Requests'));
+        }
+        if (plan.behind) this.counts.tipBehind++;
+        const height = this.height() - (plan.behind ?? 0);
+        const tip = { height, slot: this.slotAt(height) };
+        exec.lastTip = { at: this.sim.now, tip };
+        this.hooks.tipRead(tip, plan.behind ?? 0, sentAt, this.sim.now);
+        resolve({ ...tip });
+      });
+    });
   }
 
   /**
    * What became of a sell, from its own transaction (the engine asks about a sell of unknown outcome before it sells
-   * again, about a sell left behind by a restart, and for the exact SOL of a sale). The answer comes from a node that
-   * may be some blocks behind the tip (`statusLag`): it sees the chain as it was at the block it has reached, so a
-   * sale (or a failure) put in a block after that is "not found" to it. A "not found" carries the slot of the block
-   * the node has reached (an up-to-date node's is the tip's), as the executor passes on the answer's context slot.
+   * again, about a sell left behind by a restart, and for the exact SOL of a sale). The answer is worked out from the
+   * chain as it is when it arrives (`status` plan: after L ms), by the node that answers it:
+   *  - up to date: it has every block produced (its context slot, its processed bank's, is ahead of a confirmed tip read
+   *    at the same moment) and has confirmed those the cluster has (less `conf` blocks, when it is behind on them);
+   *  - `lag` blocks behind the confirmed tip: it sees the chain as it was at the block it has reached;
+   *  - on a minority fork of 1 to 3 slots: it has not seen the main fork's last `fork` blocks, and the context slot of
+   *    its "not found" is its own fork's, at least the tip's.
+   * A sale (or a failure) in a block the node has confirmed: landed (failed). In a block it has and has not confirmed:
+   * the executor throws "seen in a block, not confirmed yet" (the engine asks again). In a block it has not seen: "not
+   * found", with the node's context slot (none, `noSlot`: an executor that cannot tell how far along the node was).
    */
-  settleSell(exec: Exec, signature: string, _owner: string, _mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' } | { state: 'not_found'; slot: number }> {
+  settleSell(exec: Exec, signature: string, _owner: string, _mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' } | { state: 'not_found'; slot?: number }> {
     if (!exec.alive) return NEVER;
-    if (this.planBal().fail || this.outage()) return Promise.reject(new Error('429 Too Many Requests'));
-    const tip = this.height();
+    const down = this.planBal().fail || this.outage();
     const c = this.signedSells.get(signature);
-    if (!c) return Promise.resolve({ state: 'not_found', slot: this.slotAt(tip) });
-    const lag = this.planStatus();
-    // The newest block the answering node has.
-    const seen = tip - lag;
-    const landed = c.landedAt !== undefined && this.height(c.landedAt) <= seen;
-    const failed = !landed && !!c.chainFailed && c.failedAt !== undefined && this.height(c.failedAt) <= seen;
+    const plan: StatusPlan = c ? this.planStatus() : {};
+    const sentAt = this.sim.now;
+    // The tip the engine was handed just before it sent this read (it reads the tip first, then the status).
+    const tip = exec.lastTip?.at === sentAt ? exec.lastTip.tip : undefined;
+    return new Promise((resolve, reject) => {
+      this.after(plan.L ?? 0, () => {
+        if (!exec.alive) return; // (the engine is gone: nobody is waiting)
+        if ((plan.L ?? 0) >= 4_000) this.counts.slowReads++;
+        if (down) return reject(new Error('429 Too Many Requests'));
+        if (!c) return resolve({ state: 'not_found', slot: this.slotAt(this.processedHeight()) });
+        const answer = this.statusAnswer(c, plan, sentAt);
+        exec.reads.set(signature, { ...answer, ...(tip !== undefined ? { tip } : {}) });
+        this.hooks.sellSettled(c, answer);
+        if (answer.state === 'processed') return reject(new Error('seen in a block, not confirmed yet'));
+        if (answer.state === 'landed') { c.settled = true; return resolve({ state: 'landed', tokens: c.sold!, lamports: c.exact! }); }
+        if (answer.state === 'failed') return resolve({ state: 'failed' });
+        return resolve(answer.slot === undefined ? { state: 'not_found' } : { state: 'not_found', slot: answer.slot });
+      });
+    });
+  }
+
+  /** The answer to a status read of a sell arriving now, from the node its plan names (see settleSell). */
+  private statusAnswer(c: SellCall, plan: StatusPlan, sentAt: number): StatusAnswer {
+    const now = this.sim.now;
+    const main = this.processedHeight(now);
+    const conf = this.height(now);
+    const lag = plan.lag ?? 0;
+    const fork = !lag && plan.fork ? plan.fork : 0;
+    // The newest main block the node has, its context slot, and the newest block it has confirmed.
+    const seen = lag ? conf - lag : main - fork;
+    // (a node on a minority fork: its own newest block is in the slot of now, at or past the main fork's newest)
+    const ctxSlot = lag ? this.slotAt(seen) : fork ? this.slotNow(now) : this.slotAt(main);
+    const confirmed = Math.min(seen, conf - (plan.conf ?? 0));
+    // The block the sale (or its failure) is in, if it has happened by now.
+    const landed = c.landedAt !== undefined && c.landedAt <= now;
+    const h = landed ? c.landedBlock : c.chainFailed && c.failedAt !== undefined && c.failedAt <= now ? c.failedBlock : undefined;
+    const state: StatusAnswer['state'] = h !== undefined && h <= confirmed ? (landed ? 'landed' : 'failed') : h !== undefined && h <= seen ? 'processed' : 'not_found';
+    const slot = state === 'not_found' && !plan.noSlot ? ctxSlot : undefined;
     this.counts.statusReads++;
-    if (lag) {
-      this.counts.laggedReads++;
-      if (!landed && !failed && (c.landedAt !== undefined || c.chainFailed)) this.counts.laggedMisses++;
+    if (this.slowAt(now)) this.counts.readsInSlow++;
+    if (lag) { this.counts.laggedReads++; if (state === 'not_found' && h !== undefined) this.counts.laggedMisses++; }
+    if (fork) { this.counts.forkReads++; if (state === 'not_found' && h !== undefined) this.counts.forkMisses++; }
+    if (plan.conf) this.counts.confBehindReads++;
+    if (state === 'processed') this.counts.processedReads++;
+    if (state === 'not_found' && plan.noSlot) this.counts.slotlessReads++;
+    // The model's own promise, which the engine's slot check relies on: a node that is not on a minority fork and says
+    // "not found" at a slot has seen every block up to that slot.
+    if (state === 'not_found' && !fork && h !== undefined && slot !== undefined && slot >= this.slotAt(h)) {
+      this.hooks.problem('E4', 'fake-chain-not-found-from-a-node-past-the-sale', `sell#${c.id}: "not found" at slot ${slot} from a node ${lag} blocks behind, while it is in the block at height ${h} (slot ${this.slotAt(h)})`);
     }
-    const answer: StatusAnswer = { state: landed ? 'landed' : failed ? 'failed' : 'not_found', ...(landed || failed ? {} : { slot: this.slotAt(seen) }), lag, at: this.sim.now };
-    exec.reads.set(signature, { ...answer, ...(exec.lastTip?.at === this.sim.now ? { tip: exec.lastTip.tip } : {}) });
-    if (landed) c.settled = true;
-    // (the engine gives up on a sell of unknown outcome that is still not found 120 s after it was sent)
-    this.hooks.sellSettled(c, answer, answer.state !== 'not_found' || this.sim.now - c.t0 > UNKNOWN_GIVES_UP_MS);
-    if (landed) return Promise.resolve({ state: 'landed', tokens: c.sold!, lamports: c.exact! });
-    if (failed) return Promise.resolve({ state: 'failed' });
-    return Promise.resolve({ state: 'not_found', slot: answer.slot! });
+    return { state, ...(slot !== undefined ? { slot } : {}), lag, ...(fork ? { fork } : {}), ...(plan.conf ? { conf: plan.conf } : {}), seen, at: now, sentAt };
   }
 
   sell(exec: Exec, req: TradeRequest & { tokens: bigint }): Promise<FillResult> {
@@ -647,17 +861,22 @@ export class Market {
       const unknownLost = live && plan.unsure === 'lost';
       // A real sell whose plan says `late` has its fate decided near the end of its blockhash's life, instead of after
       // L1: one that lands goes into the block its plan names (its last valid height −3 to +1, about a minute after it
-      // was signed); one that never lands is told "expired before landing" once the chain is past the last block it
-      // could land in (+2 to +4), as the executor tells it.
+      // was signed, nearly four in a slow period); one that never lands is told "expired before landing" once the chain
+      // is past the last block it could land in (when the block +2 to +4 is produced), as the executor tells it.
       const lands = !unknownLost && (!plan.fail || !!plan.ghost);
+      const errored = !lands && !unknownLost && !!plan.fail && /errored/.test(plan.fail);
       const expires = !lands && !unknownLost && plan.fail === EXPIRED;
       const late = live && (lands || expires) && plan.late !== undefined && call.lastValid !== undefined ? (lands ? Math.min(Math.max(plan.late, -3), 1) : Math.max(plan.late, 2)) : undefined;
-      const landIn = late !== undefined ? Math.max(0, (call.lastValid! + late) * BLOCK_MS + Math.min(Math.max(plan.lateAt ?? 0, 0), BLOCK_MS - 1) - this.sim.now) : plan.L1;
-      this.after(landIn, () => {
+      // A real sell that goes into a block (it lands, or fails on chain) does so L1 after it was sent, in the block being
+      // built then (when that slot is skipped, the next one: on a slow chain it waits), or in the block its plan names.
+      const at = late !== undefined ? this.timeOf(call.lastValid! + late)
+        : live && (lands || errored) && !this.faults.instant ? this.landingAt(this.sim.now + plan.L1)
+          : this.sim.now + plan.L1;
+      this.after(Math.max(0, at - this.sim.now), () => {
         if (unknownLost) return this.after(plan.L2, () => deliver({ ok: false, error: UNKNOWN, uncertain: true }));
         if (plan.fail && !plan.ghost) {
           call.chainFailed = /errored/.test(plan.fail);
-          if (call.chainFailed) call.failedAt = this.sim.now;
+          if (call.chainFailed) { call.failedAt = this.sim.now; call.failedBlock = this.processedHeight(); }
           return deliver({ ok: false, error: plan.fail });
         }
         const part = (t: bigint) => {
@@ -676,9 +895,10 @@ export class Market {
           return deliver({ ok: true, signature: call.signature!, tokens: sold, lamports: net, simulated: true, feeLamports: fee, note: 'test fill' });
         }
         const heldNow = this.tokens(owner, mint);
-        if (tokens > heldNow) { call.chainFailed = true; call.failedAt = this.sim.now; return deliver({ ok: false, error: 'sent but did not land: transaction errored: {"InstructionError":[2,{"Custom":1}]}' }); }
+        const failsHere = () => { call.chainFailed = true; call.failedAt = this.sim.now; call.failedBlock = this.processedHeight(); };
+        if (tokens > heldNow) { failsHere(); return deliver({ ok: false, error: 'sent but did not land: transaction errored: {"InstructionError":[2,{"Custom":1}]}' }); }
         const have = this.sol.get(owner) ?? 0n;
-        if (have < txc) { call.chainFailed = true; call.failedAt = this.sim.now; return deliver({ ok: false, error: 'sent but did not land: transaction errored: Transfer: insufficient lamports (cannot pay the fee)' }); }
+        if (have < txc) { failsHere(); return deliver({ ok: false, error: 'sent but did not land: transaction errored: Transfer: insufficient lamports (cannot pay the fee)' }); }
         const sold = part(tokens);
         const gross = this.value(mint, sold);
         const fee = (gross * bps) / 10_000n;
@@ -688,9 +908,10 @@ export class Market {
         this.setTokens(owner, mint, heldNow - sold);
         this.sol.set(owner, have + net);
         const est = sold === tokens ? est0 : (est0 * sold) / tokens;
-        Object.assign(call, { sold, est, exact: net, fee, landedAt: this.sim.now });
-        if (call.lastValid !== undefined && this.height() > call.lastValid + 1) this.hooks.problem('E4', 'fake-chain-sale-landed-after-its-blockhash', `sell#${call.id} landed at height ${this.height()}, past ${call.lastValid + 1}, the last block its blockhash allows`);
-        if (call.lastValid !== undefined && this.height() >= call.lastValid - 3) this.counts.lateLandings++;
+        const block = this.processedHeight();
+        Object.assign(call, { sold, est, exact: net, fee, landedAt: this.sim.now, landedBlock: block });
+        if (call.lastValid !== undefined && block > call.lastValid + 1) this.hooks.problem('E4', 'fake-chain-sale-landed-after-its-blockhash', `sell#${call.id} landed in the block at height ${block}, past ${call.lastValid + 1}, the last block its blockhash allows`);
+        if (call.lastValid !== undefined && block >= call.lastValid - 3) this.counts.lateLandings++;
         this.bySig.set(call.signature!, call);
         this.hooks.sellLanded(call);
         if (plan.fail && plan.ghost) {

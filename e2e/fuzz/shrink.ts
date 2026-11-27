@@ -4,7 +4,7 @@
 // took) are written into it, so nothing is random any more. Then, as long as the same violation still shows:
 // cut the steps after it, turn actions into plain clock ticks, make market outcomes ordinary, drop ticks, drop
 // copies, users and rules.
-import { CALM_OP, type OpPlan, type Tape } from './market.js';
+import { CALM_OP, type OpPlan, type StatusPlan, type Tape, type TipPlan } from './market.js';
 import { runScenario, type RunResult } from './run.js';
 import type { Scenario, Step } from './scenario.js';
 
@@ -12,6 +12,11 @@ export interface Shrunk { scenario: Scenario; result: RunResult; runs: number; r
 
 const clone = <T>(v: T): T => structuredClone(v);
 const isCalm = (p: OpPlan | undefined) => !p || (!p.fail && !p.part && !p.ghost && !p.refineNull && !p.quoted && p.late === undefined && p.L1 === CALM_OP.L1 && p.L2 === CALM_OP.L2 && p.L3 === CALM_OP.L3);
+/** A status read's plan as an object (old tapes hold a number: how many blocks behind). */
+const statusPlan = (s: StatusPlan | number | null | undefined): StatusPlan | null => (typeof s === 'number' ? { lag: s } : s ?? null);
+/** What a status read's or a tip read's plan costs a reader: the node's oddities more than the time it took. */
+const statusCost = (s: StatusPlan | number | null | undefined) => { const p = statusPlan(s); return p ? (p.lag ? 50 : 0) + (p.fork ? 50 : 0) + (p.conf ? 30 : 0) + (p.noSlot ? 30 : 0) + (p.L ? 5 : 0) : 0; };
+const tipCost = (t: TipPlan | null | undefined) => (t ? (t.behind ? 40 : 0) + (t.L ? 5 : 0) : 0);
 
 function opCost(p: OpPlan | undefined): number {
   if (!p) return 0;
@@ -22,9 +27,9 @@ const dtCost = (dt: number) => (dt % 1_000 === 0 ? 0 : dt % 500 === 0 ? 1 : dt %
 /** Smaller is simpler to read: fewer things happening, fewer odd market outcomes, fewer and plainer rules. */
 function size(sc: Scenario): number {
   const tape = sc.tape;
-  const odd = tape ? tape.buy.reduce((a, p) => a + opCost(p), 0) + tape.sell.reduce((a, p) => a + opCost(p), 0) + tape.quote.filter((q) => q && (q.fail || q.L !== 50)).length * 100 + tape.bal.filter((b) => b && (b.fail || b.L)).length * 100 + (tape.db ?? []).filter(Boolean).length * 150 + (tape.status ?? []).filter(Boolean).length * 50 : 0;
-  // (a window of a full disk costs more the longer it lasts)
-  const full = (sc.db?.full ?? []).reduce((a, w) => a + 300 + Math.round(w.ms / 100), 0);
+  const odd = tape ? tape.buy.reduce((a, p) => a + opCost(p), 0) + tape.sell.reduce((a, p) => a + opCost(p), 0) + tape.quote.filter((q) => q && (q.fail || q.L !== 50)).length * 100 + tape.bal.filter((b) => b && (b.fail || b.L)).length * 100 + (tape.db ?? []).filter(Boolean).length * 150 + (tape.status ?? []).reduce<number>((a, s) => a + statusCost(s), 0) + (tape.tip ?? []).reduce<number>((a, t) => a + tipCost(t), 0) : 0;
+  // (a window of a full disk, or a slow period of the chain, costs more the longer it lasts)
+  const full = (sc.db?.full ?? []).reduce((a, w) => a + 300 + Math.round(w.ms / 100), 0) + (sc.slow ?? []).reduce((a, w) => a + 300 + Math.round(w.ms / 1_000), 0);
   const rules = sc.copies.reduce((a, c) => a + JSON.stringify(c.input).length, 0);
   const knobs = (sc.priceMs !== 0 ? 5 : 0) + (sc.retry !== 'prod' ? 5 : 0) + (sc.maxSolPerBuy !== 30 ? 5 : 0) + (sc.overAsk !== 'strict' ? 5 : 0) + sc.mints.filter((m) => m !== 1_000_000).length * 5
     + sc.users.filter((u) => u.feeBps !== 0).length * 20 + (sc.finale.dump ? 200 : 0) + (sc.finale.leadersExit ? 200 : 0);
@@ -106,18 +111,58 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
       for (let i = from; i < to; i++) { const b = sc.tape!.bal[i]; if (b && (b.fail || b.L)) { sc.tape!.bal[i] = null; changed = true; } }
       return changed;
     });
-    // Status reads from a node behind the tip (lag): as few as still show it, then each as little behind as it can be.
-    await chunks(() => best.tape!.status?.length ?? 0, (sc, from, to) => {
-      let changed = false;
-      for (let i = from; i < to; i++) if (sc.tape!.status![i]) { sc.tape!.status![i] = null; changed = true; }
-      return changed;
-    });
+    // Reads of the chain (a tip read, a status read of a sell): as few odd ones as still show it (a hole: answered at
+    // once by an up-to-date node), then each as plain as it can be (no node oddity it does not need, as little behind as
+    // it can be, no time taken).
+    for (const kind of ['status', 'tip'] as const) {
+      await chunks(() => best.tape![kind]?.length ?? 0, (sc, from, to) => {
+        let changed = false;
+        for (let i = from; i < to; i++) if (sc.tape![kind]![i]) { sc.tape![kind]![i] = null; changed = true; }
+        return changed;
+      });
+    }
     for (let i = 0; i < (best.tape!.status?.length ?? 0) && runs < budget; i++) {
-      for (let lag = best.tape!.status![i] ?? 0; lag > 1 && runs < budget; ) {
+      const cur = statusPlan(best.tape!.status![i]);
+      if (!cur) continue;
+      for (const key of ['fork', 'conf', 'noSlot', 'L'] as const) {
+        const now = statusPlan(best.tape!.status![i]);
+        if (!now?.[key] || runs >= budget) continue;
         const cand = clone(best);
-        cand.tape!.status![i] = Math.ceil(lag / 2);
+        const { [key]: _gone, ...rest } = now;
+        cand.tape!.status![i] = rest;
+        await attempt(cand);
+      }
+      for (let lag = statusPlan(best.tape!.status![i])?.lag ?? 0; lag > 1 && runs < budget; ) {
+        const cand = clone(best);
+        cand.tape!.status![i] = { ...statusPlan(best.tape!.status![i])!, lag: Math.ceil(lag / 2) };
         if (!(await attempt(cand))) break;
-        lag = best.tape!.status![i] ?? 0;
+        lag = statusPlan(best.tape!.status![i])?.lag ?? 0;
+      }
+    }
+    for (let i = 0; i < (best.tape!.tip?.length ?? 0) && runs < budget; i++) {
+      for (const key of ['behind', 'L'] as const) {
+        const now = best.tape!.tip![i];
+        if (!now?.[key] || runs >= budget) continue;
+        const cand = clone(best);
+        const { [key]: _gone, ...rest } = now;
+        cand.tape!.tip![i] = rest;
+        await attempt(cand);
+      }
+    }
+    // Slow periods of the chain: fewer, then shorter.
+    for (let i = (best.slow?.length ?? 0) - 1; i >= 0 && runs < budget; i--) {
+      const cand = clone(best);
+      cand.slow!.splice(i, 1);
+      if (!cand.slow!.length) delete cand.slow;
+      await attempt(cand);
+    }
+    for (let i = 0; i < (best.slow?.length ?? 0) && runs < budget; i++) {
+      for (;;) {
+        const w = best.slow![i]!;
+        if (w.ms <= 20_000) break;
+        const cand = clone(best);
+        cand.slow![i] = { ...w, ms: Math.round(w.ms / 2) };
+        if (!(await attempt(cand))) break;
       }
     }
     // Database writes that fail (dbfault): as few as still show it.
@@ -237,16 +282,24 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
   return { scenario: best, result: bestRes, runs, reproduced: true };
 }
 
-export function tapeSummary(t: Tape | undefined, db?: Scenario['db']): string {
+export function tapeSummary(t: Tape | undefined, db?: Scenario['db'], slow?: Scenario['slow']): string {
   if (!t) return 'random';
   const at = (p: OpPlan) => `at its last valid height ${p.late! < 0 ? '−' : '+'}${Math.abs(p.late!)}`;
   const lands = (p: OpPlan) => (p.late !== undefined ? `lands LATE, ${at(p)}` : `lands after ${p.L1} ms`);
   const odd = (list: OpPlan[]) => list.map((p, i) => (isCalm(p) ? null : `#${i + 1}: ${p.fail ? `fails (${p.fail})${p.ghost ? ` but ${lands(p)}` : p.late !== undefined ? `, told ${at(p)}` : ''}` : `${lands(p)}, engine told ${p.L2} ms later${p.part ? `, fills ${p.part * 100}%` : ''}${p.quoted ? `, handed back with the quote's coin count (the wallet got ${p.quoted}x of it)` : ''}${p.refineNull ? ', exact SOL never read' : `, exact SOL ${p.L3} ms after that`}`}`)).filter(Boolean);
   const out = [`buys: ${odd(t.buy).join('; ') || 'all ordinary'}`, `sells: ${odd(t.sell).join('; ') || 'all ordinary'}`];
-  const behind = (t.status ?? []).map((lag, i) => (lag ? `#${i + 1}: ${lag} blocks behind` : null)).filter(Boolean);
-  if (behind.length) out.push(`status reads from a node behind the tip: ${behind.join('; ')}`);
+  const ms = (L?: number) => (L ? `${L >= 1_000 ? `${(L / 1_000).toFixed(1)} s` : `${L} ms`}` : 'at once');
+  const status = (t.status ?? []).map((s, i) => {
+    const p = statusPlan(s);
+    if (!p || (!p.lag && !p.fork && !p.conf && !p.noSlot && (p.L ?? 0) < 1_000)) return null;
+    return `#${i + 1}: ${[ms(p.L), p.lag ? `${p.lag} blocks behind` : '', p.fork ? `on a fork, the main fork's last ${p.fork} unseen` : '', p.conf ? `${p.conf} behind on confirmations` : '', p.noSlot ? 'no slot' : ''].filter(Boolean).join(', ')}`;
+  }).filter(Boolean);
+  if (status.length) out.push(`status reads (odd ones): ${status.join('; ')}`);
+  const tips = (t.tip ?? []).map((p, i) => (p && (p.behind || (p.L ?? 0) >= 1_000) ? `#${i + 1}: ${[ms(p.L), p.behind ? `${p.behind} blocks behind` : ''].filter(Boolean).join(', ')}` : null)).filter(Boolean);
+  if (tips.length) out.push(`tip reads (odd ones): ${tips.join('; ')}`);
   const writes = (t.db ?? []).map((d, i) => (d ? `#${i + 1} (${d.m ?? '?'}): ${d.err === 'io' ? 'disk I/O error' : 'database or disk is full'}` : null)).filter(Boolean);
   if (writes.length) out.push(`database writes that fail: ${writes.join('; ')}`);
   if (db?.full?.length) out.push(`disk full: ${db.full.map((w) => `+${(w.at / 1000).toFixed(3)}s for ${w.ms / 1000}s`).join('; ')}`);
+  if (slow?.length) out.push(`slow chain: ${slow.map((w) => `+${(w.at / 1000).toFixed(3)}s for ${Math.round(w.ms / 1000)}s, a block every ${w.blockMs} ms`).join('; ')}`);
   return out.join(' | ');
 }
