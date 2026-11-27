@@ -80,13 +80,15 @@ async function extras(env, parts) {
     book.staged = true;
     await P.route('**/api/**', (route) => (mode === 'refused' ? route.abort('connectionrefused') : mode === '502' ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html><body>502 Bad Gateway</body></html>' }) : route.continue()));
     try {
+      // The page says nothing about the first two failed refreshes (an update's restart takes a second or two): its
+      // message comes with the third, 6 to 9 s in.
       await ui.hideToast(P);
-      const t1 = await ui.toast(P, 9000);
+      const t1 = await ui.toast(P, 12_000);
       book.ok('while the server cannot be reached the page stays on the dashboard (no key form)', (await P.locator('.topbar').count()) === 1 && (await P.locator('.auth').count()) === 0);
       book.ok('while the server cannot be reached the page says so in words a person understands', !!t1 && !/Failed to fetch|NetworkError|TypeError|Load failed/.test(t1.text), t1);
       mode = '502';
       await ui.hideToast(P);
-      const t2 = await ui.toast(P, 9000);
+      const t2 = await ui.toast(P, 12_000);
       book.ok('while the proxy answers "502" (the app is restarting) the page says so in words a person understands', !!t2 && !/request failed \(502\)/.test(t2.text), t2);
       mode = 'refused';
       await P.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);

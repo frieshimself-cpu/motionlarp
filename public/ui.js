@@ -16,9 +16,8 @@ const toastEl = $('#toast');
 /** Every string that came from a user or the server goes through this before it reaches innerHTML. */
 export const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const short = (a) => (a ? `${a.slice(0, 4)}…${a.slice(-4)}` : '');
-export const fmtSol = (n, d = 4) => (n === null || n === undefined ? '—' : `${Number(Number(n).toFixed(Math.abs(n) >= 100 ? 2 : d))}`);
-export const signed = (n, d = 4) => (n > 0 ? '+' : n < 0 ? '−' : '') + fmtSol(Math.abs(n), d);
-export const pct = (n) => (n === null || n === undefined ? '—' : `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(n).toFixed(1)}%`);
+// How amounts are printed lives in figures.js (no page access there: the tests load it as it is).
+export { fmtSol, signed, pct } from './figures.js';
 export const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '');
 export const solscanTx = (s) => `https://solscan.io/tx/${encodeURIComponent(s)}`;
 export const solscanAcct = (a) => `https://solscan.io/account/${encodeURIComponent(a)}`;
@@ -39,17 +38,31 @@ export function hue(text) {
   return HUES[h % HUES.length];
 }
 
+/** What a person is told when the site cannot be reached at all. */
+export const UNREACHABLE = 'the site cannot be reached right now (an update restarts it for a few seconds, or the connection dropped): try again in a moment';
+
 export async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: { 'content-type': 'application/json', 'x-requested-with': 'motionlarp' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    credentials: 'same-origin',
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'motionlarp' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: 'same-origin',
+    });
+  } catch {
+    // The browser's own words for "no answer at all" ("Failed to fetch", "NetworkError when attempting to fetch
+    // resource", "Load failed") told a person nothing.
+    throw Object.assign(new Error(UNREACHABLE), { status: 0, unreachable: true });
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || `request failed (${res.status})`);
+    // The proxy in front of the app answers 502-504 while the app restarts for an update, with none of our words:
+    // "request failed (502)" said nothing either.
+    const gone = !data.error && res.status >= 502 && res.status <= 504;
+    const err = new Error(data.error || (gone ? UNREACHABLE : `request failed (${res.status})`));
     err.status = res.status;
+    if (gone) err.unreachable = true;
     throw err;
   }
   return data;

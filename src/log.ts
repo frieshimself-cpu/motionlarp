@@ -90,6 +90,9 @@ export function safeErrorMessage(err: unknown, max = 200): string {
 
 /** Short, plain-words version of an error for the user's feed. */
 export function friendlyError(text: string): string {
+  // A site whose owner has not set its Helius link yet: test trades need it too (the coin is priced on the chain). The
+  // setting's own name meant nothing to the person who pressed Sell now.
+  if (/RPC_URL is not configured/.test(text)) return 'no connection to Solana: the site\'s link to it is not set up yet (the owner sets it on the server), so nothing can be traded';
   if (/429|too many requests|rate limit/i.test(text)) return 'the Solana RPC is busy / rate limiting (a paid RPC fixes this)';
   if (/token-quoted|non-SOL quoted/i.test(text)) return 'this coin trades against another token (e.g. USDC), not SOL — not supported';
   if (/insufficient lamports|insufficient funds/i.test(text)) return 'not enough SOL in the wallet';
