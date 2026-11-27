@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 370 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 390 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -304,7 +304,38 @@ goes without the tip before a smaller route, a smaller route only when it pays 9
 our transfers (an exit is never blocked by the site's own fee or tip); every price check gets a fresh price; a coin
 with no route is asked again only every 30 s; a platform fee too small to open an emptied fee wallet is left out.
 
-**Known, not changed yet** (from the reviews; none blocks the Scharo preset): a server crash in the very second a sell
+**After an independent review of those fixes** (three reviewers: coins and SOL, things that can hang, regressions;
+each finding checked by two skeptics), each with a test that fails on the code before: a sell keeps its coins
+reserved until it is booked (a booking in between took them off twice and could close a position with coins in the
+wallet); a trade whose confirmation was never told is settled from its own transaction, never credited with the
+wallet's whole balance change; "landed but not readable yet" is asked again, not taken as "never landed"; a buy signed
+while its row said test (Live switched on meanwhile) is live and is settled after a restart; a full exit that fires
+while every coin is out in a timed step stays owed; the last step is done only when the position is empty, and checks
+its position is still open after reading the wallet (it could sell the next position's coins). After all of it:
+**5,000 randomized runs inside the executor's contract, no violation**; every saved case passes.
+
+**Running unattended** (from the operations review): a landed buy is handed back within a second even when the reads
+are slow (a stalled read held the whole 2/4/6 s exit); positions with no stop loss or dead-coin rule are priced every
+30 s instead of every 2 s; the auto-updater waits for the app to answer after a rebuild, rolls back a version whose
+build fails or whose app does not answer, retries a failed build after half an hour (it never retried), and the status
+shows the running commit (the health check was run end to end against a running copy of the site); container logs
+are capped, old images pruned, seen trades older than a day forgotten and each user's feed kept to 5,000 lines;
+indexes for the admin page; History's heading and each copy's line count every closed position (they stopped at 200 /
+1,000).
+
+**The every-button test** (`e2e/buttons`: every button and form of the site and the admin page in a real browser,
+desktop and phone; 486 and 482 checks passed, no page errors): fixed from it, each checked in a browser: only failed
+logins count against the login limit (the right key from several devices was locked out); a user whose key is revoked
+cannot be enabled; the page no longer waits for Google's font server; nothing is wider than a phone screen; a balance
+that could not be read shows "—"; the 3-second refresh keeps scroll positions and selected text; an empty wallet box
+is refused. Not changed (cosmetic or owner-only): the owner's Users table adds test profit to real; dates for viewers
+at UTC+12 and beyond; very small numbers printed as 5e-7; two minus signs on a History line.
+
+**Known, not changed yet** (from the reviews; none blocks the Scharo preset): a server restart while a "same %" mirror
+sell is waiting for its retry, or while a sell kept during an unconfirmed buy is waiting, loses that sell (both held
+in memory only; a full exit is still caught by the 30 s safety net, and the Scharo preset's timed exit sells the rest);
+a timed step sizes itself from the quote's coin count when the exact count arrives late (it sells a little less, the
+later steps sell the rest); a server crash in the very second a sell
 is out loses that sale's answer: its SOL is not booked and the step sells once more after the restart (the coins stay
 right: the wallet corrects the books; the fix is to save each sell's signature before it is sent, as buys already do); a stop loss is measured against the
 buy cost with every fee in it, so a level tighter than the entry costs fires at once (the preset has no stop
