@@ -31,6 +31,9 @@ export interface Position {
   /** The platform fee our buy carried, written with its signature when it was signed (a buy settled later from its own
    *  transaction is booked with it); null for buys written down by earlier versions. */
   buyFeeLamports: bigint | null;
+  /** The block height up to which the buy's blockhash is valid (written when it is signed): once the chain is past it,
+   *  a buy not found never can land. Null for a buy signed before 27 Nov 2026 (evening) or never signed. */
+  buyLastValid: number | null;
   /** A full exit (their exit, a 100 % stop, dead coin, Sell now's rest) that is owed and not done yet: kept in the
    *  database so a restart cannot forget it (its retry was held in memory only). */
   exitOwed: { reason: SellReason; tag?: string; stage?: number } | null;
@@ -153,7 +156,8 @@ CREATE TABLE IF NOT EXISTS positions (
   decimals INTEGER NOT NULL DEFAULT 6,
   exit_owed TEXT,
   owed_sells TEXT,
-  buy_fee_lamports INTEGER
+  buy_fee_lamports INTEGER,
+  buy_last_valid INTEGER
 );
 CREATE INDEX IF NOT EXISTS positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS positions_copy_mint ON positions(copy_id, mint);
@@ -245,6 +249,7 @@ function toPosition(r: Row): Position {
     leaderSig: String(r.leader_sig),
     buySig: r.buy_sig === null ? null : String(r.buy_sig),
     buyFeeLamports: r.buy_fee_lamports === null || r.buy_fee_lamports === undefined ? null : big(r.buy_fee_lamports),
+    buyLastValid: r.buy_last_valid === null || r.buy_last_valid === undefined ? null : num(r.buy_last_valid),
     exitOwed: r.exit_owed === null || r.exit_owed === undefined ? null : (JSON.parse(String(r.exit_owed)) as { reason: SellReason; tag?: string; stage?: number }),
     owedSells: r.owed_sells === null || r.owed_sells === undefined ? [] : (JSON.parse(String(r.owed_sells)) as OwedSell[]),
     firedTimed: JSON.parse(String(r.fired_timed)) as number[],
@@ -267,11 +272,11 @@ function toFill(r: Row): Fill {
   };
 }
 
-export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'buyFeeLamports' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed' | 'owedSells'>>;
+export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'buyFeeLamports' | 'buyLastValid' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed' | 'owedSells'>>;
 
 const COLUMN: Record<keyof PositionPatch, string> = {
   mode: 'mode', status: 'status', tokensBought: 'tokens_bought', tokensHeld: 'tokens_held', costLamports: 'cost_lamports', proceedsLamports: 'proceeds_lamports',
-  openedAt: 'opened_at', closedAt: 'closed_at', buySig: 'buy_sig', buyFeeLamports: 'buy_fee_lamports', firedTimed: 'fired_timed', firedStop: 'fired_stop', deadFired: 'dead_fired',
+  openedAt: 'opened_at', closedAt: 'closed_at', buySig: 'buy_sig', buyFeeLamports: 'buy_fee_lamports', buyLastValid: 'buy_last_valid', firedTimed: 'fired_timed', firedStop: 'fired_stop', deadFired: 'dead_fired',
   refValueLamports: 'ref_value', lastChangeAt: 'last_change_at', exitOwed: 'exit_owed', owedSells: 'owed_sells',
 };
 
@@ -303,6 +308,7 @@ export class Store {
     if (!posCols.includes('exit_owed')) this.db.exec('ALTER TABLE positions ADD COLUMN exit_owed TEXT');
     if (!posCols.includes('owed_sells')) this.db.exec('ALTER TABLE positions ADD COLUMN owed_sells TEXT');
     if (!posCols.includes('buy_fee_lamports')) this.db.exec('ALTER TABLE positions ADD COLUMN buy_fee_lamports INTEGER');
+    if (!posCols.includes('buy_last_valid')) this.db.exec('ALTER TABLE positions ADD COLUMN buy_last_valid INTEGER');
     // (sells_out, added 27 Nov 2026, is created by SCHEMA above in a database that does not have it yet; a table
     // made before its last three columns gets them)
     const outCols = this.all('PRAGMA table_info(sells_out)').map((r) => String(r.name));

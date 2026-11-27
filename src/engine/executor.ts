@@ -107,7 +107,7 @@ export interface Executor {
   warm?(mint: string): Promise<void>;
   /** Optional: what became of a buy, from its own transaction (restore after a crash or an unknown outcome). Throws
    *  when the RPC cannot be read. */
-  settleBuy?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }>;
+  settleBuy?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' } | { state: 'not_found'; slot?: number }>;
   /** Optional: what became of a sell whose outcome was unknown, from its own transaction: landed (tokens sold, SOL
    *  received net of every fee), failed, or not found (yet; `slot`: how far along the node that said so was, when
    *  known). Throws when the RPC cannot be read. */
@@ -311,7 +311,7 @@ export class ChainExecutor implements Executor {
   }
 
   /** What became of a buy, from its own transaction: landed (exact tokens and SOL), failed, or not found (yet). */
-  async settleBuy(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
+  async settleBuy(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' } | { state: 'not_found'; slot?: number }> {
     const r = await this.settled(signature, owner, mint);
     if (r.state !== 'landed') return r;
     if (r.tokens <= 0n) return { state: 'failed' };

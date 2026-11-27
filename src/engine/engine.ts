@@ -62,9 +62,16 @@ interface Booking { closed: boolean; partial: boolean; fillId: number; owesRest:
  *  position as it was before (for its feed line). */
 interface BagBooking { fillId: number; closed: boolean; lamports: bigint; p: Position }
 
-/** A sell written down by an earlier process and not found on chain this long after it was sent can no longer land
- *  (its blockhash lives about 60 to 90 s): it is dropped and its rule may sell again. */
+/** A sell written down by an earlier process and not found on chain this long after it was sent is dropped (and its rule
+ *  may sell again) when the chain's tip or the sell's last valid height cannot be read: with both, the chain says when
+ *  (see Engine.notLanding). */
 const SELL_OUT_EXPIRES_MS = 180_000;
+/** The same for a sell of this process whose outcome nobody could tell, and for a buy of unknown outcome. */
+const UNKNOWN_SELL_EXPIRES_MS = 120_000;
+const UNKNOWN_BUY_EXPIRES_MS = 90_000;
+/** Whatever the chain's tip says, a trade not found this long after it was sent is taken as never landed: a node whose
+ *  tip has stopped moving must not hold a position for good. */
+const NOT_FOUND_GIVE_UP_MS = 600_000;
 
 /** What a sell answers when the server is shutting down (src/server.ts stops the engine, then waits and exits). */
 const STOPPING = 'the server is restarting';
@@ -427,7 +434,7 @@ export class Engine {
       }
       let signedAt = 0;
       // (with the platform fee it carries: a buy settled later from its own transaction is booked with it)
-      const onSigned = (sig: string, info?: SignedInfo) => { signedAt = Date.now(); store.updatePosition(id, { buySig: sig, mode: 'live', ...(info ? { buyFeeLamports: info.feeLamports } : {}) }); };
+      const onSigned = (sig: string, info?: SignedInfo) => { signedAt = Date.now(); store.updatePosition(id, { buySig: sig, mode: 'live', ...(info ? { buyFeeLamports: info.feeLamports, buyLastValid: info.lastValidBlockHeight } : {}) }); };
       const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: true, feeBps, onSigned, ...(t.curve ? { curve: t.curve } : {}), ...(t.heardAt ? { heardAt: t.heardAt } : {}) });
       // How long after their trade was heard ours went out (signed and handed to the senders).
       const copyMs = signedAt && t.heardAt ? signedAt - t.heardAt : null;
@@ -576,11 +583,13 @@ export class Engine {
     const longest = this.deps.settleRetryMs ?? 15_000;
     for (let i = 0; ; i++) {
       try {
+        // The chain's tip first, then the sell's status, as settleOrphans reads them (see notLanding).
+        const tip = signed ? await this.chainTip() : null;
         const r = await executor.settleSell(signature, owner, mint);
         // (booked with the platform fee it carried, as one answered at once is)
         if (r.state === 'landed') return { ok: true, signature, tokens: r.tokens, lamports: r.lamports, simulated: false, confirmedAt: this.now(), note: 'outcome read from its own transaction', ...carried(signed) };
         if (r.state === 'failed') return { ok: false, error: `${error} — it did not land` };
-        if (this.now() - sentAt > 120_000) return { ok: false, error: `${error} — it never landed` };
+        if (this.notLanding(signed?.lastValidBlockHeight, tip, r.slot, sentAt, UNKNOWN_SELL_EXPIRES_MS)) return { ok: false, error: `${error} — it never landed` };
       } catch {
         // still no answer from the RPC
       }
@@ -1523,13 +1532,27 @@ export class Engine {
           // (an error while booking it is undone whole and leaves it for the next pass; the other sells of the pass
           // and the rest of restore() go on)
           await this.bookOrphan(o, owner, r).catch((err) => log.warn('a sale from before a restart could not be booked yet', { signature: o.signature, error: safeErrorMessage(err) }));
-        } else if (r.state === 'failed' || (tip !== null && o.lastValid !== undefined && neverLands(o.lastValid, tip, r.slot)) || this.now() - o.sentAt > SELL_OUT_EXPIRES_MS) {
+        } else if (r.state === 'failed' || this.notLanding(o.lastValid, tip, r.slot, o.sentAt, SELL_OUT_EXPIRES_MS)) {
           this.dropOrphan(o, true);
         }
       } finally {
         this.settlingOrphans.delete(o.signature);
       }
     }
+  }
+
+  /**
+   * A trade not found that is taken as never landed. With the chain's tip (read before the trade's status) and the
+   * trade's last valid height, the chain says when (neverLands): on a slow chain a trade can still land minutes after it
+   * was sent (a sell taken as never landed after a fixed two or three minutes was sold again and its SOL never booked; a
+   * buy marked failed after 90 s left its coins unsold), and on a quick one it is known seconds after its last block.
+   * Ten minutes at the latest, should the tip never move. Without the tip or the height (an executor that cannot tell
+   * them, a row from an earlier version, a tip read that failed), once it is `fallbackMs` old.
+   */
+  private notLanding(lastValid: number | null | undefined, tip: { height: number; slot?: number } | null, statusSlot: number | undefined, since: number, fallbackMs: number): boolean {
+    const age = this.now() - since;
+    if (lastValid !== null && lastValid !== undefined && tip !== null) return neverLands(lastValid, tip, statusSlot) || age > NOT_FOUND_GIVE_UP_MS;
+    return age > fallbackMs;
   }
 
   /** The chain's height now, with the slot it was read at when the executor tells it; null when it cannot be read. */
@@ -1671,7 +1694,9 @@ export class Engine {
       if (!executor.isLive({ live: true, exit: true })) continue; // no connection to read it now: settled later
       try {
         if (executor.settleBuy) {
-          // Its own transaction says what happened: exact coins and cost, or that it failed.
+          // Its own transaction says what happened: exact coins and cost, or that it failed. (The chain's tip is read
+          // first: see notLanding.)
+          const tip = p.buyLastValid !== null ? await this.chainTip() : null;
           const r = await executor.settleBuy(p.buySig, wallet.publicKey.toBase58(), p.mint);
           if (r.state === 'landed') {
             // (one of this process whose booking failed: from its own confirmation, so its timed sells keep their times)
@@ -1687,8 +1712,8 @@ export class Engine {
             const late = ours !== undefined ? 'written down a few seconds late (the server could not save it at once); its timed sells count from the buy' : 'confirmed late (its exit starts now)';
             this.quietly('the feed line of a buy', () => store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'buy', message: `Bought ${fmtSol(r.lamports)} of ${label} — ${late}`, mint: p.mint, signature: sig }));
             this.firePending(p.id);
-          } else if (r.state === 'failed' || this.now() - p.openedAt > 90_000) {
-            // Failed on chain, or not found long after its blockhash ran out: it never landed.
+          } else if (r.state === 'failed' || this.notLanding(p.buyLastValid, tip, r.slot, p.openedAt, UNKNOWN_BUY_EXPIRES_MS)) {
+            // Failed on chain, or not found once it no longer can land: it never landed.
             this.unbookedBuys.delete(p.id);
             this.pendingMirror.delete(p.id);
             store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
