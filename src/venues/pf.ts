@@ -1,16 +1,17 @@
 // ported from velo/src/venues/pf.ts
-// Picks bonding curve vs PumpSwap for a mint (a completed curve trades on its canonical PumpSwap pool).
+// Picks bonding curve vs PumpSwap for a pump.fun coin (a completed curve trades on its canonical PumpSwap pool).
+// Every other coin is not resolved here: the executor sends it through Jupiter.
 import { PublicKey, type Connection } from '@solana/web3.js';
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { getConnection } from '../chain/connection.js';
-import { pumpSdk, pumpSwapSdk } from './sdk.js';
+import { pumpSdk } from './sdk.js';
 import { PumpFunVenue } from './pumpfun.js';
 import { PumpSwapVenue } from './pumpswap.js';
 import { VenueError, type ResolvedPool, type Venue } from './types.js';
 
 const RESOLVE_TTL_MS = 60_000;
 const { PUMP_AMM_PROGRAM_ID, PUMP_PROGRAM_ID, PUMP_SDK, bondingCurvePda, canonicalPumpPoolPda } = pumpSdk;
-const { PUMP_AMM_SDK } = pumpSwapSdk;
+
 
 export class PfDispatcher {
   readonly curve = new PumpFunVenue();
@@ -47,26 +48,11 @@ export class PfDispatcher {
       return { kind: 'pumpswap', pool: ammPool, mint, tokenProgram, migratedFrom: curvePda };
     }
     if (ammPool) return { kind: 'pumpswap', pool: ammPool, mint, tokenProgram };
-    return this.otherAmmPool(connection, mint, tokenProgram);
-  }
-
-  /**
-   * A PumpSwap pool that is not the coin's canonical one (coins not launched on pump.fun). Found by its base mint
-   * (byte offset 43 of the pool account, checked against a decoded pool on mainnet) and confirmed by decoding.
-   * Only SOL-quoted pools are used; a pool laid out the other way round (SOL as base) is refused.
-   */
-  private async otherAmmPool(connection: Connection, mint: PublicKey, tokenProgram: PublicKey): Promise<ResolvedPool | null> {
-    const res = await connection.getProgramAccounts(PUMP_AMM_PROGRAM_ID, { commitment: 'confirmed', filters: [{ memcmp: { offset: 43, bytes: mint.toBase58() } }] });
-    let best: { pool: PublicKey; reserve: bigint } | null = null;
-    for (const r of res) {
-      const d = PUMP_AMM_SDK.decodePoolNullable(r.account as never);
-      if (!d || !d.baseMint.equals(mint) || !pumpSwapSdk.isSolLikeQuoteMint(d.quoteMint)) continue;
-      const reserve = BigInt(r.account.lamports);
-      if (!best || reserve > best.reserve) best = { pool: r.pubkey, reserve };
-    }
-    if (best) return { kind: 'pumpswap', pool: best.pool, mint, tokenProgram };
-    const reversed = await connection.getProgramAccounts(PUMP_AMM_PROGRAM_ID, { commitment: 'confirmed', filters: [{ memcmp: { offset: 75, bytes: mint.toBase58() } }], dataSlice: { offset: 0, length: 0 } });
-    if (reversed.length) throw new VenueError('this coin\'s pool is quoted the other way round (SOL as the base) — not supported', 'unsupported_pool');
+    // Not a pump.fun coin. Anyone can open a PumpSwap pool for any coin, and such side pools are usually tiny: on
+    // mainnet (27 Nov 2026) the ones for BONK, WIF and JUP gave 25–55 % of the market's coins for 0.01 SOL and
+    // 0.04–0.17 % for 7 SOL (scripts/check-side-pool.ts). They are never traded directly: the coin is "unresolved"
+    // here and goes through Jupiter, which takes the best route across every venue, such a pool included when it
+    // really is the best.
     return null;
   }
 }

@@ -10,8 +10,9 @@ let cachedAt = 0;
 let refreshTimer: NodeJS.Timeout | null = null;
 
 export function getConnection(): Connection {
+  if (connection) return connection;
   if (!config.rpcUrl) throw new Error('RPC_URL is not configured');
-  if (!connection) connection = new Connection(config.rpcUrl, { commitment: 'confirmed' });
+  connection = new Connection(config.rpcUrl, { commitment: 'confirmed' });
   return connection;
 }
 
