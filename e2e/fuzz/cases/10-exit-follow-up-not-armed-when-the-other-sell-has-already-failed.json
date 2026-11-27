@@ -1,0 +1,184 @@
+{
+ "about": "A timed exit of the original bag (50 % at +2 s, the rest at +10 min) with \"sell everything when they sell their whole bag\". Real trades. The +2 s step is out and failing when the copied wallet sells out; the exit sells the other half (the step's half is reserved). The step then fails for good (shown with the short retry pauses; with the real ones this takes about a minute of failures) before the exit is confirmed. The follow-up \"sell what that sell left\" is armed only if another sell is STILL out when the exit is booked, so it is not: half the bag stays until the +10 min step although the copied wallet is out.",
+ "expect": [
+  "FX1:full-exit-left-coins-behind"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "fast",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "ladder",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 100,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "exit"
+     },
+     "timedOf": "bag",
+     "timed": [
+      {
+       "afterSec": 2,
+       "percent": 50
+      },
+      {
+       "afterSec": 600,
+       "percent": 100
+      }
+     ],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 2400,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 200,
+   "act": {
+    "a": "sell",
+    "leader": 0,
+    "mint": 0,
+    "share": 1
+   }
+  },
+  {
+   "dt": 2000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 2000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 5000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [
+   {
+    "L1": 1500,
+    "L2": 0,
+    "L3": 0,
+    "fail": "boom"
+   },
+   {
+    "L1": 3000,
+    "L2": 0,
+    "L3": 100
+   },
+   {
+    "L1": 50,
+    "L2": 0,
+    "L3": 0,
+    "fail": "boom"
+   },
+   {
+    "L1": 50,
+    "L2": 0,
+    "L3": 0,
+    "fail": "boom"
+   },
+   {
+    "L1": 50,
+    "L2": 0,
+    "L3": 0,
+    "fail": "boom"
+   },
+   {
+    "L1": 50,
+    "L2": 0,
+    "L3": 0,
+    "fail": "boom"
+   },
+   {
+    "L1": 50,
+    "L2": 0,
+    "L3": 0,
+    "fail": "boom"
+   },
+   {
+    "L1": 50,
+    "L2": 0,
+    "L3": 0,
+    "fail": "boom"
+   }
+  ],
+  "quote": [],
+  "bal": []
+ }
+}

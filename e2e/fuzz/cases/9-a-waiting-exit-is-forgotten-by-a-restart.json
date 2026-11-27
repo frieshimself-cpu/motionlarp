@@ -1,0 +1,139 @@
+{
+ "about": "A copy whose only exit is \"sell everything when they sell their whole bag\". Real trades. The copied wallet sells out during an RPC outage: our exit fails and keeps retrying (it never gives up). The copied wallet buys the coin again. An update restarts the server while the exit is still waiting for its next try: the retry lives only in memory and is gone. The safety net sells only when the copied wallet holds none of the coin, and it holds some again: the position keeps its whole bag for good although their full exit was seen.",
+ "expect": [
+  "Q:still-open:mirror-exit"
+ ],
+ "seed": 1,
+ "profile": "case",
+ "live": true,
+ "overAsk": "clamp",
+ "priceMs": 2000,
+ "retry": "prod",
+ "maxSolPerBuy": 30,
+ "users": [
+  {
+   "feeBps": 0,
+   "sol": 1000
+  }
+ ],
+ "mints": [
+  1000000
+ ],
+ "copies": [
+  {
+   "user": 0,
+   "input": {
+    "name": "exit",
+    "leader": "wtb3G6oVvAznK5HtFpyHTWL6aNYyxm6avutyMn8ksih",
+    "buySol": 1,
+    "minLeaderBuySol": 0,
+    "slippagePct": 100,
+    "priorityFeeSol": 0,
+    "tipSol": 0,
+    "sellPriorityFeeSol": 0,
+    "sellTipSol": 0,
+    "oncePerCoin": false,
+    "sell": {
+     "mirror": {
+      "enabled": true,
+      "mode": "exit"
+     },
+     "timedOf": "left",
+     "timed": [],
+     "stopLoss": [],
+     "deadCoin": {
+      "enabled": false,
+      "idleSec": 120
+     }
+    }
+   }
+  }
+ ],
+ "faults": {
+  "instant": false,
+  "buyFail": 0,
+  "buyUnsure": 0,
+  "sellFail": 0,
+  "streak": 0,
+  "streakMax": 0,
+  "slow": 0,
+  "partial": 0,
+  "ghost": 0,
+  "quoteFail": 0,
+  "balFail": 0,
+  "balLag": 0,
+  "refineNull": 0
+ },
+ "steps": [
+  {
+   "dt": 1000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 2000,
+   "act": {
+    "a": "outage",
+    "ms": 60000
+   }
+  },
+  {
+   "dt": 1000,
+   "act": {
+    "a": "sell",
+    "leader": 0,
+    "mint": 0,
+    "share": 1
+   }
+  },
+  {
+   "dt": 6000,
+   "act": {
+    "a": "buy",
+    "leader": 0,
+    "mint": 0,
+    "sol": 2
+   }
+  },
+  {
+   "dt": 10000,
+   "act": {
+    "a": "restart",
+    "kind": "graceful",
+    "downMs": 5000
+   }
+  },
+  {
+   "dt": 40000,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 30000,
+   "act": {
+    "a": "tick"
+   }
+  }
+ ],
+ "finale": {
+  "dump": false,
+  "leadersExit": false
+ },
+ "tape": {
+  "buy": [
+   {
+    "L1": 400,
+    "L2": 0,
+    "L3": 100
+   }
+  ],
+  "sell": [],
+  "quote": [],
+  "bal": []
+ }
+}

@@ -39,6 +39,21 @@ export type Action =
 
 export interface Step { dt: number; act: Action }
 
+/** code the sabotage must make fail → what the harness does to the engine's surroundings. */
+export const SABOTAGES = {
+  'clock-ahead': ['TM1', 'the engine is given a clock 3 s ahead: timed steps go out before their time'],
+  'clock-behind': ['TL1', 'the engine is given a clock 3 s behind: a step that is due is not started'],
+  refire: ['DF1', 'after a timed step sold, its "fired" mark is wiped from the database: it sells again'],
+  'mute-sells': ['FE2', '"Sold" feed lines are thrown away'],
+  'mute-skips': ['FE3', '"Skipped" feed lines are thrown away'],
+  'min-zero': ['B1', 'the minimum leader buy is zeroed in the database behind the oracle\'s back'],
+  'twin-position': ['O1', 'a second open position in the same coin is written into the database'],
+  'fee-off': ['F1', 'the engine is given a platform fee 7 bps higher than the user\'s'],
+  'lose-proceeds': ['M2', 'a sell\'s proceeds are taken off the position again after it was booked'],
+  'hide-coins': ['T5', 'half of a position\'s tokens are taken off the books'],
+} as const;
+export type Sabotage = keyof typeof SABOTAGES;
+
 export interface Scenario {
   seed: number;
   /** What kind of trouble this seed has (for grouping results). */
@@ -64,6 +79,8 @@ export interface Scenario {
   about?: string;
   /** Hand-written scenario: the violations it shows while the defect exists (e2e/fuzz/cases). */
   expect?: string[];
+  /** Self-test only (--selftest): a fault the HARNESS plants around the engine, to prove a check can fail. */
+  sabotage?: Sabotage;
 }
 
 const PCTS = [5, 10, 20, 25, 30, 33.3, 40, 50, 60, 75, 90, 100, 100, 100];

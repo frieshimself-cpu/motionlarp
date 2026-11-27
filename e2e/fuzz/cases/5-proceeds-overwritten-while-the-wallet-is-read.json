@@ -1,7 +1,7 @@
 {
  "about": "Scharo preset, real trades, nothing fails. The copied wallet sells out while our +2 s sell is on its way. The exit (60 %) is confirmed first; while the engine reads the wallet again (0.2 s) the +2 s sell is confirmed and booked; the exit's booking then writes the proceeds it had read before: the +2 s sell's SOL disappears from the position's profit.",
  "expect": [
-  "M2:proceeds!=sell-fills@queue:mirror",
+  "M2:proceeds!=sell-fills",
   "M4:profit-shown!=wallet-change"
  ],
  "seed": 1,

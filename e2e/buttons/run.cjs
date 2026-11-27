@@ -42,9 +42,10 @@ function freePort() {
 
 /** Stands in for Jupiter: the Status page's "real quote" goes here instead of out to the internet. */
 async function startStub() {
-  const stub = { mode: 'ok', hits: 0, port: await freePort(), server: null };
-  stub.server = http.createServer((req, res) => {
+  const stub = { mode: 'ok', hits: 0, delayMs: 0, port: await freePort(), server: null };
+  stub.server = http.createServer(async (req, res) => {
     stub.hits += 1;
+    if (stub.delayMs) await new Promise((r) => setTimeout(r, stub.delayMs));
     if (stub.mode !== 'ok') { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'stand-in says: no route today' })); return; }
     const u = new URL(req.url, 'http://x');
     res.writeHead(200, { 'content-type': 'application/json' });

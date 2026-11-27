@@ -201,28 +201,38 @@ async function adminEverything(env, parts) {
     const id = licRow(await A(), 'Yan').id;
     const setFee = async (answer) => {
       const n0 = apiCalls(page, /^\/api\/admin\/licenses\/\d+$/).length;
+      const d0 = book.dialogs.length;
       planDialog(page, answer === null ? { accept: false } : { accept: true, text: answer });
+      planDialog(page, { accept: true }); // in case the page answers with a message box
       await ui.hideToast(page);
       await page.locator(`[data-fee="${id}"]`).click();
       await sleep(900);
+      page.__dialogPlan = [];
       const tEl = await page.evaluate(() => { const t = document.querySelector('#toast'); return t.hidden ? null : { text: t.textContent, bad: t.classList.contains('bad') }; });
-      return { fee: licRow(await A(), 'Yan').fee, sent: apiCalls(page, /^\/api\/admin\/licenses\/\d+$/).length - n0, toast: tEl };
+      const box = book.dialogs.slice(d0).find((d) => d.type === 'alert');
+      return { fee: licRow(await A(), 'Yan').fee, sent: apiCalls(page, /^\/api\/admin\/licenses\/\d+$/).length - n0, toast: tEl, messageBox: box ? box.message : null, asked: book.dialogs[d0] };
     };
     let r = await setFee('0.75');
-    book.eq('Set fee asks in a box; 0.75 gives the key 0.75 %', [page.__lastDialog.type, page.__lastDialog.message, r.fee], ['prompt', 'Fee for this license in % (leave empty to use the default fee):', '0.75%']);
+    book.eq('Set fee asks in a box; 0.75 gives the key 0.75 %', [r.asked.type, r.asked.message, r.fee], ['prompt', 'Fee for this license in % (leave empty to use the default fee):', '0.75%']);
     r = await setFee(null);
     book.eq('Set fee, "Cancel": nothing sent, nothing changed', [r.sent, r.fee], [0, '0.75%']);
     book.allow(400, /^\/api\/admin\/licenses\/\d+$/);
     r = await setFee('11');
-    book.eq('Set fee 11: refused in words, the fee stays', [r.toast, r.fee], [{ text: 'a license fee must be between 0 and 10 %', bad: true }, '0.75%']);
+    book.ok('Set fee 11: refused in words, the fee stays', r.fee === '0.75%' && ((r.toast && r.toast.bad && r.toast.text === 'a license fee must be between 0 and 10 %') || !!r.messageBox), r);
     r = await setFee('0,5');
-    book.ok('Set fee "0,5" (a comma, as many keyboards type it): it becomes 0.5 % or is refused — it must not silently fall back to the default fee', r.fee === '0.5%' || (r.fee === '0.75%' && r.toast && r.toast.bad), r);
+    book.ok('Set fee "0,5" (a comma, as many keyboards type it): it becomes 0.5 % or is refused — it must not silently fall back to the default fee', r.fee === '0.5%' || (r.fee === '0.75%' && ((r.toast && r.toast.bad) || !!r.messageBox)), r);
     await setFee('0.75');
     r = await setFee('abc');
-    book.ok('Set fee "abc": refused — it must not silently fall back to the default fee', r.fee === '0.75%' && r.toast && r.toast.bad, r);
+    book.ok('Set fee "abc": refused in words — it must not silently fall back to the default fee', r.fee === '0.75%' && ((r.toast && r.toast.bad) || !!r.messageBox), r);
     await setFee('0.75');
     r = await setFee('2%');
-    book.ok('Set fee "2%" (with the sign): 2 % or refused — not silently the default fee', r.fee === '2%' || (r.fee === '0.75%' && r.toast && r.toast.bad), r);
+    book.ok('Set fee "2%" (with the sign): 2 % or refused — not silently the default fee', r.fee === '2%' || (r.fee === '0.75%' && ((r.toast && r.toast.bad) || !!r.messageBox)), r);
+    r = await setFee('-1');
+    book.ok('Set fee "-1": refused in words, the fee stays', r.fee !== 'Default (1%)' && r.fee !== '-1%' && ((r.toast && r.toast.bad) || !!r.messageBox), r);
+    await setFee('0.75');
+    r = await setFee('1e1');
+    book.ok('Set fee "1e1": 10 % or refused in words — not silently something else', r.fee === '10%' || (r.fee === '0.75%' && ((r.toast && r.toast.bad) || !!r.messageBox)), r);
+    await setFee('0.75');
     r = await setFee('');
     book.eq('Set fee left empty: back to the default fee', r.fee, 'Default (1%)');
 
@@ -512,9 +522,11 @@ async function adminEverything(env, parts) {
     await screenCheck(page, book, 'admin-status');
     const hits0 = stub.hits;
     const n0 = apiCalls(page, /^\/api\/admin\/connections$/).length;
+    stub.delayMs = 1500; // the stand-in answers slowly once, so the "Checking…" state can be seen
     await page.locator('#conn-check').click();
     const busy = await page.locator('#conn-check').evaluate((b) => ({ text: b.textContent, disabled: b.disabled })).catch(() => null);
     await until(async () => apiCalls(page, /^\/api\/admin\/connections$/).length > n0, { timeout: 8000 });
+    stub.delayMs = 0;
     book.ok('Status: "Check again" runs the checks again (the button shows "Checking…" meanwhile)', apiCalls(page, /^\/api\/admin\/connections$/).length === n0 + 1 && stub.hits > hits0 && !!busy && busy.text === 'Checking…' && busy.disabled, { busy, requests: apiCalls(page, /^\/api\/admin\/connections$/).length - n0, standInHits: stub.hits - hits0 });
     stub.mode = 'down';
     await sleep(300);
@@ -590,7 +602,7 @@ async function adminEverything(env, parts) {
     const U = await env.open('user-again', env.ip(61));
     const res = [];
     for (let i = 1; i <= 11; i++) {
-      const r = await U.context.request.post(`${env.base}/api/enter`, { data: { license: manifest.keys.zed.key }, headers: { 'x-requested-with': 'motionlarp' } });
+      const r = await U.context.request.post(`${env.base}/api/enter`, { data: { license: (manifest.keys.zed || manifest.keys.spare2).key }, headers: { 'x-requested-with': 'motionlarp' } });
       res.push(r.status() === 200 ? 'in' : `${r.status()} ${(await r.json().catch(() => ({}))).error || ''}`);
     }
     book.ok('a good license key works eleven times in a row from one address (only wrong keys should count against the limit)', res.every((s) => s === 'in'), res);

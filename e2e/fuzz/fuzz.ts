@@ -1,4 +1,4 @@
-// Randomized stress test of the copy engine's rules.
+// Randomized stress test of the copy engine's rules (src/engine/engine.ts), offline.
 //
 //   npx tsx e2e/fuzz/fuzz.ts [seeds] [steps] [options]
 //
@@ -7,17 +7,34 @@
 //
 //   --from N           first seed (default 1)
 //   --jobs N           worker processes (default: CPU cores, at most 8)
-//   --core             only the profiles inside the executor's contract (no partial fills, no "failed but landed", no crashes)
+//   --core             leave out the two profiles a healthy server never meets (ghost, crash)
 //   --profile NAME     one profile for every seed: instant | calm | flaky | outage | partial | ghost | crash
 //   --no-shrink        do not shrink the violations found
 //   --shrink-budget N  runs spent shrinking one violation (default 500)
-//   --seed S           run one seed and print its whole transcript
+//   --seed S           run one seed and print its whole transcript (same steps / --core / --profile as the batch)
 //   --replay FILE      run a saved scenario (e2e/fuzz/out/repro/*.json, e2e/fuzz/cases/*.json) and print its whole transcript
 //   --cases            run the hand-written scenarios in e2e/fuzz/cases (one per defect found) and say which still show it
-//   --out DIR          where results go (default e2e/fuzz/out)
+//   --selftest         plant known faults around the engine and check that the invariants catch each one
+//   --out DIR          where results go (default e2e/fuzz/out: summary.json, report.txt, repro/)
 //
-// Everything runs offline on a fake market and a virtual clock; a seed replays exactly. Exit code 1 when a
-// violation was found, 0 otherwise. Invariants and what they mean: see INVARIANTS below and run.ts.
+// What a seed is: one or two users with wallets, one to three copies with random valid settings (through the real
+// validateSettings; one of them is often the Scharo preset), a random list of things that happen (the copied wallet
+// buys, sells part, sells all, buys again; prices move; Sell now; a copy is paused, edited, deleted; the owner
+// flips Live trading, changes max per buy, disables a user; the server restarts as src/server.ts does; an RPC
+// outage), a tick of the engine's clock after each, then a long quiet phase in which the market lets everything
+// through. The market is fake (market.ts): confirmations take a random time, the engine is told a moment after a
+// trade landed, sells fail (also many times in a row), land late, are paid only in part; with real trades the
+// wallet's balance is the truth, in test mode nothing is held. Time is virtual (sim.ts): a seed replays exactly.
+//
+// Profiles: instant (every answer comes at once), calm (no failures, only timing), flaky (failures and short runs
+// of them, unknown buy outcomes), outage (long runs of failures and RPC outages), partial (sells paid only in
+// part), ghost (sells reported "outcome unknown", landed or not), crash (the process killed with trades in flight).
+//
+// Files: scenario.ts (what happens, from a seed), market.ts (the fake chain), run.ts (drives the real Engine and
+// Store and checks the invariants), shrink.ts (makes a failing scenario small), sim.ts (virtual clock, random
+// generator), cases/ (hand-written scenarios, one per defect found), out/ (last run; ignored by git).
+//
+// Exit code 1 when a violation was found, 0 otherwise. The invariants: INVARIANTS below; how each is checked: run.ts.
 import './env.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -29,7 +46,7 @@ import type { GenOptions, Profile, Scenario } from './scenario.js';
 
 // Loaded after env.ts has run (a static import of the engine would load node:sqlite, and print its warning, first).
 const { runScenario } = await import('./run.js');
-const { generate, PROFILES } = await import('./scenario.js');
+const { generate, PROFILES, SABOTAGES } = await import('./scenario.js');
 const { shrink, tapeSummary } = await import('./shrink.js');
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -61,6 +78,7 @@ export const INVARIANTS: Record<string, [string, string]> = {
   TM1: ['6 timing', 'a timed step is never started or sent before its time from openedAt'],
   TL1: ['6 timing', 'a timed step that is due is started at that tick (bag: always; of what is left: when its queue is free)'],
   AM1: ['6 timing', 'each sell asks for the amount its rule says'],
+  US1: ['1 tokens', 'nothing else of a position is sold while one of its sells has an unknown outcome that is not settled yet'],
   MI1: ['6 timing', '"sell when they sell" orders carry the share the mode calls for, and only when it calls for one'],
   FE1: ['7 feed', 'every buy has its feed line'],
   FE2: ['7 feed', 'every sell has exactly one feed line, with the booked numbers; no line for a sell that did not happen'],
@@ -82,6 +100,8 @@ interface SigAgg {
   byProfile: Record<string, number>;
   live: number;
   test: number;
+  /** In the seeds where this was not the first violation: which one was (it is probably a consequence of that one). */
+  after: Record<string, number>;
   /** Candidate seeds to shrink, best first: [seed, steps, wasFirst]. */
   samples: { seed: number; steps: number; first: boolean; step: number; message: string; tail: string[] }[];
 }
@@ -121,9 +141,10 @@ function addResult(agg: Agg, r: RunResult, steps: number): void {
   }
   if (r.crashed) agg.harnessErrors.push({ seed: r.seed, error: r.crashed.slice(0, 600) });
   for (const v of r.violations) {
-    const s = (agg.sigs[v.sig] ??= { sig: v.sig, seeds: 0, asFirst: 0, byProfile: {}, live: 0, test: 0, samples: [] });
+    const s = (agg.sigs[v.sig] ??= { sig: v.sig, seeds: 0, asFirst: 0, byProfile: {}, live: 0, test: 0, after: {}, samples: [] });
     s.seeds++;
     if (v.first) s.asFirst++;
+    else { const f = r.violations.find((x) => x.first)?.sig ?? '?'; s.after[f] = (s.after[f] ?? 0) + 1; }
     s.byProfile[r.profile] = (s.byProfile[r.profile] ?? 0) + 1;
     if (r.live) s.live++; else s.test++;
     s.samples.push({ seed: r.seed, steps, first: v.first, step: v.step, message: v.message, tail: v.tail });
@@ -139,7 +160,8 @@ function mergeAgg(a: Agg, b: Agg): void {
   for (const [k, list] of Object.entries(b.noteSeeds)) a.noteSeeds[k] = [...(a.noteSeeds[k] ?? []), ...list].sort((x, y) => x - y).slice(0, 8);
   a.harnessErrors.push(...b.harnessErrors);
   for (const s of Object.values(b.sigs)) {
-    const t = (a.sigs[s.sig] ??= { sig: s.sig, seeds: 0, asFirst: 0, byProfile: {}, live: 0, test: 0, samples: [] });
+    const t = (a.sigs[s.sig] ??= { sig: s.sig, seeds: 0, asFirst: 0, byProfile: {}, live: 0, test: 0, after: {}, samples: [] });
+    for (const [k, n] of Object.entries(s.after ?? {})) t.after[k] = (t.after[k] ?? 0) + n;
     t.seeds += s.seeds;
     t.asFirst += s.asFirst;
     t.live += s.live;
@@ -161,7 +183,7 @@ function parseArgs(argv: string[]) {
     const a = argv[i]!;
     if (!a.startsWith('--')) { pos.push(a); continue; }
     const key = a.slice(2);
-    if (['core', 'no-shrink', 'child', 'quiet', 'cases', 'verbose'].includes(key)) o[key] = true;
+    if (['core', 'no-shrink', 'child', 'quiet', 'cases', 'verbose', 'selftest'].includes(key)) o[key] = true;
     else o[key] = argv[++i] ?? '';
   }
   return { pos, o };
@@ -207,6 +229,32 @@ async function main(): Promise<void> {
   if (gen.profile && !PROFILES.includes(gen.profile)) throw new Error(`unknown profile ${gen.profile}`);
   const steps = Number(pos[1] ?? 60);
 
+  if (o.selftest) {
+    // Each planted fault must make its invariant fail in at least one of the first seeds; clean seeds are the control.
+    let bad = 0;
+    const seeds = Array.from({ length: 60 }, (_, i) => i + 1);
+    console.log('self-test: a fault is planted around the engine (in the harness, never in src/); its invariant must fail');
+    for (const [name, [code, what]] of Object.entries(SABOTAGES)) {
+      let hits = 0;
+      let control = 0;
+      let example = '';
+      for (const seed of seeds) {
+        const sc = generate(seed, 60, { profile: 'calm' });
+        const clean = await runScenario(sc);
+        const planted = await runScenario({ ...sc, sabotage: name as keyof typeof SABOTAGES });
+        if (clean.violations.some((v) => v.code === code)) control++;
+        const v = planted.violations.find((x) => x.code === code);
+        if (v) { hits++; if (!example) example = `seed ${seed}: ${v.sig} — ${v.message.slice(0, 140)}`; }
+      }
+      const ok = hits > control;
+      if (!ok) bad++;
+      console.log(`  ${ok ? 'caught ' : 'MISSED '} ${code.padEnd(4)} ${name.padEnd(14)} ${what}`);
+      console.log(`           fails in ${hits} of ${seeds.length} seeds with the fault (${control} without)${example ? `; e.g. ${example}` : ''}`);
+    }
+    console.log(bad ? `${bad} planted fault(s) were NOT caught` : 'every planted fault was caught');
+    process.exitCode = bad ? 1 : 0;
+    return;
+  }
   if (o.cases) {
     const dir = join(HERE, 'cases');
     let still = 0;
@@ -215,12 +263,13 @@ async function main(): Promise<void> {
       const sc = JSON.parse(readFileSync(join(dir, file), 'utf8')) as Scenario;
       const r = await runScenario(sc, { fullTranscript: true });
       const found = r.violations.map((v) => v.sig);
-      const hit = (sc.expect ?? []).filter((e) => found.includes(e));
+      const expected = (sig: string) => (sc.expect ?? []).some((e) => sig.startsWith(e));
+      const hit = found.filter(expected);
       const shows = hit.length > 0;
       if (shows) still++;
       console.log(`\n${shows ? 'STILL BROKEN ' : 'not shown    '} ${file}`);
       console.log(`    ${sc.about}`);
-      for (const v of r.violations) console.log(`    ${(sc.expect ?? []).includes(v.sig) ? '✗' : '·'} ${v.sig}: ${v.message}`);
+      for (const v of r.violations) console.log(`    ${expected(v.sig) ? '✗' : '·'} ${v.sig}: ${v.message}`);
       if (!r.violations.length) console.log('    no violation');
       if (o.verbose) for (const l of r.transcript) console.log(`      ${l}`);
     }
@@ -327,17 +376,31 @@ async function main(): Promise<void> {
   say(`seeds with a violation: ${agg.failingSeeds} of ${agg.seeds}`);
   say('');
   if (!sigs.length) say('NO VIOLATION FOUND');
-  for (const s of sigs) {
-    const [inv, what] = INVARIANTS[s.sig.split(':')[0]!] ?? ['?', '?'];
-    say(`■ ${s.sig}`);
-    say(`    invariant ${inv}: ${what}`);
-    say(`    ${s.seeds} seeds (first violation of the seed in ${s.asFirst}); LIVE ${s.live}, TEST ${s.test}; by profile: ${Object.entries(s.byProfile).sort().map(([k, n]) => `${k} ${n}`).join(', ')}`);
-    say(`    seeds: ${s.samples.map((x) => x.seed).join(', ')}`);
-    say(`    e.g. seed ${s.samples[0]!.seed}: ${s.samples[0]!.message}`);
-    const sh = shrunk[s.sig];
-    if (sh) say(`    shrunk: ${sh.file} (${sh.steps} steps, ${sh.actions} actions; first violation there: ${sh.firstInShrunk}) — ${sh.message}`);
+  // 'ghost' (a sell reported "outcome unknown" that had landed) and 'crash' (the process killed with trades in
+  // flight) are situations a healthy server does not meet: what only shows there is listed apart.
+  const RARE = new Set(['ghost', 'crash']);
+  const core = sigs.filter((x) => Object.keys(x.byProfile).some((k) => !RARE.has(k)));
+  const rare = sigs.filter((x) => !core.includes(x));
+  const show = (list: SigAgg[], title: string) => {
+    if (!list.length) return;
+    say(title);
     say('');
-  }
+    for (const x of list) {
+      const [inv, what] = INVARIANTS[x.sig.split(':')[0]!] ?? ['?', '?'];
+      say(`■ ${x.sig}`);
+      say(`    invariant ${inv}: ${what}`);
+      say(`    ${x.seeds} seeds (${x.asFirst} as the first violation of the seed); real trades ${x.live}, test mode ${x.test}; by profile: ${Object.entries(x.byProfile).sort().map(([k, n]) => `${k} ${n}`).join(', ')}`);
+      const after = Object.entries(x.after).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      if (after.length) say(`    where it was not the first, the first was: ${after.map(([k, n]) => `${k} (${n})`).join(', ')}`);
+      say(`    seeds: ${x.samples.map((y) => `${y.seed}${y.first ? '*' : ''}`).join(', ')}   (* = first violation of that seed)`);
+      say(`    e.g. seed ${x.samples[0]!.seed}: ${x.samples[0]!.message}`);
+      const sh = shrunk[x.sig];
+      if (sh) say(`    shrunk: ${sh.file} (${sh.steps} steps, ${sh.actions} actions; first violation there: ${sh.firstInShrunk}) — ${sh.message}`);
+      say('');
+    }
+  };
+  show(core, 'VIOLATIONS (profiles: instant, calm, flaky, outage, partial)');
+  show(rare, 'ONLY WITH A SELL OF UNKNOWN OUTCOME THAT HAD LANDED (ghost) OR A CRASH (crash)');
   if (Object.keys(agg.notes).length) {
     say('documented outcomes (not counted as violations):');
     for (const [k, n] of Object.entries(agg.notes).sort((a, b) => b[1] - a[1])) say(`    ${n}×  ${k}   (seeds ${agg.noteSeeds[k]!.slice(0, 5).join(', ')})`);

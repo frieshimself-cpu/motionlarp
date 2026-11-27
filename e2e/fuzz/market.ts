@@ -58,7 +58,7 @@ export interface OpPlan {
   part?: number;
   /** Sell: reported "sent, outcome unknown" although it landed. */
   ghost?: boolean;
-  /** Buy: reported "sent, outcome unknown"; in truth it landed, or it never did. */
+  /** Reported "sent, outcome unknown"; in truth it landed, or it never did. (A sell: `ghost` means 'landed'.) */
   unsure?: 'landed' | 'lost';
   refineNull?: boolean;
 }
@@ -99,9 +99,17 @@ export interface SellCall {
   plan: OpPlan; live: boolean; overAsk: boolean;
   /** What the transaction was built for (after the clamp, when the market clamps). */
   tokens?: bigint;
+  /** When the transaction was signed and went out (never, if the engine died first). */
+  sentAt?: number;
   landedAt?: number; doneAt?: number; delivered: boolean; severed?: boolean; ok?: boolean; error?: string; ghost?: boolean;
+  /** The engine was told "sent, outcome unknown". */
+  uncertain?: boolean;
+  /** It failed on chain (a later read of the transaction says so). */
+  chainFailed?: boolean;
   sold?: bigint; est?: bigint; exact?: bigint; fee?: bigint; signature?: string; refined?: 'exact' | 'null';
   refineSeen?: boolean;
+  /** The engine read this sell's own transaction afterwards (settleSell) and got its exact numbers. */
+  settled?: boolean;
 }
 
 export interface Hooks {
@@ -111,6 +119,8 @@ export interface Hooks {
   /** The moment the wallet changed (before the engine is told). */
   sellLanded(c: SellCall): void;
   sellDone(c: SellCall): void;
+  /** The engine asked what became of a sell of unknown outcome; `final`: the answer ends the question. */
+  sellSettled(c: SellCall, final: boolean): void;
   /** A balance read for a piece of engine work started (+1) or came back (-1). */
   reading(ctx: Ctx | undefined, d: number): void;
   refined(c: BuyCall | SellCall): void;
@@ -132,6 +142,7 @@ export class Exec implements Executor {
   tokenBalance(owner: string, mint: string): Promise<bigint> { return this.m.tokenBalance(this, owner, mint); }
   warm(_mint: string): Promise<void> { return this.alive ? Promise.resolve() : NEVER; }
   settleBuy(signature: string, owner: string, mint: string) { return this.m.settleBuy(this, signature, owner, mint); }
+  settleSell(signature: string, owner: string, mint: string) { return this.m.settleSell(this, signature, owner, mint); }
 }
 
 export class Market {
@@ -145,6 +156,8 @@ export class Market {
   readonly bySig = new Map<string, BuyCall | SellCall>();
   /** Every buy that was signed, landed or not. */
   private readonly signed = new Map<string, BuyCall>();
+  /** Every real sell that was signed, landed or not. */
+  private readonly signedSells = new Map<string, SellCall>();
   /** Trades asked for and not yet answered, per wallet and coin. */
   private readonly flying = new Map<string, number>();
   private readonly hasAccount = new Set<string>();
@@ -240,7 +253,7 @@ export class Market {
         if (r.chance(f.streak)) this.streaks.set(key, r.int(1, f.streakMax));
       }
       if (!plan.fail && f.partial > 0 && r.chance(f.partial)) plan.part = r.pick([0.1, 0.25, 0.5, 0.75, 0.9]);
-      if (plan.fail && f.ghost > 0 && r.chance(f.ghost)) plan.ghost = true;
+      if (plan.fail && f.ghost > 0 && r.chance(f.ghost)) { if (r.chance(0.7)) plan.ghost = true; else plan.unsure = 'lost'; }
     }
     if (f.refineNull > 0 && r.chance(f.refineNull)) plan.refineNull = true;
     this.tape[kind][i] = plan;
@@ -366,6 +379,21 @@ export class Market {
     return Promise.resolve({ state: c.chainFailed ? 'failed' : 'not_found' });
   }
 
+  /** What became of a sell of unknown outcome, from its own transaction (the engine asks before it sells again). */
+  settleSell(exec: Exec, signature: string, _owner: string, _mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
+    if (!exec.alive) return NEVER;
+    if (this.planBal().fail || this.outage()) return Promise.reject(new Error('429 Too Many Requests'));
+    const c = this.signedSells.get(signature);
+    if (!c) return Promise.resolve({ state: 'not_found' });
+    if (c.landedAt !== undefined) {
+      c.settled = true;
+      this.hooks.sellSettled(c, true);
+      return Promise.resolve({ state: 'landed', tokens: c.sold!, lamports: c.exact! });
+    }
+    this.hooks.sellSettled(c, !!c.chainFailed || this.sim.now - c.t0 > 120_000);
+    return Promise.resolve({ state: c.chainFailed ? 'failed' : 'not_found' });
+  }
+
   sell(exec: Exec, req: TradeRequest & { tokens: bigint }): Promise<FillResult> {
     if (!exec.alive) return NEVER;
     const ctx = als.getStore();
@@ -386,7 +414,7 @@ export class Market {
       const deliver = (res: FillResult) => {
         call.doneAt = this.sim.now;
         call.ok = res.ok;
-        if (!res.ok) call.error = res.error;
+        if (!res.ok) { call.error = res.error; call.uncertain = !!res.uncertain; }
         this.bump(owner, mint, -1);
         if (!exec.alive) { call.severed = true; this.hooks.sellDone(call); return; }
         call.delivered = true;
@@ -410,8 +438,17 @@ export class Market {
       const est0 = gross0 - fee0 - txc;
       // As the real executor: the token account is closed (its rent returns) when the sell was built for all of it.
       const closing = live && !!req.closeIfEmpty && !req.checkFirst && tokens === wallet;
+      if (live) {
+        // Built and signed: the engine is told the signature before the transaction goes out.
+        call.signature = `S${call.id}`;
+        call.sentAt = this.sim.now;
+        this.signedSells.set(call.signature, call);
+        try { req.onSigned?.(call.signature); } catch { /* the real executor ignores it too */ }
+      }
+      const unknownLost = live && plan.unsure === 'lost';
       this.after(plan.L1, () => {
-        if (plan.fail && !plan.ghost) return deliver({ ok: false, error: plan.fail });
+        if (unknownLost) return this.after(plan.L2, () => deliver({ ok: false, error: UNKNOWN, uncertain: true }));
+        if (plan.fail && !plan.ghost) { call.chainFailed = /errored/.test(plan.fail); return deliver({ ok: false, error: plan.fail }); }
         const part = (t: bigint) => {
           if (!plan.part) return t;
           const p = (t * BigInt(Math.round(plan.part * 1000))) / 1000n;
@@ -428,9 +465,9 @@ export class Market {
           return deliver({ ok: true, signature: call.signature!, tokens: sold, lamports: net, simulated: true, feeLamports: fee, note: 'test fill' });
         }
         const heldNow = this.tokens(owner, mint);
-        if (tokens > heldNow) return deliver({ ok: false, error: 'sent but did not land: transaction errored: {"InstructionError":[2,{"Custom":1}]}' });
+        if (tokens > heldNow) { call.chainFailed = true; return deliver({ ok: false, error: 'sent but did not land: transaction errored: {"InstructionError":[2,{"Custom":1}]}' }); }
         const have = this.sol.get(owner) ?? 0n;
-        if (have < txc) return deliver({ ok: false, error: 'sent but did not land: transaction errored: Transfer: insufficient lamports (cannot pay the fee)' });
+        if (have < txc) { call.chainFailed = true; return deliver({ ok: false, error: 'sent but did not land: transaction errored: Transfer: insufficient lamports (cannot pay the fee)' }); }
         const sold = part(tokens);
         const gross = this.value(mint, sold);
         const fee = (gross * bps) / 10_000n;
@@ -440,7 +477,7 @@ export class Market {
         this.setTokens(owner, mint, heldNow - sold);
         this.sol.set(owner, have + net);
         const est = sold === tokens ? est0 : (est0 * sold) / tokens;
-        Object.assign(call, { sold, est, exact: net, fee, signature: `S${call.id}`, landedAt: this.sim.now });
+        Object.assign(call, { sold, est, exact: net, fee, landedAt: this.sim.now });
         this.bySig.set(call.signature!, call);
         this.hooks.sellLanded(call);
         if (plan.fail && plan.ghost) {

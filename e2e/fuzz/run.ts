@@ -82,6 +82,8 @@ interface Track {
   fullExitSold: Map<number, SellCall>;
   /** The last Sell now sale could be paid for only in part (the feed tells the user to press again). */
   manualPartial: boolean;
+  /** When a timed step's sale last failed (its coins stay for the last step: documented). */
+  bagFailedAt: number;
   /** Sells in flight (the engine reserves their tokens): invocation → what it asked. */
   flying: Map<number, Flying>;
   /** Failed attempts of an order since it last succeeded (the next attempt must be checked first). */
@@ -99,7 +101,7 @@ const okey = (o: SellOrder) => `${o.reason}:${o.stage ?? ''}:${o.tag ?? ''}`;
 function orderText(o?: SellOrder): string {
   if (!o) return '?';
   const s = o.stage !== undefined ? `[${o.stage}]` : '';
-  const basis = o.everything ? ' everything' : o.basis === 'bag' ? ' of-bag' : '';
+  const basis = o.everything ? ' everything' : o.basis === 'bag' ? ' of-bag' : (o as { rest?: boolean }).rest ? ' (what is left after a full exit)' : '';
   return `${o.reason}${s} ${Number(o.percent.toFixed(4))}%${basis}${o.tag ? ` tag=${o.tag}` : ''}`;
 }
 const orderKind = (ctx: Ctx, o: SellOrder) => (ctx.kind === 'bag' ? (o.everything ? 'bag-last' : 'bag-step') : o.reason);
@@ -153,6 +155,7 @@ class Run {
   /** A crash, or a shutdown that ran out of time: trades in flight were not booked. */
   private cutOff = false;
   private readonly orphanSeen = new Set<string>();
+  private readonly proceedsOff = new Set<number>();
   /** Coins the user held before the site traded (hand-written scenarios): `${owner}|${mint}` → tokens. */
   private readonly own = new Map<string, bigint>();
   private crashed: string | undefined;
@@ -165,9 +168,9 @@ class Run {
     this.maxBuy = sc.maxSolPerBuy;
   }
 
-  /** Trades reported failed that in truth landed, and crashes: the books cannot know, so truth-vs-books checks wait for the end. */
+  /** After a crash trades that landed were never booked: the books cannot know, so truth-vs-books checks wait for the end. */
   private get blind(): boolean {
-    return this.sc.profile === 'ghost' || this.sc.profile === 'crash' || this.cutOff;
+    return this.sc.profile === 'crash' || this.cutOff;
   }
 
   // ── transcript and violations ─────────────────────────────────────────
@@ -204,7 +207,7 @@ class Run {
     sim.afterEvent = () => this.afterEvent();
     try {
       market.hooks = {
-        buyAsk: (c) => this.buyAsk(c), buyDone: (c) => this.buyDone(c), sellAsk: (c) => this.sellAsk(c), sellLanded: (c) => this.sellLanded(c), sellDone: (c) => this.sellDone(c),
+        buyAsk: (c) => this.buyAsk(c), buyDone: (c) => this.buyDone(c), sellAsk: (c) => this.sellAsk(c), sellLanded: (c) => this.sellLanded(c), sellDone: (c) => this.sellDone(c), sellSettled: (c, final) => this.sellSettled(c, final),
         reading: (ctx, d) => { const tr = ctx && ctx.gen === this.gen ? this.pos.get(ctx.positionId) : undefined; if (tr) tr.reading = Math.max(0, tr.reading + d); },
         refined: (c) => this.line(`market ${c.kind}#${c.id} exact SOL ${c.refined === 'null' ? 'could not be read' : `is ${c.exact}`}${c.refineSeen ? '' : ' (nobody is listening any more)'}`),
         problem: (code, kind, message) => this.problem(code, kind, message),
@@ -238,6 +241,7 @@ class Run {
         this.copyIds.push(id);
         this.copies.set(id, { userId, last: s, deleted: false });
         this.line(`copy #${id} of u${this.userIds.indexOf(userId) + 1}: ${describeSettings(s)}`);
+        if (sc.sabotage === 'min-zero') store.db.prepare('UPDATE copies SET settings = ? WHERE id = ?').run(JSON.stringify({ ...s, minLeaderBuySol: 0 }), id);
       }
       this.line(`market: Live switch ${sc.live ? 'ON (real trades)' : 'OFF (test mode)'}, over-ask ${sc.overAsk}, profile ${sc.profile}, priceMs ${sc.priceMs}, retries ${sc.retry}, max per buy ${sc.maxSolPerBuy} SOL, wallets ${sc.users.map((u) => `${u.sol} SOL`).join(' / ')}`);
       this.startEngine();
@@ -285,9 +289,11 @@ class Run {
     this.gen++;
     const gen = this.gen;
     this.exec = new Exec(this.market, gen);
+    const skew = sc.sabotage === 'clock-ahead' ? 3_000 : sc.sabotage === 'clock-behind' ? -3_000 : 0;
+    const feeOff = sc.sabotage === 'fee-off' ? 7 : 0;
     this.engine = new Engine({
-      store, executor: this.exec, walletFor: (id) => this.wallets.get(id) ?? null, now: () => sim.now, priceMs: sc.priceMs,
-      maxSolPerBuy: () => this.maxBuy, feeReserveSol: 0.01, feeBpsFor: (id) => this.feeBps.get(id) ?? 0,
+      store, executor: this.exec, walletFor: (id) => this.wallets.get(id) ?? null, now: () => sim.now + skew, priceMs: sc.priceMs,
+      maxSolPerBuy: () => this.maxBuy, feeReserveSol: 0.01, feeBpsFor: (id) => (this.feeBps.get(id) ?? 0) + feeOff,
       ...(sc.retry === 'fast' ? { fastRetryMs: [0, 100, 100, 200, 200, 400], slowRetryMs: 2_000 } : {}),
     });
     this.instrument(this.engine, gen);
@@ -360,7 +366,7 @@ class Run {
       this.storeOps++;
       this.pos.set(id, {
         pid: id, userId: p.userId, copyId: p.copyId, mint: p.mint, leader: p.leader, sell: p.sell, leaderSig: p.leaderSig, createdAt: this.sim.now, recovered: false,
-        mirrorDue: [], stopDue: new Set(), sellNowOk: false, gaveUp: new Set(), success: new Map(), overAsk: new Map(), bagActive: new Map(), invoked: new Map(), queueFlying: 0, queueActive: 0, reading: 0, fullExitSold: new Map(), manualPartial: false,
+        mirrorDue: [], stopDue: new Set(), sellNowOk: false, gaveUp: new Set(), success: new Map(), overAsk: new Map(), bagActive: new Map(), invoked: new Map(), queueFlying: 0, queueActive: 0, reading: 0, fullExitSold: new Map(), manualPartial: false, bagFailedAt: -1,
         flying: new Map(), failed: new Map(), proceedsWriter: '', zeroBookedPaper: new Set(),
       });
       this.inserted.push(id);
@@ -377,7 +383,7 @@ class Run {
         this.problem('T3', `books-grew@${who}`, `p${id}: tokensHeld written up from ${before.tokensHeld} to ${patch.tokensHeld} by ${who} ${orderText(ctx?.order)} (a sell can only lower it)`);
       }
       if (before && patch.status === 'open' && before.status === 'opening' && !ctx && tr) tr.recovered = true; // restore()
-      if (tr && patch.proceedsLamports !== undefined) tr.proceedsWriter = who;
+      if (tr && patch.proceedsLamports !== undefined && patch.proceedsLamports !== before?.proceedsLamports) tr.proceedsWriter = who;
       if (before && patch.status === 'closed' && before.status !== 'closed') this.closedCount++;
       orig.updatePosition(id, patch);
       this.storeOps++;
@@ -395,12 +401,25 @@ class Run {
       if (patch.buySig !== undefined && patch.status === undefined) bits.push(`buy signed ${patch.buySig}`);
       if (bits.length) this.line(`store p${id} ${bits.join(', ')}  (by ${who}${ctx?.order ? ` ${orderText(ctx.order)}` : ''})`);
     };
+    const sabotaged = new Set<string>();
     store.insertFill = (f) => {
       const id = orig.insertFill(f);
       this.storeOps++;
       this.lastFill = { op: this.storeOps, pid: f.positionId, userId: f.userId, side: f.side, tokens: f.tokens, lamports: f.lamports };
       this.dirty.add(f.positionId);
       this.line(`store fill p${f.positionId} ${f.side}/${f.reason} tokens ${f.tokens} lamports ${f.lamports}${f.error ? ` ERROR ${f.error}` : ''} sig ${f.signature ?? '-'}`);
+      // Self-test: faults planted by the harness (never in a normal run).
+      const sab = this.sc.sabotage;
+      if (sab && f.error === null && !sabotaged.has(`${sab}:${f.positionId}`)) {
+        const once = () => sabotaged.add(`${sab}:${f.positionId}`);
+        if (sab === 'refire' && f.side === 'sell' && f.reason === 'timed') { once(); queueMicrotask(() => store.db.prepare("UPDATE positions SET fired_timed = '[]' WHERE id = ? AND status = 'open'").run(f.positionId)); }
+        if (sab === 'lose-proceeds' && f.side === 'sell') { once(); queueMicrotask(() => store.db.prepare('UPDATE positions SET proceeds_lamports = proceeds_lamports - 1000 WHERE id = ?').run(f.positionId)); }
+        if (sab === 'hide-coins' && f.side === 'buy') { once(); queueMicrotask(() => { store.db.prepare("UPDATE positions SET tokens_held = tokens_held / 2 WHERE id = ? AND status = 'open'").run(f.positionId); this.dirty.add(f.positionId); }); }
+        if (sab === 'twin-position' && f.side === 'buy') {
+          once();
+          queueMicrotask(() => { const p = store.position(f.positionId); if (p?.status === 'open') { const twin = orig.insertPosition({ userId: p.userId, copyId: p.copyId, mint: p.mint, mode: p.mode, leaderSig: 'twin', sell: p.sell, copyName: p.copyName, leader: p.leader, now: this.sim.now }); orig.updatePosition(twin, { status: 'opening' }); } });
+        }
+      }
       return id;
     };
     store.updateFillLamports = (fillId, lam) => {
@@ -410,6 +429,7 @@ class Run {
       this.line(`store fill #${fillId} lamports → ${lam} (exact)`);
     };
     store.addEvent = (e) => {
+      if ((this.sc.sabotage === 'mute-sells' && e.kind === 'sell') || (this.sc.sabotage === 'mute-skips' && e.kind === 'skip')) return;
       orig.addEvent(e);
       this.storeOps++;
       const rec: FeedRec = { i: this.feed.length, t: this.sim.now, op: this.storeOps, userId: e.userId, copyId: e.copyId ?? null, kind: e.kind, message: e.message, mint: e.mint ?? null, signature: e.signature ?? null, ctx: als.getStore() };
@@ -452,9 +472,12 @@ class Run {
     const tr = this.pos.get(pid);
     if (!tr) return;
     if (!tr.invoked.has(okey(order))) tr.invoked.set(okey(order), this.feed.length);
-    if (order.reason === 'mirror' && order.tag !== 'reconcile') {
-      const due = tr.mirrorDue.find((d) => d.sig === order.tag);
+    // (a ":rest" order is the follow-up of a full exit that left coins to other sells on their way: documented)
+    const tag = (order.tag ?? '').replace(/(:rest)+$/, '');
+    if (order.reason === 'mirror' && tag !== 'reconcile') {
+      const due = tr.mirrorDue.find((d) => d.sig === tag);
       if (!due) this.problem('MI1', 'mirror-order-nobody-asked-for', `p${pid}: ${orderText(order)}`);
+      else if (tag !== order.tag) { if (due.percent < 100) this.problem('MI1', 'rest-order-after-a-partial-rule', `p${pid}: ${orderText(order)} follows a rule that called for ${due.percent}%`); }
       else {
         due.invoked = true;
         if (Math.abs(due.percent - order.percent) > 1e-9) this.problem('MI1', `mirror-wrong-share:${due.mode}`, `p${pid}: the rule calls for ${due.percent}% and the order says ${order.percent}%`);
@@ -470,12 +493,15 @@ class Run {
     const sale = tr.fullExitSold.get(inv);
     if (sale) {
       tr.fullExitSold.delete(inv);
-      const p = this.store.position(pid);
-      let running = 0;
-      for (const n of tr.bagActive.values()) running += n;
-      if (p && p.status === 'open' && tr.flying.size === 0 && running === 0) {
-        this.problem('FX1', `full-exit-left-coins-behind:${order.reason}`, `p${pid} ${orderText(order)} sold the ${sale.sold} it asked for, nothing else is on its way, and the position still holds ${p.tokensHeld} (wallet ${sale.live ? this.market.tokens(sale.owner, sale.mint) : 'n/a'})`);
-      }
+      // (checked once the engine has had its turn: a follow-up sell of what is left may be starting right now)
+      this.post.push(() => {
+        const p = this.store.position(pid);
+        let running = 0;
+        for (const n of tr.bagActive.values()) running += n;
+        if (p && p.status === 'open' && tr.flying.size === 0 && running === 0 && tr.queueActive === 0 && tr.reading === 0) {
+          this.problem('FX1', `full-exit-left-coins-behind:${order.reason}`, `p${pid} ${orderText(order)} sold the ${sale.sold} it asked for, nothing else is on its way or about to go, and the position still holds ${p.tokensHeld} (wallet ${sale.live ? this.market.tokens(sale.owner, sale.mint) : 'n/a'})`);
+        }
+      });
     }
     if (order.reason !== 'mirror' || !r.ok) return;
     const due = tr.mirrorDue.find((d) => d.sig === order.tag);
@@ -523,7 +549,7 @@ class Run {
     const ctx = c.ctx;
     const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
     const p = c.pid !== undefined ? this.store.position(c.pid) : undefined;
-    const fate = c.plan.fail ? (c.plan.ghost ? `lands +${c.plan.L1}ms but is reported OUTCOME UNKNOWN` : `will fail (${c.plan.fail})`) : `lands +${c.plan.L1}ms, told +${c.plan.L1 + c.plan.L2}ms${c.plan.part ? `, fills ${c.plan.part * 100}%` : ''}`;
+    const fate = c.plan.unsure === 'lost' && c.live ? 'never lands, and is reported OUTCOME UNKNOWN' : c.plan.fail ? (c.plan.ghost ? `lands +${c.plan.L1}ms but is reported OUTCOME UNKNOWN` : `will fail (${c.plan.fail})`) : `lands +${c.plan.L1}ms, told +${c.plan.L1 + c.plan.L2}ms${c.plan.part ? `, fills ${c.plan.part * 100}%` : ''}`;
     this.line(`exec sell#${c.id} p${c.pid ?? '?'} ${orderText(ctx?.order)} asks ${c.asked}${c.live ? ` (wallet ${c.walletAtAsk}, books ${p?.tokensHeld})` : ` (test; books ${p?.tokensHeld})`}${c.checkFirst ? ' [retry: checked first]' : ''}${c.closeIfEmpty ? ' [close account]' : ''} → ${this.market.outageUntil > this.sim.now && !this.market.calm ? 'RPC outage: fails' : c.overAsk ? `over-ask (${this.sc.overAsk})` : fate}`);
     if (!tr || !p || !ctx?.order) { this.problem('E3', 'sell-outside-an-order', `sell#${c.id} of ${c.asked} has no order context`); return; }
     const order = ctx.order;
@@ -555,11 +581,25 @@ class Run {
       let onTheWay = 0n;
       for (const [inv, f] of tr.flying) if (inv !== ctx.inv && (!live || f.call.landedAt === undefined || f.call.landedAt > read.at)) onTheWay += f.tokens;
       const held = live ? (read.value < p.tokensHeld ? read.value : p.tokensHeld) : p.tokensHeld;
-      const free = held > onTheWay ? held - onTheWay : 0n;
+      let free = held > onTheWay ? held - onTheWay : 0n;
+      // Where the engine cannot know what a sell that is out has really done (the market paid only part of it, its
+      // outcome is unknown, a crash) the documented rule is the reference: the position's coins less everything
+      // that is out, the wallet only as a cap.
+      if (live && (this.sc.faults.partial > 0 || this.sc.faults.ghost > 0 || this.blind)) {
+        const own = p.tokensHeld > others ? p.tokensHeld - others : 0n;
+        free = read.value < own ? read.value : own;
+      }
       expect = portion(free, order.percent);
       rule = `${Number(order.percent.toFixed(4))}% of what is held (${held}${live ? `: wallet ${read.value}, books ${p.tokensHeld}` : ''}) less what other sells still have on their way (${onTheWay}${others !== onTheWay ? `; another ${others - onTheWay} had already left the wallet when it was read, the engine has not been told yet` : ''})`;
     }
-    if (c.asked !== expect) this.problem('AM1', `ask:${kind}`, `p${p.id} ${orderText(order)} asked ${c.asked}; the rule is ${rule} = ${expect}`);
+    if (c.asked !== expect) {
+      // A sell whose outcome is unknown must be settled before anything else is sold (its coins stay reserved): an
+      // ask that only fits when that sell is ignored has its own name.
+      let unsettled = 0n;
+      for (const [inv, f] of tr.flying) if (inv !== ctx.inv && f.call.uncertain) unsettled += f.tokens;
+      if (unsettled > 0n) this.problem('US1', 'sold-on-before-a-sell-of-unknown-outcome-was-settled', `p${p.id} ${orderText(order)} asked ${c.asked} while sell(s) of ${unsettled} tokens with an unknown outcome were not settled yet (the rule leaves ${expect} to ask for)`);
+      else this.problem('AM1', `ask:${kind}`, `p${p.id} ${orderText(order)} asked ${c.asked}; the rule is ${rule} = ${expect}`);
+    }
     if (c.asked <= 0n) this.problem('AM1', 'ask-zero', `p${p.id} ${orderText(order)} asked to sell ${c.asked} tokens`);
     if (c.live !== live || c.exit !== live) this.problem('X1', 'sell-real-or-test', `p${p.id} is a ${p.mode} position; its sell went out as ${c.live ? 'real' : 'test'} (exit=${c.exit})`);
     if (c.live && !this.market.buys.some((b) => b.pid === p.id && b.live && b.landedAt !== undefined)) {
@@ -598,13 +638,40 @@ class Run {
     this.problem('ST1', now ? 'sell-of-a-closed-position-sold-the-next-position\'s-coins' : 'sell-of-a-closed-position-landed', `sell#${c.id} (${orderText(c.ctx?.order)}, sent ${((this.sim.now - c.t0) / 1000).toFixed(1)}s ago for p${p.id}) landed after p${p.id} was ${p.status}: it sold ${c.sold} of ${short(c.mint)}${now ? `, which belong to p${now.id} (opened since)` : ''}`);
   }
 
+  /** The engine asked the chain about a sell of unknown outcome. A final answer ends the wait. */
+  private sellSettled(c: SellCall, final: boolean): void {
+    const ctx = c.ctx;
+    const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
+    this.line(`exec sell#${c.id} p${c.pid ?? '?'} read again from its own transaction: ${c.landedAt !== undefined ? `it landed (sold ${c.sold} for ${c.exact})` : c.chainFailed ? 'it failed' : final ? 'never found: it did not land' : 'not found yet'}`);
+    if (!tr || !ctx || c.gen !== this.gen || !final) return;
+    queueMicrotask(() => {
+      tr.flying.delete(ctx.inv);
+      if (ctx.kind !== 'bag') tr.queueFlying = Math.max(0, tr.queueFlying - 1);
+    });
+    if (c.landedAt === undefined && ctx.order) {
+      const failKey = ctx.kind === 'bag' ? `bag#${ctx.inv}` : okey(ctx.order);
+      tr.failed.set(failKey, (tr.failed.get(failKey) ?? 0) + 1);
+      if (ctx.kind === 'bag') tr.bagFailedAt = this.sim.now;
+    } else if (ctx.order) {
+      // Booked from its own transaction: the same accounting as a sell that was confirmed in time.
+      const k = okey(ctx.order);
+      const o = ctx.order;
+      if ((c.sold ?? 0n) > 0n && (o.reason === 'timed' || o.reason === 'stop_loss' || o.reason === 'dead_coin') && !o.everything) {
+        const hit = tr.success.get(k);
+        if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
+        else { hit.n++; if (!hit.firstPartial) this.problem('DF1', `fired-twice:${orderKind(ctx, o)}`, `p${tr.pid} ${orderText(o)} sold a second time (sell#${c.id}, ${c.sold} tokens)`); }
+      }
+      if (ctx.kind !== 'bag' && o.percent >= 100 && c.sold === c.asked && !this.blind && this.sc.faults.partial === 0) tr.fullExitSold.set(ctx.inv, c);
+    }
+  }
+
   private sellDone(c: SellCall): void {
     const ctx = c.ctx;
     const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
-    this.line(`exec sell#${c.id} p${c.pid ?? '?'} ${c.severed ? `answer lost (the engine is gone)${c.landedAt !== undefined ? ' — it DID land' : ''}` : c.ok ? `ok: sold ${c.sold}, est ${c.est}${c.live ? `, exact ${c.exact}` : ''}` : `FAILED ${c.error}${c.ghost ? '  [it DID land]' : ''}`}`);
+    this.line(`exec sell#${c.id} p${c.pid ?? '?'} ${c.severed ? `answer lost (the engine is gone)${c.landedAt !== undefined ? ' — it DID land' : ''}` : c.ok ? `ok: sold ${c.sold}, est ${c.est}${c.live ? `, exact ${c.exact}` : ''}` : `${c.uncertain ? 'OUTCOME UNKNOWN' : 'FAILED'} ${c.error}${c.uncertain ? (c.landedAt !== undefined ? '  [it DID land]' : '  [it did not land]') : ''}`}`);
     if (!tr || !ctx?.order) return;
     const order = ctx.order;
-    if (c.gen === this.gen) {
+    if (c.gen === this.gen && !(c.uncertain && c.signature && !c.severed)) {
       // The engine keeps this sell's tokens reserved until its await returns (the next microtask), not until now:
       // a step that is started in between must still see them as "out".
       queueMicrotask(() => {
@@ -613,12 +680,16 @@ class Run {
       });
     }
     if (c.severed || c.gen !== this.gen) return;
+    // "Sent, outcome unknown": not a failure yet. The engine asks the chain what became of it (sellSettled) and
+    // keeps its coins reserved until it knows.
+    if (c.uncertain && c.signature) return;
     const k = okey(order);
     const failKey = ctx.kind === 'bag' ? `bag#${ctx.inv}` : k;
     const kind = orderKind(ctx, order);
     if (c.ok) {
       tr.failed.delete(failKey);
-      if ((c.sold ?? 0n) > 0n && (order.reason === 'timed' || order.reason === 'stop_loss' || order.reason === 'dead_coin')) {
+      // (the last step of a bag exit stays on duty and may sell in several parts: documented)
+      if ((c.sold ?? 0n) > 0n && (order.reason === 'timed' || order.reason === 'stop_loss' || order.reason === 'dead_coin') && !order.everything) {
         const hit = tr.success.get(k);
         if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
         else {
@@ -633,6 +704,7 @@ class Run {
       if (order.reason === 'manual') tr.manualPartial = c.sold! < c.asked;
     } else {
       tr.failed.set(failKey, (tr.failed.get(failKey) ?? 0) + 1);
+      if (ctx.kind === 'bag') tr.bagFailedAt = this.sim.now;
       if (order.reason === 'manual') return; // Sell now reports its last failure only (checked where it is pressed)
       const from = tr.invoked.get(failKey) ?? 0;
       this.post.push(() => {
@@ -678,7 +750,9 @@ class Run {
       if (p.tokensBought !== buys[0]!.tokens) this.problem('M1', 'bought!=buy-fill', `p${pid} tokensBought ${p.tokensBought}, its buy fill says ${buys[0]!.tokens}`);
     } else if (!tr.recovered) this.problem('M1', 'open-without-a-buy-fill', `p${pid} is ${p.status} and has no buy fill`);
     const sum = sells.reduce((a, f) => a + f.lamports, 0n);
-    if (p.proceedsLamports !== sum) {
+    // (reported once per position, with the booking that broke it: the gap stays for good)
+    if (p.proceedsLamports !== sum && !this.proceedsOff.has(pid)) {
+      this.proceedsOff.add(pid);
       this.problem('M2', `proceeds!=sell-fills@${tr.proceedsWriter || '?'}`, `p${pid} proceedsLamports ${p.proceedsLamports}, its ${sells.length} sell fills add up to ${sum} (difference ${p.proceedsLamports - sum}; last written by ${tr.proceedsWriter})`);
     }
   }
@@ -713,7 +787,7 @@ class Run {
         const p = active.find((x) => x.userId === uid && x.mint === mint);
         // (a sell that came back is booked only after the wallet has been read again: wait for that)
         const tr = p ? this.pos.get(p.id) : undefined;
-        if (tr && (tr.reading > 0 || tr.queueActive > 0) && !final) continue;
+        if (tr && (tr.reading > 0 || tr.queueActive > 0 || tr.flying.size > 0) && !final) continue;
         if (!p || p.mode !== 'live') {
           if (wallet > 0n && !this.orphanSeen.has(`${owner}|${mint}|${wallet}`)) {
             this.orphanSeen.add(`${owner}|${mint}|${wallet}`);
@@ -879,6 +953,7 @@ class Run {
     const tr = this.pos.get(p.id);
     const gen = this.gen;
     const from = this.feed.length;
+    const pressedAt = this.sim.now;
     if (tr) tr.manualPartial = false;
     this.engine.sellNow(p.userId, p.id).then((r) => {
       if (gen !== this.gen) return;
@@ -895,7 +970,7 @@ class Run {
         for (const f of tr?.flying.values() ?? []) out += f.tokens;
         let running = 0;
         for (const n of tr?.bagActive.values() ?? []) running += n;
-        if (now && now.status !== 'closed' && now.tokensHeld > out && running === 0 && this.sc.faults.partial === 0 && !this.blind) this.problem('SN1', 'sell-now-said-ok-position-still-open', `p${p.id}: Sell now answered ok and the position is ${now.status} holding ${now.tokensHeld} (other sells have ${out} out, no timed step is running)`);
+        if (now && now.status !== 'closed' && now.tokensHeld > out && running === 0 && this.sc.faults.partial === 0 && !this.blind && (tr?.bagFailedAt ?? -1) < pressedAt) this.problem('SN1', 'sell-now-said-ok-position-still-open', `p${p.id}: Sell now answered ok and the position is ${now.status} holding ${now.tokensHeld} (other sells have ${out} out, no timed step is running)`);
       } else if (p.status !== 'open') {
         if (r.error !== 'no open position with that id') this.problem('SN1', 'sell-now-on-a-non-open-position', `p${p.id} was ${p.status}; Sell now answered "${r.error}"`);
       } else if (r.error !== 'position is not open' && now?.status === 'open') {
@@ -907,22 +982,26 @@ class Run {
   /** What the rules say this leader buy must lead to, checked against what the engine did (invariant 5). */
   private async deliverBuy(t: LeaderTrade, nothing: 'stale' | 'dup' | null): Promise<void> {
     const { store } = this;
-    const expect: { copyId: number; userId: number; want: 'buy' | RegExp; why: string }[] = [];
+    // For every copy that follows this wallet: 'buy' when no rule stands in the way, otherwise every rule that does
+    // (the feed must name one of them; which one comes first is the engine's business).
+    const expect: { copyId: number; userId: number; want: 'buy' | RegExp[]; why: string }[] = [];
     const later = this.sellSlot.get(`${t.leader}:${t.mint}`) ?? -1;
     if (!nothing && later <= t.slot) {
       const holding = new Set<number>();
       for (const [id, c] of [...this.copies].sort((a, b) => a[0] - b[0])) {
         const s = c.last;
         if (c.deleted || !s.enabled || s.leader !== t.leader || this.userOff.has(c.userId)) continue;
-        const e = (want: 'buy' | RegExp, why: string) => expect.push({ copyId: id, userId: c.userId, want, why });
         const min = lamports(s.minLeaderBuySol);
         // An amount read from pump.fun's event is about 1 % under the real spend: within 1.5 % of the minimum it counts.
         const meets = t.solLamports >= min || (t.approx === true && t.solLamports * 1000n >= min * 985n);
-        if (!meets) e(/under your .* minimum/, 'the leader bought less than the minimum');
-        else if (holding.has(c.userId) || store.activePositionOfUser(c.userId, t.mint)) e(/already holding this coin/, 'the user already has a position in this coin');
-        else if (s.oncePerCoin && store.hasTraded(id, t.mint)) e(/already traded this coin/, 'buy once per coin');
-        else if (s.buySol > this.maxBuy) e(/above the server limit/, 'above max per buy');
-        else { e('buy', 'every rule allows it'); holding.add(c.userId); }
+        const against: [RegExp, string][] = [];
+        if (!meets) against.push([/under your .* minimum/, 'the leader bought less than the minimum']);
+        if (holding.has(c.userId) || store.activePositionOfUser(c.userId, t.mint)) against.push([/already holding this coin/, 'the user already has a position in this coin']);
+        if ([...this.pos.values()].some((tr) => tr.userId === c.userId && tr.mint === t.mint && tr.flying.size > 0)) against.push([/a sell of this coin is still on its way/, 'a sell of an earlier position of this coin is still on its way']);
+        if (s.oncePerCoin && store.hasTraded(id, t.mint)) against.push([/already traded this coin/, 'buy once per coin']);
+        if (s.buySol > this.maxBuy) against.push([/above the server limit/, 'above max per buy']);
+        if (against.length) expect.push({ copyId: id, userId: c.userId, want: against.map((a) => a[0]), why: against.map((a) => a[1]).join(' / ') });
+        else { expect.push({ copyId: id, userId: c.userId, want: 'buy', why: 'every rule allows it' }); holding.add(c.userId); }
       }
     }
     const posFrom = this.inserted.length;
@@ -941,8 +1020,9 @@ class Run {
       if (e.want === 'buy') {
         if (pos.length !== 1) this.problem('B2', 'did-not-buy', `copy #${e.copyId}: ${e.why}, yet ${pos.length} positions were opened${skip.length ? ` and the feed says "${skip[0]!.message}"` : ''}`);
       } else {
-        if (pos.length) this.problem('B1', `bought-against-a-rule:${e.why.replace(/\s+/g, '-')}`, `copy #${e.copyId} opened p${pos[0]!.pid} although ${e.why}`);
-        if (!skip.some((s) => (e.want as RegExp).test(s.message))) this.problem('FE3', `skip-without-its-feed-line:${e.why.replace(/\s+/g, '-')}`, `copy #${e.copyId}: ${e.why}; feed lines: ${JSON.stringify(skip.map((s) => s.message))}`);
+        const first = e.why.split(' / ')[0]!.replace(/\s+/g, '-');
+        if (pos.length) this.problem('B1', `bought-against-a-rule:${first}`, `copy #${e.copyId} opened p${pos[0]!.pid} although ${e.why}`);
+        if (!skip.some((s) => (e.want as RegExp[]).some((re) => re.test(s.message)))) this.problem('FE3', `skip-without-its-feed-line:${first}`, `copy #${e.copyId}: ${e.why}; feed lines: ${JSON.stringify(skip.map((s) => s.message))}`);
       }
     }
     for (const m of made) {
@@ -1089,7 +1169,7 @@ class Run {
         sigs.add(f.signature!);
         // What the engine could know: the exact figure once it arrived (while that engine was still running, or
         // read from the buy's own transaction afterwards), the estimate otherwise (the real executor documents both).
-        const exactKnown = !op.live || (op.refined === 'exact' && op.refineSeen === true) || (op.kind === 'buy' && op.settled === true);
+        const exactKnown = !op.live || (op.refined === 'exact' && op.refineSeen === true) || op.settled === true;
         const known = exactKnown ? op.exact! : op.est!;
         if (op.live && !exactKnown && op.exact !== op.est) this.note(op.refined === 'null' ? 'estimate-kept:the-exact-figure-could-not-be-read' : 'estimate-kept:the-server-restarted-before-the-exact-figure-arrived');
         if (op.kind === 'buy') {
@@ -1108,8 +1188,8 @@ class Run {
       for (const op of market.sells) {
         if (op.pid !== p.id || op.landedAt === undefined || (op.sold ?? 0n) <= 0n || sigs.has(op.signature!)) continue;
         if (!op.live && tr.zeroBookedPaper.has(op.id)) { this.note('test-fill-dropped-nothing-left-in-the-books'); continue; }
-        const why = op.ghost ? 'reported "outcome unknown", it had landed' : op.severed ? 'the engine was gone when it confirmed' : 'delivered to the engine';
-        this.problem('M3', `sold-but-not-booked:${op.ghost ? 'outcome-unknown' : op.severed ? 'engine-gone' : 'delivered'}`, `p${p.id}: sell#${op.id} sold ${op.sold} for ${op.exact} lamports (${why}) and there is no fill for it`);
+        const why = op.uncertain ? 'reported "outcome unknown", it had landed' : op.severed ? 'the engine was gone when it confirmed' : 'delivered to the engine';
+        this.problem('M3', `sold-but-not-booked:${op.uncertain ? 'outcome-unknown' : op.severed ? 'engine-gone' : 'delivered'}`, `p${p.id}: sell#${op.id} sold ${op.sold} for ${op.exact} lamports (${why}) and there is no fill for it`);
       }
       if (p.mode === 'live') {
         const soldTokens = fills.filter((f) => f.side === 'sell').reduce((a, f) => a + f.tokens, 0n);
@@ -1200,7 +1280,7 @@ class Run {
         let exact = true;
         for (const p of closed) {
           for (const b of market.buys) if (b.pid === p.id && b.landedAt !== undefined) { real -= b.exact!; if (!((b.refined === 'exact' && b.refineSeen) || b.settled)) exact = false; }
-          for (const x of market.sells) if (x.pid === p.id && x.landedAt !== undefined) { real += x.exact!; if (!(x.refined === 'exact' && x.refineSeen)) exact = false; }
+          for (const x of market.sells) if (x.pid === p.id && x.landedAt !== undefined) { real += x.exact!; if (!((x.refined === 'exact' && x.refineSeen) || x.settled)) exact = false; }
           if (this.pos.get(p.id)!.recovered && !market.buys.some((b) => b.pid === p.id && b.settled)) exact = false;
         }
         if (exact && shown !== real) this.problem('M4', 'profit-shown!=wallet-change', `${name}: closed real positions show ${shown} lamports of profit, the wallet's SOL changed by ${real} through them (difference ${shown - real})`);

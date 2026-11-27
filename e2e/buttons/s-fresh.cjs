@@ -325,10 +325,10 @@ async function freshUser(env) {
       [{ tip: 0.6 }, 'tip must be between 0 and 0.5 SOL'],
       [{ sprio: 0.2 }, 'sell priority fee must be between 0 and 0.1 SOL'],
       [{ stip: 0.6 }, 'sell tip must be between 0 and 0.5 SOL'],
-      [{ min: -1 }, 'the minimum leader buy cannot be negative'],
+      [{ min: -1 }, /^(the minimum leader buy cannot be negative|Only when they buy at least: "-1" is not a number)$/],
       [{ timed: { on: true, rows: [[5, 0]] } }, 'timed sell 1: the percent to sell must be above 0 and at most 100'],
       [{ timed: { on: true, rows: [[5, 101]] } }, 'timed sell 1: the percent to sell must be above 0 and at most 100'],
-      [{ timed: { on: true, rows: [[-1, 50]] } }, 'timed sell 1: seconds must be 0 or more (at most 7 days)'],
+      [{ timed: { on: true, rows: [[-1, 50]] } }, /^(timed sell 1: seconds must be 0 or more \(at most 7 days\)|seconds: "-1" is not a number)$/],
       [{ timed: { on: true, rows: Array.from({ length: 11 }, (_, i) => [i + 1, 10]) } }, 'at most 10 timed sells'],
       [{ stop: { on: true, rows: [[100, 50]] } }, 'stop loss 1: the loss must be between 0 % and 100 %'],
       [{ stop: { on: true, rows: [[30, 0]] } }, 'stop loss 1: the percent to sell must be above 0 and at most 100'],
@@ -343,7 +343,7 @@ async function freshUser(env) {
       const [resp] = await Promise.all([page.waitForResponse((r2) => new URL(r2.url()).pathname === '/api/copies', { timeout: 4000 }).catch(() => null), ui.submitEditor(page)]);
       await sleep(150);
       const e = (await ui.editorOpen(page)) ? (await ui.readEditor(page)).err : '(the editor closed)';
-      if (e !== want) got.push({ typed: patch, said: e, expected: want, status: resp && resp.status() });
+      if (want instanceof RegExp ? !want.test(e) : e !== want) got.push({ typed: patch, said: e, expected: String(want), status: resp && resp.status() });
     }
     book.ok(`every out-of-range number (${bad.length} tried) is refused with its own sentence and nothing is saved`, got.length === 0 && (await ui.state(page)).copies.length === after, got);
     await ui.closeEditor(page, 'cancel');
@@ -392,6 +392,39 @@ async function freshUser(env) {
     await screenCheck(page, book, 'user-dashboard-copies');
     const d = await ui.readDash(page);
     book.eq('the top card counts the copies', d.stats[3].foot, '0 SOL unrealized · copying 4 of 4');
+
+    // A comma typed as the decimal point, and a number so small the page prints it as "5e-7".
+    const dl = made['copy D (no automatic sell at all, 100 SOL buy)'];
+    if (dl) {
+      await ui.openEdit(page, dl.id);
+      await page.locator('#f-buy').fill('0,25');
+      await page.locator('#f-stip').fill('0.0000005');
+      await ui.hideToast(page);
+      await ui.submitEditor(page);
+      const t = await ui.toast(page, 4000);
+      await until(async () => !(await ui.editorOpen(page)), { timeout: 3000 });
+      let now = (await ui.state(page)).copies.find((c) => c.id === dl.id);
+      book.ok('"0,25" typed with a comma is saved as 0.25 SOL (never 25, never 0)', !!t && t.text === 'Saved' && now.buySol === 0.25, { toast: t, savedBuy: now.buySol, formError: (await ui.editorOpen(page)) ? (await ui.readEditor(page)).err : null });
+      if (await ui.editorOpen(page)) await ui.closeEditor(page, 'cancel');
+      book.eq('a sell tip of 0.0000005 SOL is saved as typed', now.sellTipSol, 0.0000005);
+      await ui.openEdit(page, dl.id);
+      const ed = await ui.readEditor(page);
+      await ui.hideToast(page);
+      await ui.submitEditor(page);
+      const t2 = await ui.toast(page, 4000);
+      const stuck = await ui.editorOpen(page);
+      book.ok('a copy holding a very small number (shown by the editor as "5e-7") can be opened and saved again untouched', !!t2 && t2.text === 'Saved' && !stuck, { theBoxShows: ed.stip, toast: t2, editorSays: stuck ? (await ui.readEditor(page)).err : null });
+      if (stuck) await ui.closeEditor(page, 'cancel');
+      const row = (await ui.readDash(page)).copies.find((c) => c.id === dl.id);
+      book.note('how the dashboard prints a 0.0000005 SOL tip', row && row.meta[0]);
+      // back to what the later checks expect
+      await ui.openEdit(page, dl.id);
+      await page.locator('#f-buy').fill('100');
+      await page.locator('#f-stip').fill('0');
+      await ui.submitEditor(page);
+      await until(async () => !(await ui.editorOpen(page)), { timeout: 4000 });
+      if (await ui.editorOpen(page)) await ui.closeEditor(page, 'cancel');
+    }
     const c = made['copy C (only their full exit, stop loss, dead coin; smallest and largest allowed fees)'];
     if (c) book.eq('a copy without a nickname is named after the wallet', c.name, X.short(leaders[2]));
   });

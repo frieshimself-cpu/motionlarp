@@ -1,5 +1,5 @@
 {
- "about": "Scharo preset, real trades, nothing fails. Our +2 s sell (40 %) has landed on chain; the engine is told 0.6 s later (a normal confirmation delay when a status read stalls). In that gap the copied wallet sells its whole bag. The exit asks for 20 % of the bag instead of the 60 % still in the wallet, and when the +2 s sell is then booked the position is closed with 40 % of the bag still in the wallet.",
+ "about": "Scharo preset (7 SOL), real trades, nothing fails. Our +2 s sell (40 %) has landed on chain, but the engine is told only 1.1 s later (one stalled status read is enough). In that gap the copied wallet sells its whole bag. The exit asks for 20 % of the bag instead of the 60 % still in the wallet; it is confirmed before the +2 s sell is, and when the +2 s sell is then booked the position is CLOSED with 40 % of the bag (2.8 SOL at the buy price) still in the wallet. Nothing will ever sell it.",
  "expect": [
   "AM1:ask:mirror",
   "T5:coins-in-wallet-no-position",
@@ -105,19 +105,25 @@
    }
   },
   {
-   "dt": 300,
+   "dt": 400,
    "act": {
     "a": "tick"
    }
   },
   {
-   "dt": 300,
+   "dt": 400,
    "act": {
     "a": "tick"
    }
   },
   {
-   "dt": 1100,
+   "dt": 400,
+   "act": {
+    "a": "tick"
+   }
+  },
+  {
+   "dt": 500,
    "act": {
     "a": "tick"
    }
@@ -144,11 +150,11 @@
   "sell": [
    {
     "L1": 200,
-    "L2": 600,
+    "L2": 1100,
     "L3": 100
    },
    {
-    "L1": 300,
+    "L1": 800,
     "L2": 0,
     "L3": 100
    }
