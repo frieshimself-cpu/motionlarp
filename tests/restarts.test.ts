@@ -974,6 +974,81 @@ describe('a trade whose outcome is unknown, on a slow chain or past its last blo
     s.engine.stop();
   });
 
+  it('the settling pass does not book a second time a buy of this process that was booked while the pass waited on a slow read (two buy fills, its exit started again)', async () => {
+    const s = server(none);
+    const chain = s.chain as unknown as { buy: (req: { lamports: bigint; onSigned?: (sig: string, info: unknown) => void }) => Promise<unknown>; settleBuy: (sig: string) => Promise<unknown> };
+    // A buy from before a crash: signed (B1), its outcome never heard
+    chain.buy = async (req) => { req.onSigned?.('B1', { lastValidBlockHeight: 100, feeLamports: 0n }); return new Promise(() => undefined); };
+    void s.engine.onLeaderTrade(trade('buy')); await sleep(5);
+    s.crash();
+    // In the new process, their buy of another coin: in flight while the settling pass starts
+    const inFlight = gate();
+    chain.buy = async (req) => { req.onSigned?.('B2', { lastValidBlockHeight: 100, feeLamports: 0n }); await inFlight.p; s.chain.held += 1_000_000n; return { ok: true, signature: 'B2', tokens: 1_000_000n, lamports: req.lamports, simulated: false }; };
+    void s.engine.onLeaderTrade(trade('buy', OTHER)); await sleep(5);
+    // The pass reads the first buy slowly (a node that takes seconds); the second one landed
+    const slow = gate();
+    chain.settleBuy = async (sig: string) => { if (sig === 'B1') { await slow.p; return { state: 'not_found', slot: 1_000 + s.chain.height }; } return { state: 'landed', tokens: 1_000_000n, lamports: SOL }; };
+    const pass = s.engine.restore(); await sleep(5); // the pass has taken its list of opening buys: B1's, then B2's
+    inFlight.open(); await sleep(5); // B2's own step books it meanwhile
+    const p2 = s.store.activePositions().find((p) => p.mint === OTHER)!;
+    expect(p2.status).toBe('open');
+    slow.open(); await pass; await s.engine.idle();
+    expect(s.store.fills(p2.id).filter((f) => f.side === 'buy')).toHaveLength(1); // it was booked a second time
+    expect(s.feed().filter((m) => /^Bought/.test(m) && /confirmed late/.test(m))).toHaveLength(0);
+  });
+
+  it('the settling pass does not mark failed a buy of this process that was signed and booked after the pass took its list (its coins would never be sold)', async () => {
+    const s = server(none);
+    const chain = s.chain as unknown as { buy: (req: { lamports: bigint; onSigned?: (sig: string, info: unknown) => void }) => Promise<unknown>; settleBuy: (sig: string) => Promise<unknown> };
+    chain.buy = async (req) => { req.onSigned?.('B1', { lastValidBlockHeight: 100, feeLamports: 0n }); return new Promise(() => undefined); };
+    void s.engine.onLeaderTrade(trade('buy')); await sleep(5);
+    s.crash();
+    const sign = gate();
+    const land = gate();
+    chain.buy = async (req) => { await sign.p; req.onSigned?.('B2', { lastValidBlockHeight: 100, feeLamports: 0n }); await land.p; s.chain.held += 1_000_000n; return { ok: true, signature: 'B2', tokens: 1_000_000n, lamports: req.lamports, simulated: false }; };
+    void s.engine.onLeaderTrade(trade('buy', OTHER)); await sleep(5); // its position is written; not signed yet
+    const slow = gate();
+    chain.settleBuy = async (sig: string) => { if (sig === 'B1') { await slow.p; return { state: 'not_found', slot: 1_000 + s.chain.height }; } return { state: 'landed', tokens: 1_000_000n, lamports: SOL }; };
+    const pass = s.engine.restore(); await sleep(5); // the list: B1's buy, and the other one with no signature yet
+    sign.open(); await sleep(5);
+    land.open(); await sleep(5); // signed and booked by its own step meanwhile
+    slow.open(); await pass; await s.engine.idle();
+    const p2 = s.store.activePositions().find((p) => p.mint === OTHER);
+    expect(p2?.status).toBe('open'); // it was marked failed as "never sent"
+    expect(s.store.fills(p2!.id).filter((f) => f.side === 'buy')).toHaveLength(1);
+  });
+
+  it('two settling passes at once (the 5 s and the 30 s one) book a buy whose booking had failed only once', async () => {
+    const s = server(none);
+    const chain = s.chain as unknown as { settleBuy: (sig: string) => Promise<unknown> };
+    const read = gate();
+    chain.settleBuy = async () => { await read.p; return { state: 'landed', tokens: 1_000_000n, lamports: SOL }; };
+    const insertFill = s.store.insertFill.bind(s.store);
+    let broken = true;
+    s.store.insertFill = (f) => { if (broken && f.side === 'buy') { broken = false; throw new Error('disk I/O error'); } return insertFill(f); };
+    await s.buy(); // it landed; its booking failed: "opening", to be booked from its own transaction
+    expect(s.position().status).toBe('opening');
+    const a = s.engine.restore();
+    const b = s.engine.restore(); // both passes read it
+    await sleep(5); read.open(); await Promise.all([a, b]); await s.engine.idle();
+    expect(s.position()).toMatchObject({ status: 'open', tokensHeld: 1_000_000n });
+    expect(s.store.fills(1).filter((f) => f.side === 'buy')).toHaveLength(1);
+  });
+
+  it('the settling pass reads the chain tip before the status of a buy it settles', async () => {
+    const s = server(none);
+    const order: string[] = [];
+    const chain = s.chain as unknown as { chainTip: () => Promise<unknown>; settleBuy: (sig: string) => Promise<unknown> };
+    unknownBuy(s);
+    chain.chainTip = async () => { order.push('tip'); return { height: s.chain.height, slot: 1_000 + s.chain.height }; };
+    chain.settleBuy = async () => { order.push('status'); return { state: 'not_found', slot: 1_000 + s.chain.height }; };
+    s.chain.height = 50;
+    await s.buy();
+    order.length = 0;
+    s.at(20_000); await s.engine.restore(); await s.engine.idle();
+    expect(order).toEqual(['tip', 'status']);
+  });
+
   it('the settling pass reads the chain tip once, not once for every buy it settles', async () => {
     const s = server(none);
     const chain = s.chain as unknown as { chainTip: () => Promise<unknown> };

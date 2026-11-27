@@ -1581,6 +1581,11 @@ export class Engine {
     return age > fallbackMs;
   }
 
+  /** A buy the settling pass may still settle: "opening", and no step of this process running for it. */
+  private stillOpening(positionId: number): boolean {
+    return !this.queues.has(positionId) && this.deps.store.position(positionId)?.status === 'opening';
+  }
+
   /** The highest chain tip read so far (see chainTip). */
   private highestTip: { height: number; slot?: number } | null = null;
 
@@ -1713,8 +1718,12 @@ export class Engine {
   private async settleOpening(): Promise<void> {
     const { store, executor } = this.deps;
     let passTip: { height: number; slot?: number } | null | undefined;
-    for (const p of store.openingPositions()) {
-      if (this.queues.has(p.id)) continue; // still running in this process
+    for (const listed of store.openingPositions()) {
+      // (read again at its turn: the pass's reads can take seconds, and a buy of this process may have been signed,
+      // booked or failed meanwhile; from the list's old row it was booked a second time, or marked failed as never
+      // sent, its coins never sold)
+      if (!this.stillOpening(listed.id)) continue; // (or still running in this process)
+      const p = store.position(listed.id)!;
       const label = `${shortMint(p.mint)} (${p.copyName})`;
       const wallet = this.deps.walletFor(p.userId);
       // A buy's signature is written down before it is sent, and only when it is sent for real: one without it was
@@ -1737,6 +1746,10 @@ export class Engine {
           if (p.buyLastValid !== null && passTip === undefined) passTip = await this.chainTip();
           const tip = p.buyLastValid !== null ? passTip ?? null : null;
           const r = await executor.settleBuy(p.buySig, wallet.publicKey.toBase58(), p.mint);
+          // (the pass took its list before its reads, which can take seconds: a buy of this process booked meanwhile, by
+          // its own step or another pass, is not booked, nor failed, a second time; it was booked twice, its exit
+          // started again)
+          if (!this.stillOpening(p.id)) continue;
           if (r.state === 'landed') {
             // (one of this process whose booking failed: from its own confirmation, so its timed sells keep their times)
             const ours = this.unbookedBuys.get(p.id);
@@ -1763,6 +1776,7 @@ export class Engine {
           continue;
         }
         const held = await executor.tokenBalance(wallet.publicKey.toBase58(), p.mint);
+        if (!this.stillOpening(p.id)) continue;
         if (held > 0n) {
           const cost = BigInt(Math.round((store.copy(p.copyId)?.settings.buySol ?? 0) * 1e9));
           const now = this.now();
