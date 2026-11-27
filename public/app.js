@@ -1,14 +1,19 @@
 // WalletMotion front end: no framework, no build step. State comes from /api/state every few seconds.
 import { $, $$, app, modal, esc, short, fmtSol, signed, pct, cls, solscanTx, solscanAcct, coinLink, ago, hue, api, toast, brandHtml, modePill, openModal, closeModal } from '/ui.js';
-import { plain, dayLabel, openPnl } from '/figures.js';
+import { plain, dayLabel, openPnl, closedHeading } from '/figures.js';
 
 let config = null;
 let state = null;
 let tab = 'dash';
 let history = null;
 let pollTimer = null;
-/** The viewer's clock decides what "today" is. */
-const TZ = `?tz=${-new Date().getTimezoneOffset()}`;
+/** The viewer's clock decides what "today" is, and on which day each trade closed: its offset now, and its time zone,
+ *  whose offset may have been another one when a trade closed (summer time). */
+const TZ = (() => {
+  let zone = '';
+  try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { /* a browser without time zones: the offset alone */ }
+  return `?tz=${-new Date().getTimezoneOffset()}${zone ? `&zone=${encodeURIComponent(zone)}` : ''}`;
+})();
 
 // ── getting in: the license key is the login ────────────────────────────
 function renderAuth(error = '') {
@@ -156,16 +161,25 @@ function sellTags(sell) {
   return t.length ? t.join('') : '<span class="tag off">No automatic sells</span>';
 }
 
+/** A copy's numbers, all of one kind as on the profit cards (real once there are real trades); the other kind's after
+ *  them, apart: "2 open · 2 closed · +0.744 SOL · test: 2 closed +0.959". */
+function copyNumbers(st) {
+  const main = `${st.open} open · ${st.closed} closed · <span class="${cls(st.pnlSol)}">${signed(st.pnlSol, 3)} SOL</span>`;
+  const o = st.other;
+  if (!o || (!o.open && !o.closed)) return main;
+  const parts = [o.open ? `${o.open} open` : '', o.closed ? `${o.closed} closed <span class="${cls(o.pnlSol)}">${signed(o.pnlSol, 3)}</span>` : ''].filter(Boolean);
+  return `${main} · ${esc(o.kind)}: ${parts.join(' · ')}`;
+}
+
 function renderCopy(c) {
   const color = hue(c.leader);
   const initials = (c.name || c.leader).replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '··';
-  const pnl = c.stats.pnlSol;
   return `<div class="row ${c.enabled ? '' : 'paused'}">
     <div class="avatar" style="background:${color}">${esc(initials)}</div>
     <div class="info">
       <div class="name">${esc(c.name)} ${state.server.live ? '<span class="pill live">LIVE</span>' : '<span class="pill test">TEST</span>'}</div>
       <div class="meta"><a href="${solscanAcct(c.leader)}" target="_blank" rel="noopener" class="mono">${esc(short(c.leader))}</a> · buy <b>${plain(c.buySol)}</b> SOL when they buy ≥ <b>${plain(c.minLeaderBuySol)}</b> SOL · ${esc(feeText(c))} SOL · slippage ${plain(c.slippagePct)}%</div>
-      <div class="meta">${c.stats.open} open · ${c.stats.closed} closed · <span class="${cls(pnl)}">${signed(pnl, 3)} SOL</span></div>
+      <div class="meta">${copyNumbers(c.stats)}</div>
       <div class="tags">${sellTags(c.sell)}</div>
     </div>
     <div class="actions">
@@ -210,27 +224,30 @@ function renderHistory() {
   const winRate = h.trades ? Math.round((h.wins / h.trades) * 100) : 0;
   const days = h.pnl.days;
   const both = days.some((d) => d.mode === 'live') && days.some((d) => d.mode === 'test');
+  // Each number of the heading names what it covers: "150 real · … · the latest 200 of 250 closed positions (real and
+  // test) are listed" (an older server sends no kind: its pnl.primary is the same thing).
+  const head = closedHeading({ trades: h.trades, kind: h.kind ?? h.pnl.primary, shown: h.shown, closedAll: h.closedAll ?? h.trades });
   return `<div class="stack">
   <div class="card">
     <div class="card-head"><h2>Profit by day<span class="sub">closed positions, fees included</span></h2></div>
-    <div class="card-body flush">${days.length ? `<div class="table-wrap"><table>
+    <div class="card-body flush">${days.length ? `<div class="table-wrap"><table class="t-days">
       <thead><tr><th>Day</th>${both ? '<th></th>' : ''}<th class="num">Trades</th><th class="num">Winners</th><th class="num">Profit</th></tr></thead>
       <tbody>${days.slice(0, 60).map((d) => `<tr>
         <td>${esc(dayLabel(d.date))}</td>${both ? `<td>${d.mode === 'live' ? '<span class="pill live">LIVE</span>' : '<span class="tag off">test</span>'}</td>` : ''}
-        <td class="num">${d.trades}</td><td class="num">${d.trades ? Math.round((d.wins / d.trades) * 100) : 0}%</td>
+        <td class="num" data-label="Trades">${d.trades}</td><td class="num" data-label="Winners">${d.trades ? Math.round((d.wins / d.trades) * 100) : 0}%</td>
         <td class="num ${cls(d.pnlSol)}">${signed(d.pnlSol)} SOL</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed trades yet</b>Each day you trade gets a row here.</div>'}</div>
   </div>
   <div class="card">
-    <div class="card-head"><h2>Closed positions<span class="sub">${h.trades} · total <span class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</span> · ${winRate}% winners${h.totalFeesSol ? ` · platform fees ${fmtSol(h.totalFeesSol)} SOL` : ''}${h.shown < (h.closedAll ?? h.trades) ? ` · the latest ${h.shown} are listed` : ''}</span></h2></div>
-    <div class="card-body flush">${h.positions.length ? `<div class="table-wrap"><table>
+    <div class="card-head"><h2>Closed positions<span class="sub">${esc(head.count)} · total <span class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</span> · ${winRate}% winners${h.totalFeesSol ? ` · platform fees ${fmtSol(h.totalFeesSol)} SOL` : ''}${head.listed ? ` · ${esc(head.listed)}` : ''}</span></h2></div>
+    <div class="card-body flush">${h.positions.length ? `<div class="table-wrap"><table class="t-closed">
       <thead><tr><th>Coin</th><th>Copy</th><th>Sells</th><th class="num">Cost</th><th class="num">Returned</th><th class="num">P/L</th><th>Closed</th></tr></thead>
       <tbody>${h.positions.map((p) => `<tr>
         <td><a class="mono" href="${coinLink(p.mint)}" target="_blank" rel="noopener">${esc(short(p.mint))}</a> ${p.mode === 'live' ? '' : '<span class="tag off">test</span>'}</td>
-        <td>${esc(p.copyName)}</td>
+        <td data-label="via">${esc(p.copyName)}</td>
         <td>${p.fills.filter((f) => f.side === 'sell').map((f) => `<span class="tag">${afterBuy(p, f)}${esc(f.reason.replace('_', ' '))} ${fmtSol(f.sol)}${f.signature ? ` <a href="${solscanTx(f.signature)}" target="_blank" rel="noopener">↗</a>` : ''}</span>`).join('')}</td>
-        <td class="num">${fmtSol(p.costSol)}</td><td class="num">${fmtSol(p.proceedsSol)}</td>
+        <td class="num" data-label="Cost">${fmtSol(p.costSol)}</td><td class="num" data-label="Returned">${fmtSol(p.proceedsSol)}</td>
         <td class="num ${cls(p.pnlSol)}">${signed(p.pnlSol)}<div style="font-size:11.5px">${pct(p.pnlPct)}</div></td>
-        <td class="dim">${p.closedAt ? ago(p.closedAt) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed positions yet</b>They show up here with every sell and the profit.</div>'}</div>
+        <td class="dim" data-label="closed">${p.closedAt ? ago(p.closedAt) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed positions yet</b>They show up here with every sell and the profit.</div>'}</div>
   </div></div>`;
 }
 

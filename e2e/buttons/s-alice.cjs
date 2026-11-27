@@ -9,6 +9,50 @@ const signWord = (n) => (n > 0 ? '+' : n < 0 ? '−' : '');
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '');
 const sum = (xs) => xs.reduce((a, b) => a + b, 0n);
 
+/** The elements of a card (found by its title) drawn outside it or outside the screen, measured inside the page. */
+const SPILL = `((title, sel, screenWidth) => {
+  const card = [...document.querySelectorAll('.card')].find((c) => { const h = c.querySelector('.card-head h2'); return !!h && h.childNodes.length > 0 && h.childNodes[0].textContent.trim() === title; });
+  if (!card) return null;
+  const c = card.getBoundingClientRect();
+  const out = [];
+  for (const el of card.querySelectorAll(sel)) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    if (r.right > Math.min(c.right, screenWidth) + 1 || r.left < Math.max(c.left, 0) - 1) out.push({ el: el.tagName.toLowerCase() + (typeof el.className === 'string' && el.className ? '.' + el.className.trim().split(/\\s+/).join('.') : ''), text: (el.innerText || '').replace(/\\s+/g, ' ').slice(0, 50), left: Math.round(r.left), right: Math.round(r.right) });
+  }
+  return { card: [Math.round(c.left), Math.round(c.right)], screen: screenWidth, out: out.slice(0, 6), outside: out.length };
+})`;
+
+/** History's two tables, measured as they stand with nothing scrolled sideways: days that take more than one line,
+ *  and money cells (a day's Profit, a position's P/L) that are not on the screen. */
+const FIT = `((screenWidth) => {
+  const cards = [...document.querySelectorAll('.page > .stack > .card')];
+  const dayLines = [];
+  const hidden = [];
+  for (const [i, card] of cards.slice(0, 2).entries()) {
+    const wrap = card.querySelector('.table-wrap');
+    if (!wrap) continue;
+    const kept = wrap.scrollLeft;
+    wrap.scrollLeft = 0;
+    const w = wrap.getBoundingClientRect();
+    const right = Math.min(w.right, screenWidth);
+    for (const tr of wrap.querySelectorAll('tbody tr')) {
+      const tds = tr.querySelectorAll('td');
+      if (i === 0) {
+        const range = document.createRange();
+        range.selectNodeContents(tds[0]);
+        const lines = new Set([...range.getClientRects()].map((x) => Math.round(x.top))).size;
+        if (lines !== 1) dayLines.push({ day: tds[0].innerText.replace(/\\s+/g, ' '), lines });
+      }
+      const money = i === 0 ? tds[tds.length - 1] : tds[5];
+      const r = money.getBoundingClientRect();
+      if (r.left < Math.max(w.left, 0) - 1 || r.right > right + 1) hidden.push({ table: i === 0 ? 'Profit by day' : 'Closed positions', text: money.innerText.replace(/\\s+/g, ' '), x: [Math.round(r.left), Math.round(r.right)], visibleUpTo: Math.round(right) });
+    }
+    wrap.scrollLeft = kept;
+  }
+  return { dayLines: dayLines.slice(0, 4), daysOnMoreLines: dayLines.length, hidden: hidden.slice(0, 4), moneyCellsOffScreen: hidden.length };
+})`;
+
 /** One printed amount against the exact lamports: the number, its sign, and (when asked) its colour. */
 function amount(text, lamports, d, colour) {
   const exact = solNum(lamports);
@@ -78,15 +122,35 @@ async function checkDashboard(env, page, who, opts = {}) {
     book.eq(`${P}: copy "${s.name}": name, wallet, buy, minimum, fees, slippage`, [row.name, row.meta[0], row.leaderHref], [`${s.name} TEST`, `${X.short(s.leader)} · buy ${s.buySol} SOL when they buy ≥ ${s.minLeaderBuySol} SOL · ${X.feeText(s)} SOL · slippage ${s.slippagePct}%`, `https://solscan.io/account/${s.leader}`]);
     book.eq(`${P}: copy "${s.name}": sell rules as tags`, row.tags, X.sellTags(s.sell));
     book.eq(`${P}: copy "${s.name}": switch ${s.enabled ? 'on' : 'off (line dimmed)'}`, [row.on, row.paused, row.switchTitle], [s.enabled, !s.enabled, s.enabled ? 'Pause' : 'Resume']);
-    // Closed positions and their profit are of one kind, as on the profit cards: real ones once the account has any,
-    // test ones until then (the count and the profit then describe the same positions).
-    const m = /^(\d+) open · (\d+) closed · ([+−]?[\d.]+) SOL$/.exec(row.meta[1]) || [];
-    book.eq(`${P}: copy "${s.name}": open and closed counts (closed: the ${E.primary} ones)`, [m[1], m[2]], [String(c.open), String(c.closedOf[E.primary])]);
+    // The line is of one kind, as the profit cards are: open positions, closed ones and their profit of the real ones
+    // once the account has any, of the test ones until then (the open count mixed both kinds: "AllOn all" read
+    // "1 open · 2 closed · +0.392 SOL" while its one open position was a test one). The other kind's figures follow
+    // apart, as on the cards: "· test: 1 open · 1 closed −0.05" (a part only when there is one).
+    const otherKind = E.primary === 'live' ? 'test' : 'live';
+    const m = /^(\d+) open · (\d+) closed · ([+−]?[\d.]+) SOL(?: · (test|live): (?:(\d+) open)?(?: · )?(?:(\d+) closed ([+−]?[\d.]+))?)?$/.exec(row.meta[1]) || [];
+    book.eq(`${P}: copy "${s.name}": open and closed counts, both of the ${E.primary} positions`, [m[1], m[2]], [String(c.openOf[E.primary]), String(c.closedOf[E.primary])]);
     if (c.live !== 0n && c.test !== 0n) {
       book.ok(`${P}: copy "${s.name}": its profit keeps real and test apart`, amount(m[3], c[E.primary], 3, row.pnlClass), { shown: row.meta[1], realTradesOnly: solStr(c.live), testTradesOnly: solStr(c.test), bothAdded: solStr(c.live + c.test) });
     } else {
       book.ok(`${P}: copy "${s.name}": its profit`, amount(m[3], c[E.primary], 3, row.pnlClass), { shown: row.meta[1], exact: solStr(c[E.primary]) });
     }
+    const oOpen = c.openOf[otherKind];
+    const oClosed = c.closedOf[otherKind];
+    if (oOpen || oClosed) {
+      book.ok(`${P}: copy "${s.name}": the ${otherKind} positions apart after it (${oOpen} open, ${oClosed} closed, ${solStr(c[otherKind])} SOL)`,
+        m[4] === otherKind && m[5] === (oOpen ? String(oOpen) : undefined) && m[6] === (oClosed ? String(oClosed) : undefined) && (oClosed ? amount(m[7], c[otherKind], 3) : m[7] === undefined), { shown: row.meta[1], otherOpen: oOpen, otherClosed: oClosed, otherProfit: solStr(c[otherKind]) });
+    } else {
+      book.ok(`${P}: copy "${s.name}": no ${otherKind} part when it has no ${otherKind} position`, m.length > 0 && m[4] === undefined, row.meta[1]);
+    }
+  }
+
+  // ── nothing runs out of its card or off the screen (second review) ──
+  // A copy's sell-rule tags (ten timed steps ran from x 105 to 949 in a Copies card ending at 761 on a 1280 px screen;
+  // the Scharo preset's tag made a 320 to 375 px phone's page 378 px wide), and an open position of a copy whose
+  // nickname is 40 characters without a space (514 px on a 390 px phone).
+  for (const [title, sel] of [['Copies', '.row *'], ['Open positions', '.pos *']]) {
+    const s = await page.evaluate(`${SPILL}(${JSON.stringify(title)}, ${JSON.stringify(sel)}, ${env.vp.viewport.width})`);
+    book.ok(`${P}: everything in the ${title} card stays inside the card and on the screen`, !!s && s.outside === 0, s);
   }
 
   // ── open positions ──
@@ -157,10 +221,19 @@ async function checkHistory(env, page, who, opts = {}) {
   }
   book.ok(`${P}: each day's profit = SOL returned − SOL spent of the positions closed that day, signed and coloured`, badDay.length === 0, badDay.slice(0, 5));
 
+  // ── on any screen, a phone's included (second review) ──
+  // At 390 px each day took three lines ("Fri, / Nov / 27") and the money columns started off the screen, behind a
+  // sideways scroll: each day on one line, and every day's Profit and every position's P/L on the screen as it opens.
+  const fit = await page.evaluate(`${FIT}(${env.vp.viewport.width})`);
+  book.ok(`${P}: each day of "Profit by day" on one line`, fit.daysOnMoreLines === 0, fit.dayLines);
+  book.ok(`${P}: every day's Profit and every position's P/L on the screen without scrolling sideways`, fit.moneyCellsOffScreen === 0, fit.hidden);
+
   // ── the heading of the closed positions ──
   // It counts EVERY closed position of the kind the profit cards show (real ones once there are any, test ones until
   // then), not just the rows listed under it, and says so when the list holds only the latest 200 (findings B1, B2).
-  const m = /^Closed positions\s*(\d+) · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)?( · the latest (\d+) are listed)?$/.exec(h.closedHead) || [];
+  // Each number names what it covers (second review): with test rows in the list the count says "real"; a test-only
+  // account's says "test"; a cut list says of how many, and of which kinds when there are both.
+  const m = /^Closed positions\s*(\d+)( real| test)? · total ([+−]?[\d.]+) SOL · (\d+)% winners(?: · platform fees ([\d.]+) SOL)?( · the latest (\d+) of (\d+)( closed positions \(real and test\))? are listed)?$/.exec(h.closedHead) || [];
   const live = E.modes.live, test = E.modes.test;
   const all = { trades: live.trades + test.trades, pnl: live.all + test.all, wins: live.wins + test.wins, fees: live.fees + test.fees };
   const shownKind = E.primary === 'live' ? live : test;
@@ -169,16 +242,20 @@ async function checkHistory(env, page, who, opts = {}) {
     // judged once, in the viewer's main time zone
   } else if (both) {
     book.ok(`${P}: the heading's total keeps real and test apart (${live.trades} real trades, ${solStr(live.all)} SOL; ${test.trades} test trades, ${solStr(test.all)} SOL)`,
-      m[1] === String(live.trades) && amount(m[2], live.all, 4) && m[3] === String(winners(live)) && (live.fees === 0n ? m[4] === undefined : matches(m[4], solNum(live.fees))), { shown: h.closedHead, realOnly: { trades: live.trades, total: solStr(live.all), winners: `${winners(live)}%`, platformFees: solStr(live.fees) }, testOnly: { trades: test.trades, total: solStr(test.all), winners: `${winners(test)}%`, platformFees: solStr(test.fees) }, bothAdded: { trades: all.trades, total: solStr(all.pnl), winners: `${winners(all)}%`, platformFees: solStr(all.fees) } });
+      m[1] === String(live.trades) && amount(m[3], live.all, 4) && m[4] === String(winners(live)) && (live.fees === 0n ? m[5] === undefined : matches(m[5], solNum(live.fees))), { shown: h.closedHead, realOnly: { trades: live.trades, total: solStr(live.all), winners: `${winners(live)}%`, platformFees: solStr(live.fees) }, testOnly: { trades: test.trades, total: solStr(test.all), winners: `${winners(test)}%`, platformFees: solStr(test.fees) }, bothAdded: { trades: all.trades, total: solStr(all.pnl), winners: `${winners(all)}%`, platformFees: solStr(all.fees) } });
+    book.ok(`${P}: test rows are listed under it, so the heading's count says it is of the real ones ("${live.trades} real")`, m[2] === ' real' && h.closed.some((r) => r.test), { shown: h.closedHead, testRowsListed: h.closed.filter((r) => r.test).length });
   } else {
     book.ok(`${P}: the heading counts every closed position (${all.trades}) and totals them (${solStr(all.pnl)} SOL, ${winners(all)}% winners, platform fees ${solStr(all.fees)} SOL)`,
-      m[1] === String(all.trades) && amount(m[2], all.pnl, 4) && m[3] === String(winners(all)) && (all.fees === 0n ? m[4] === undefined : matches(m[4], solNum(all.fees))),
+      m[1] === String(all.trades) && amount(m[3], all.pnl, 4) && m[4] === String(winners(all)) && (all.fees === 0n ? m[5] === undefined : matches(m[5], solNum(all.fees))),
       { shown: h.closedHead, expected: { trades: all.trades, total: solStr(all.pnl), winners: `${winners(all)}%`, platformFees: solStr(all.fees) } });
+    const word = !all.trades ? undefined : E.primary === 'test' ? ' test' : undefined;
+    book.ok(`${P}: the heading's count names its kind when it needs to (${word ? `"${word.trim()}"` : 'no word: one kind, nothing else listed'})`, m[1] !== undefined && m[2] === word, h.closedHead);
   }
 
   if (!opts.skipHeading) {
     const listed = Math.min(200, E.closed.length);
-    book.ok(`${P}: the heading says when the list under it holds only the latest ${listed} of the ${E.closed.length} closed positions (and only then)`, E.closed.length > 200 ? m[6] === String(listed) : m[5] === undefined, { shown: h.closedHead, closed: E.closed.length, listed, headingCounts: shownKind.trades });
+    const mixed = both ? ' closed positions (real and test)' : undefined;
+    book.ok(`${P}: the heading says when the list under it holds only the latest ${listed} of the ${E.closed.length} closed positions, of which kinds (and only then)`, E.closed.length > 200 ? m[7] === String(listed) && m[8] === String(E.closed.length) && m[9] === mixed : m[6] === undefined, { shown: h.closedHead, closed: E.closed.length, listed, headingCounts: shownKind.trades });
   }
 
   // ── each closed position ──
@@ -274,6 +351,11 @@ async function alice(env) {
       await ui.openEdit(page, c.id);
       const ed = await ui.readEditor(page);
       book.eq(`alice: copy "${c.settings.name}" in the editor shows exactly its saved values`, ui.editorVsSettings(ed, c.settings), []);
+      // The editor fits the screen, its ✕, Cancel and Save on it (second review: at 320 px, over a dashboard widened by
+      // the Scharo preset's tag, the ✕ was mostly off the screen and Cancel could not be clicked).
+      await screenCheck(page, book, `alice-editor-${c.key}`);
+      const reach = await page.evaluate((w) => ['#cancel-x', '#cancel', '#copy-form button[type=submit]'].map((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { control: s, x: [Math.round(r.left), Math.round(r.right)], onScreen: r.left >= 0 && r.right <= w }; }), env.vp.viewport.width);
+      book.ok(`alice: the editor of "${c.settings.name}": ✕, Cancel and Save are on the screen`, reach.every((x) => x.onScreen), reach);
       await ui.hideToast(page);
       await ui.submitEditor(page);
       const t = await ui.toast(page);

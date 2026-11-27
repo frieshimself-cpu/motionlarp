@@ -193,6 +193,20 @@ copy('paused', alice, {
   priorityFeeSol: 0.0005, tipSol: 0, sellPriorityFeeSol: 0.0005, sellTipSol: 0, oncePerCoin: true,
   sell: { mirror: { enabled: false, mode: 'same' }, timedOf: 'left', timed: [], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } },
 }, 47 * DAY);
+// 5. A wallet address pasted as the nickname: 40 characters (the most a nickname keeps) and no space. It holds an open
+//    position below (its "via …" line made the dashboard 514 px wide on a 390 px phone).
+copy('longName', alice, {
+  leader: pubkey(), name: 'NoSpaceNicknameFortyCharactersLongXYZ123', enabled: true, buySol: 0.25, minLeaderBuySol: 0.1, slippagePct: 30,
+  priorityFeeSol: 0.0005, tipSol: 0, sellPriorityFeeSol: 0.0005, sellTipSol: 0, oncePerCoin: true,
+  sell: { mirror: { enabled: true, mode: 'same' }, timedOf: 'left', timed: [], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } },
+}, 46 * DAY);
+// 6. Ten timed steps, the most the server takes (LIMITS.maxStages): the longest sell-rule tag a copy's line can carry
+//    (it ran out of the Copies card at 1280 px and widened a phone's page).
+copy('tenSteps', alice, {
+  leader: pubkey(), name: 'Ten steps', enabled: true, buySol: 0.1, minLeaderBuySol: 0.1, slippagePct: 30,
+  priorityFeeSol: 0.0005, tipSol: 0, sellPriorityFeeSol: 0.0005, sellTipSol: 0, oncePerCoin: true,
+  sell: { mirror: { enabled: false, mode: 'same' }, timedOf: 'bag', timed: Array.from({ length: 10 }, (_, i) => ({ afterSec: 5 * (i + 1), percent: 10 })), stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } },
+}, 45 * DAY);
 
 copy('bobMain', bob, {
   leader: pubkey(), name: 'Bob main', enabled: true, buySol: 0.02, minLeaderBuySol: 0.1, slippagePct: 50,
@@ -319,7 +333,7 @@ function position(spec: PSpec): void {
 }
 
 const sell = (reason: Reason, tokens: bigint, lamports: string, fee: string, afterMs: number, percent: number, extra: Partial<Sell> = {}): Sell => ({ reason, tokens, lamports: L(lamports), fee: L(fee), afterMs, percent, ...extra });
-const { scharo, allSame, allAll, paused, bobMain, carolCopy } = copies as Record<string, C>;
+const { scharo, allSame, allAll, paused, longName, bobMain, carolCopy } = copies as Record<string, C>;
 
 // Alice, on the dashboard right now ─────────────────────────────────────
 position({ key: 'P1-opening', copy: scharo!, mode: 'live', end: 'opening', boughtAgo: 20 * SEC });
@@ -334,6 +348,7 @@ position({
   refValue: L('0.66'),
 });
 position({ key: 'P4-open-live-fresh', copy: scharo!, mode: 'live', end: 'open', boughtAgo: 90 * SEC, tokens: 12_345_678_123_456n, buy: { lamports: L('7.041005'), fee: L('0.035') }, leaderSol: L('3.2') });
+position({ key: 'P5-open-live-long-name', copy: longName!, mode: 'live', end: 'open', boughtAgo: 12 * MIN, tokens: T(3_000_000), buy: { lamports: L('0.25'), fee: L('0.00125') }, refValue: L('0.27') });
 
 // Alice, closed with real money ─────────────────────────────────────────
 position({
@@ -397,6 +412,18 @@ position({ // the same day as H4: a day with both real and test trades
     position({
       key: 'H9-live-dst-edge', copy: allSame!, mode: 'live', end: 'closed', boughtAgo: NOW - closedAt + 60_000, tokens: T(100_000), buy: { lamports: L('0.2'), fee: L('0.001') },
       sells: [sell('manual', T(100_000), '0.21', '0.001', 60_000, 100)],
+    });
+  }
+}
+// The same for someone in Los Angeles: 07:30 UTC on 25 October 2026 is 00:30 there, a week before the clocks went back
+// (1 November); with November's offset it reads 23:30 on the 24th. Without it, the Los Angeles checks saw such a trade
+// only when the suite ran between 07:00 and 08:00 UTC (the 40-day-old trade then closed at that hour).
+{
+  const closedAt = Date.UTC(2026, 9, 25, 7, 30, 0);
+  if (NOW - closedAt > 2 * DAY && NOW - closedAt < 45 * DAY) {
+    position({
+      key: 'H10-live-dst-edge-la', copy: allSame!, mode: 'live', end: 'closed', boughtAgo: NOW - closedAt + 60_000, tokens: T(100_000), buy: { lamports: L('0.3'), fee: L('0.0015') },
+      sells: [sell('manual', T(100_000), '0.33', '0.0015', 60_000, 100)],
     });
   }
 }

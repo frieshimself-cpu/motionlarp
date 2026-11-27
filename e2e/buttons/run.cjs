@@ -4,8 +4,8 @@
 // offline (no RPC_URL; Jupiter's address pointed at a local stand-in so nothing leaves this machine), drives the user
 // site and the admin page in Chromium, and writes what it saw to .run/report-<size>.json.
 //
-//   node e2e/buttons/run.cjs                    both sizes (desktop 1280, phone 390)
-//   node e2e/buttons/run.cjs --only desktop     one size
+//   node e2e/buttons/run.cjs                    every size (desktop 1280; phones 390, 360 and 320)
+//   node e2e/buttons/run.cjs --only desktop     one size (desktop, phone, phone-360 or phone-320)
 //   node e2e/buttons/run.cjs --scenario admin   only scenarios whose name contains the word (several: a,b)
 //   node e2e/buttons/run.cjs --keep-server      leave the last server running (to poke at it by hand)
 //
@@ -30,6 +30,9 @@ const KEEP = args.includes('--keep-server');
 const VIEWPORTS = [
   { name: 'desktop', viewport: { width: 1280, height: 900 }, mobile: false, net: 1 },
   { name: 'phone', viewport: { width: 390, height: 844 }, mobile: true, net: 2 },
+  // Narrower phones: at 320 to 375 px a sell-rule tag that did not wrap widened every page with a copy on it.
+  { name: 'phone-360', viewport: { width: 360, height: 780 }, mobile: true, net: 3 },
+  { name: 'phone-320', viewport: { width: 320, height: 640 }, mobile: true, net: 4 },
 ].filter((v) => !ONLY || v.name === ONLY);
 
 function freePort() {

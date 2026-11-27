@@ -39,6 +39,22 @@ export function dayLabel(iso, locale) {
 }
 
 /**
+ * The words around the numbers of History's "Closed positions" heading. Its count, total and winners are of one kind
+ * (real once there are real trades, test until then) while the list under it holds both, and the list may be cut: it
+ * read "150 · total +1.5 SOL · 100% winners · … · the latest 200 are listed" above 200 rows, 100 of them tagged test.
+ * Now the count names its kind when another kind exists or it is test ("150 real", "205 test"), and a cut list says
+ * of how many and of which ("the latest 200 of 250 closed positions (real and test) are listed").
+ * `h`: { trades (the count), kind ('live' | 'test'), shown (rows listed), closedAll (closed positions of both kinds) }.
+ */
+export function closedHeading(h) {
+  const all = h.closedAll ?? h.trades;
+  const mixed = all > h.trades;
+  const word = !h.trades ? '' : h.kind === 'test' ? ' test' : mixed ? ' real' : '';
+  const listed = h.shown < all ? `the latest ${h.shown} of ${all}${mixed ? ' closed positions (real and test)' : ''} are listed` : '';
+  return { count: `${h.trades}${word}`, listed };
+}
+
+/**
  * What the "Open positions" card says about the open positions' profit: the real ones' when any is open, the test
  * ones' beside it; the test ones' alone (marked test) when nothing real is open. It added the two together: a real
  * +0.069 and a test −0.534 read "−0.4654 SOL unrealized".

@@ -355,7 +355,8 @@ async function adminEverything(env, parts) {
       const back = await alicePage.locator('.topbar').waitFor({ timeout: 6000 }).then(() => true, () => false);
       const st = back ? await ui.state(alicePage) : null;
       const wantTrades = X.forUser(manifest, 'alice').modes.live.trades;
-      book.ok('Enable: the user gets back in and finds their positions and history', back && st.positions.length === 4 && st.pnl.live.trades === wantTrades, st && { positions: st.positions.length, trades: st.pnl.live.trades, wantTrades });
+      const wantOpen = X.forUser(manifest, 'alice').open.length;
+      book.ok('Enable: the user gets back in and finds their positions and history', back && st.positions.length === wantOpen && st.pnl.live.trades === wantTrades, st && { positions: st.positions.length, wantOpen, trades: st.pnl.live.trades, wantTrades });
     }
 
     // Two switches for one thing: a revoked key whose user is then enabled from the Users table. Refused, with how to
@@ -549,6 +550,28 @@ async function adminEverything(env, parts) {
     stub.mode = 'ok';
   });
 
+  await env.scenario('admin: the page keeps up while something is typed and not sent', async () => {
+    await page.goto('/admin');
+    await page.locator('.topbar').waitFor();
+    await sleep(300);
+    const users0 = Number((await A()).stats[0].value);
+    // "12" typed in "Their fee" and the cursor put back between the 1 and the 2 (second review: with "2" typed there,
+    // the Users count stayed at 4 while a new user logged in: nothing was redrawn while a box held unsent text).
+    await page.locator('#lic-fee').click();
+    await page.keyboard.type('12');
+    await page.keyboard.press('ArrowLeft');
+    const v = await tryLogin('late-joiner', nextIp(), K.spare3.key);
+    await v.V.context.close();
+    const moved = await until(async () => { const a = await A(); return a.stats && Number(a.stats[0].value) === users0 + 1 ? a : null; }, { timeout: 12_000 });
+    const box = await page.evaluate(() => ({ typed: document.querySelector('#lic-fee').value, cursorIn: document.activeElement ? document.activeElement.id : null }));
+    book.ok('with "12" typed in "Their fee" and not sent, the Users card still counts a new user within a refresh or two', !!moved, { newUserGotIn: v.status, usersBefore: users0, usersShown: (await A()).stats[0].value });
+    book.ok('…and through the redraws the box keeps what was typed, with the cursor in it', box.typed === '12' && box.cursorIn === 'lic-fee', box);
+    await page.keyboard.type('5');
+    book.eq('…where it was: the next digit goes between the 1 and the 2', await page.locator('#lic-fee').inputValue(), '152');
+    await page.locator('#lic-fee').fill('');
+    await page.locator('.stats').click({ position: { x: 5, y: 5 } });
+  });
+
   await env.scenario('admin: small things (a half-typed name, Open site, logging out)', async () => {
     await page.locator('#lic-label').fill('Half typed');
     await page.locator('.stats').click({ position: { x: 5, y: 5 } });
@@ -625,6 +648,53 @@ async function adminEverything(env, parts) {
     book.ok('guessing keys is cut off after ten tries from one address', g.slice(0, 10).every((s) => s === 403) && g[10] === 429, g);
     await U.context.close();
     await W.context.close();
+  });
+
+  await env.scenario('admin: the two-minute connection check, after a login through the form and after Log out', async () => {
+    // The page's timers run on a clock the suite moves: two minutes pass in a moment.
+    const O = await env.open('owner-clock', env.ip(64));
+    await O.context.clock.install();
+    const P = O.page;
+    const checks = () => apiCalls(P, /^\/api\/admin\/connections$/).length;
+    await P.goto('/admin');
+    await P.locator('#admin-login').waitFor();
+    await P.locator('#ap').fill(env.adminPassword);
+    await P.locator('#admin-login button[type=submit]').click();
+    await P.locator('.topbar').waitFor();
+    await until(() => checks() >= 1, { timeout: 8000 }); // the check made right after the login
+    await sleep(500);
+    const n0 = checks();
+    await O.context.clock.fastForward('02:05');
+    const again = await until(() => checks() > n0, { timeout: 8000 });
+    book.ok('logged in through the form, the connections are checked again two minutes later (as when the page is opened logged in)', !!again, { checksBeforeTheTwoMinutes: n0, after: checks() });
+
+    // Opened logged in (a reload: this starts the two-minute check), on the Status tab: Log out, start typing a
+    // password, and let two minutes pass. The check kept running and answered its 401 by drawing the form again: the
+    // half-typed password was wiped, and with the cursor out of the box the old Status page was drawn first.
+    await P.reload();
+    await P.locator('.topbar').waitFor();
+    await P.locator('.topbar .nav [data-tab=connections]').click();
+    await P.locator('#conn-check').waitFor();
+    await sleep(300);
+    await P.locator('#admin-logout').click();
+    await P.locator('#admin-login').waitFor();
+    await P.evaluate(() => { window.__drawn = []; new MutationObserver(() => { const t = document.querySelector('#app .topbar'); if (t) window.__drawn.push((t.querySelector('.nav .on') || {}).textContent || 'a page'); }).observe(document.querySelector('#app'), { childList: true, subtree: true }); });
+    const look = () => P.evaluate(() => ({ typed: document.querySelector('#ap') ? document.querySelector('#ap').value : null, cursorIn: document.activeElement ? document.activeElement.id : null, ownerPagesDrawn: window.__drawn.length }));
+    const n1 = checks();
+    await P.locator('#ap').click();
+    await P.keyboard.type('half-typ');
+    await O.context.clock.fastForward('02:05');
+    await sleep(1500);
+    let seen = await look();
+    book.ok('after Log out, two minutes on with the cursor in the password box: what was typed is still there, the cursor in it', seen.typed === 'half-typ' && seen.cursorIn === 'ap', seen);
+    await P.locator('#ap').fill('half-typ');
+    await P.locator('.auth .tagline').click();
+    await O.context.clock.fastForward('02:05');
+    await sleep(1500);
+    seen = await look();
+    book.ok('…and with the cursor out of the box: still there, and no page of the logged-out owner was drawn meanwhile', seen.typed === 'half-typ' && seen.ownerPagesDrawn === 0, seen);
+    book.eq('…and nothing was checked any more once logged out', checks() - n1, 0);
+    await O.context.close();
   });
 
   return S;

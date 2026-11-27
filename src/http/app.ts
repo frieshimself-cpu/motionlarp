@@ -150,6 +150,14 @@ export function positionView(p: Position) {
   };
 }
 
+/** What a copy's line on the dashboard counts: positions of one kind (real or test) and the other kind's apart. */
+interface StatsPart { open: number; closed: number; pnlSol: number }
+export interface CopyStats extends StatsPart { kind: 'live' | 'test'; other: StatsPart & { kind: 'live' | 'test' } }
+function blankStats(shown: 'live' | 'paper'): CopyStats {
+  const [kind, otherKind] = shown === 'live' ? (['live', 'test'] as const) : (['test', 'live'] as const);
+  return { kind, open: 0, closed: 0, pnlSol: 0, other: { kind: otherKind, open: 0, closed: 0, pnlSol: 0 } };
+}
+
 /** A connection from this machine itself (the socket's own address, never a header). */
 function isLoopback(address: string | undefined): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
@@ -362,17 +370,30 @@ export function createApp(deps: AppDeps): Server {
     return store.closedTotals(uid, 'live').trades > 0 ? 'live' : 'paper';
   }
 
+  /**
+   * Each copy's line: its open positions, closed ones and their profit, all of the shown kind (real once the account has
+   * any, test until then), and the other kind's apart (the open ones were counted of both kinds: a line read "1 open ·
+   * 2 closed · +0.392 SOL" while its one open position was a test one, and the test results were not shown at all).
+   */
   function copyStats(uid: number) {
-    const stats = new Map<number, { open: number; closed: number; pnlSol: number }>();
-    const bump = (id: number) => stats.get(id) ?? stats.set(id, { open: 0, closed: 0, pnlSol: 0 }).get(id)!;
-    for (const p of store.activePositions(uid)) bump(p.copyId).open++;
-    // Every closed position of the shown kind (it was the newest 1,000, test and real added together).
-    for (const [copyId, t] of store.closedTotals(uid, shownMode(uid)).byCopy) {
-      const s = bump(copyId);
-      s.closed = t.closed;
-      s.pnlSol = sol(t.pnlLamports);
+    const shown = shownMode(uid);
+    const kind = (m: 'live' | 'paper') => (m === 'live' ? 'live' as const : 'test' as const);
+    const stats = new Map<number, CopyStats>();
+    const bump = (id: number) => stats.get(id) ?? stats.set(id, blankStats(shown)).get(id)!;
+    for (const p of store.activePositions(uid)) {
+      const s = bump(p.copyId);
+      (kind(p.mode) === s.kind ? s : s.other).open++;
     }
-    return stats;
+    // Every closed position (it was the newest 1,000, test and real added together).
+    for (const mode of ['live', 'paper'] as const) {
+      for (const [copyId, t] of store.closedTotals(uid, mode).byCopy) {
+        const s = bump(copyId);
+        const part = kind(mode) === s.kind ? s : s.other;
+        part.closed = t.closed;
+        part.pnlSol = sol(t.pnlLamports);
+      }
+    }
+    return { shown, stats };
   }
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -493,18 +514,21 @@ export function createApp(deps: AppDeps): Server {
     }
 
     // ── reads ──
+    // The viewer's calendar: the page sends its clock's offset (tz, minutes east of UTC) and its time zone (zone, e.g.
+    // Europe/Berlin): each trade is dated by the offset its own closing time had there.
+    const viewerPnl = () => pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0), Date.now(), url.searchParams.get('zone'));
     if (path === '/api/state' && method === 'GET') {
       renewSession(req, res);
       const user = store.user(uid);
       const w = store.wallet(uid);
-      const stats = copyStats(uid);
+      const { shown, stats } = copyStats(uid);
       return json(res, 200, {
         user: { username: user?.username },
         server: deps.serverInfo(),
         feeBps: deps.feeBpsFor?.(uid) ?? 0,
-        pnl: (({ days: _days, ...rest }) => rest)(pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0))),
+        pnl: (({ days: _days, ...rest }) => rest)(viewerPnl()),
         wallet: w ? { pubkey: w.pubkey, sol: await walletSol(uid, w.pubkey) } : null,
-        copies: store.copies(uid).map((c) => ({ id: c.id, ...c.settings, stats: stats.get(c.id) ?? { open: 0, closed: 0, pnlSol: 0 } })),
+        copies: store.copies(uid).map((c) => ({ id: c.id, ...c.settings, stats: stats.get(c.id) ?? blankStats(shown) })),
         positions: store.activePositions(uid).map(positionView),
         events: store.events(uid, 80),
       });
@@ -516,12 +540,13 @@ export function createApp(deps: AppDeps): Server {
         const fees = fills.reduce((a, f) => a + f.feeLamports, 0n);
         return { ...positionView(p), feesSol: sol(fees), fills: fills.map((f) => ({ side: f.side, reason: f.reason, sol: sol(f.lamports), feeSol: sol(f.feeLamports), signature: f.simulated ? null : f.signature, simulated: f.simulated, at: f.createdAt })) };
       });
-      // The heading counts every closed position of the shown kind (real once there are any), not the 200 listed.
-      // The list holds both kinds: closedAll lets the page say it is cut even when neither kind alone passes 200.
+      // The heading counts every closed position of the shown kind (real once there are any), not the 200 listed, and
+      // says which kind (kind). The list holds both kinds: closedAll lets the page say it is cut even when neither kind
+      // alone passes 200, and of how many.
       const mode = shownMode(uid);
       const t = store.closedTotals(uid, mode);
       const closedAll = t.trades + store.closedTotals(uid, mode === 'live' ? 'paper' : 'live').trades;
-      return json(res, 200, { positions: views, shown: views.length, closedAll, totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0)) });
+      return json(res, 200, { positions: views, shown: views.length, closedAll, kind: mode === 'live' ? 'live' : 'test', totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: viewerPnl() });
     }
 
     throw new HttpError(404, 'not found');

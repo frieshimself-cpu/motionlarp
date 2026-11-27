@@ -103,8 +103,9 @@ describe('B2: History says when its list is cut', () => {
     for (let i = 0; i < 100; i++) closed(uid, copyId, 'paper', 100n, 90n);
     const h = (await c.call('GET', '/api/history')).body;
     expect(h.trades).toBe(150); // the heading: real ones only
+    expect(h.kind).toBe('live'); // …and it says so ("150 real"), since the list under it holds test ones too
     expect(h.shown).toBe(200); // the newest 200 of both kinds are listed
-    expect(h.closedAll).toBe(250); // so the page can say "the latest 200 are listed"
+    expect(h.closedAll).toBe(250); // so the page can say "the latest 200 of 250 closed positions (real and test) are listed"
   });
 });
 

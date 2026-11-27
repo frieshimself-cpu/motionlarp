@@ -9,7 +9,10 @@ const OUT = path.join(__dirname, '.run');
 const showPassed = process.argv.includes('--passed');
 const short = (v, n = 700) => { const s = typeof v === 'string' ? v : JSON.stringify(v); return s && s.length > n ? `${s.slice(0, n)}…` : s; };
 
-for (const size of ['desktop', 'phone']) {
+// Every size the last runs wrote a report for, widest first.
+const SIZES = ['desktop', 'phone', 'phone-360', 'phone-320'];
+const found = fs.existsSync(OUT) ? fs.readdirSync(OUT).map((f) => /^report-(.+)\.json$/.exec(f)?.[1]).filter(Boolean) : [];
+for (const size of [...SIZES, ...found.filter((s) => !SIZES.includes(s)).sort()]) {
   const file = path.join(OUT, `report-${size}.json`);
   if (!fs.existsSync(file)) { console.log(`\n(no report for ${size})`); continue; }
   const r = JSON.parse(fs.readFileSync(file, 'utf8'));

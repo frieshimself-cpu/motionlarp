@@ -133,7 +133,11 @@ textarea.secret { -webkit-text-security: disc; }
 .pill.live { color: var(--green); border-color: rgba(47, 214, 161, .3); background: rgba(47, 214, 161, .07); }
 .pill.off { color: var(--red); border-color: rgba(245, 84, 109, .3); background: rgba(245, 84, 109, .07); }
 .pill.live::before, .pill.test::before, .pill.off::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 12px; background: var(--surface-3); color: #c3c8d8; margin: 2px 4px 2px 0; border: 1px solid var(--border); white-space: nowrap; }
+/* A tag longer than its line wraps inside its card (ten timed steps ran 200 px out of the Copies card at 1280 px, and
+   the Scharo preset's tag made a 320 to 375 px phone's page 378 px wide); a short one stays on one line and moves down
+   whole, as before. In a table each tag stays on one line. */
+.tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 12px; background: var(--surface-3); color: #c3c8d8; margin: 2px 4px 2px 0; border: 1px solid var(--border); max-width: 100%; overflow-wrap: anywhere; }
+td .tag { white-space: nowrap; }
 .tag.off { color: var(--dim); }
 
 /* ── tables & rows ─────────────────────────────────────────────────────── */
@@ -144,6 +148,35 @@ td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align:
 tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-family: var(--mono); white-space: nowrap; }
 tbody tr:hover { background: rgba(255, 255, 255, .015); }
+.t-days td:first-child { white-space: nowrap; }
+.t-closed td:nth-child(2) { overflow-wrap: anywhere; }
+/* History on a phone: no table wider than the screen (at 390 px each day took three lines, "Fri, / Nov / 27", and the
+   money columns started off the screen, behind a sideways scroll). A day is one line, real or test beside it and its
+   profit at the right end, its trades and winners under it; a closed position is a block: the coin and its P/L, then
+   the copy, when it closed, its cost and what came back, then its sells. The column names go into the rows. */
+@media (max-width: 640px) {
+  .t-days, .t-days tbody, .t-closed, .t-closed tbody { display: block; }
+  .t-days thead, .t-closed thead { display: none; }
+  .t-days tr, .t-closed tr { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+  .t-days tr:last-child, .t-closed tr:last-child { border-bottom: 0; }
+  .t-days td, .t-closed td { display: block; padding: 0; border: 0; min-width: 0; text-align: left; overflow-wrap: anywhere; }
+  .t-days tr::after, .t-closed tr::after { content: ''; flex-basis: 100%; height: 0; }
+  .t-days td[data-label], .t-closed td[data-label] { font-size: 12.5px; color: var(--muted); }
+  .t-days td[data-label]::before, .t-closed td[data-label]::before { content: attr(data-label) ' '; color: var(--dim); font-family: var(--font); }
+  .t-days td { order: 2; }
+  .t-days td:first-child { order: 1; }
+  .t-days td:last-child { order: 3; margin-left: auto; }
+  .t-days tr::after { order: 4; }
+  .t-days td[data-label] { order: 5; }
+  .t-closed td:nth-child(1) { order: 1; }
+  .t-closed td:nth-child(6) { order: 2; margin-left: auto; text-align: right; }
+  .t-closed tr::after { order: 3; }
+  .t-closed td:nth-child(2) { order: 4; }
+  .t-closed td:nth-child(7) { order: 5; }
+  .t-closed td:nth-child(4) { order: 6; }
+  .t-closed td:nth-child(5) { order: 7; }
+  .t-closed td:nth-child(3) { order: 8; flex-basis: 100%; margin-top: 4px; }
+}
 
 .row { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .row:last-child { border-bottom: 0; }
@@ -161,7 +194,10 @@ tbody tr:hover { background: rgba(255, 255, 255, .015); }
 .pos { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .pos:last-child { border-bottom: 0; }
 .pos-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
-.pos .coin { font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* A copy's nickname of 40 characters without a space ("via 3fJx…", a pasted address) wraps: it made the dashboard
+   514 px wide on a 390 px phone, and the editor opened over it out of reach. */
+.pos-top > :first-child, .pos .coin > * { min-width: 0; }
+.pos .coin { font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; overflow-wrap: anywhere; }
 .pos .big { font: 600 16px var(--mono); }
 .pos .line { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; margin-top: 8px; align-items: center; }
 .pos .line b { color: var(--text); font-weight: 500; font-family: var(--mono); }
@@ -178,6 +214,8 @@ tbody tr:hover { background: rgba(255, 255, 255, .015); }
 .feed .error .ic { background: rgba(245, 84, 109, .12); color: var(--red); }
 .feed .info .ic { background: rgba(139, 92, 246, .14); color: #b9a3ff; }
 .feed .when { color: var(--dim); font-size: 11.5px; margin-top: 1px; }
+/* A line naming a copy whose nickname has no space ("Now copying 3fJx…") wraps inside the list. */
+.feed li > div { min-width: 0; overflow-wrap: anywhere; }
 .feed .skip .msg { color: var(--muted); }
 
 .empty { text-align: center; padding: 34px 16px; color: var(--muted); }
@@ -199,9 +237,11 @@ tbody tr:hover { background: rgba(255, 255, 255, .015); }
 /* ── modal ─────────────────────────────────────────────────────────────── */
 .modal { position: fixed; inset: 0; z-index: 20; background: rgba(3, 4, 7, .7); backdrop-filter: blur(4px); display: grid; place-items: start center; overflow-y: auto; padding: 5vh 12px; }
 .modal[hidden] { display: none; }
-.modal-card { width: min(680px, 100%); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 24px 80px rgba(0, 0, 0, .6); }
-.modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-.modal-head h3 { font-size: 16px; }
+/* min-width 0: the editor is never wider than the screen (at 320 px its widest content made it 312 px wide, 4 px past
+   the edge with its margins). */
+.modal-card { width: min(680px, 100%); min-width: 0; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 24px 80px rgba(0, 0, 0, .6); }
+.modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.modal-head h3 { font-size: 16px; min-width: 0; overflow-wrap: anywhere; }
 .modal-body { padding: 20px; }
 .modal-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .group { margin-bottom: 22px; }
@@ -221,7 +261,7 @@ tbody tr:hover { background: rgba(255, 255, 255, .015); }
 .ok-note { color: #9be9cf; background: rgba(47, 214, 161, .06); border: 1px solid rgba(47, 214, 161, .22); border-radius: 9px; padding: 12px 14px; font-size: 13px; }
 .keybox { font: 600 17px var(--mono); letter-spacing: .04em; color: #fff; word-break: break-all; margin: 6px 0 10px; }
 
-.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 30; background: var(--surface-3); border: 1px solid var(--border-strong); padding: 10px 16px; border-radius: 10px; box-shadow: 0 10px 40px rgba(0, 0, 0, .5); max-width: calc(100% - 32px); font-size: 13.5px; }
+.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 30; background: var(--surface-3); border: 1px solid var(--border-strong); padding: 10px 16px; border-radius: 10px; box-shadow: 0 10px 40px rgba(0, 0, 0, .5); max-width: calc(100% - 32px); font-size: 13.5px; overflow-wrap: anywhere; }
 .toast.bad { border-color: rgba(245, 84, 109, .5); color: #ffb1bd; }
 
 .wallet { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
