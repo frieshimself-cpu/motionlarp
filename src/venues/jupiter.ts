@@ -20,17 +20,23 @@ export const MAX_TRANSACTION_BYTES = 1232;
 export class Jupiter {
   /** `retryMs`: pause between tries when a coin has no route yet (a coin seconds old is not indexed yet; seen on
    *  mainnet: a LaunchLab coin routed after ~10 s). Pauses grow 1×, 2×, … 5×: about 15 s in all. */
-  constructor(private readonly base: string, private readonly apiKey: string, private readonly fetchFn: FetchFn = fetch, private readonly retryMs = 1000) {}
+  constructor(private readonly base: string, private readonly apiKey: string, private readonly fetchFn: FetchFn = fetch, private readonly retryMs = 1000, private readonly busyRetryMs = 250) {}
 
   private headers(): Record<string, string> {
     return { 'content-type': 'application/json', ...(this.apiKey ? { 'x-api-key': this.apiKey } : {}) };
   }
 
+  /** One request. A busy answer (429, 5xx) is retried three times with short, growing pauses (0.25, 0.5, 1 s): one
+   *  rate-limit blip must not lose a copy. A real refusal (4xx with a reason) is returned at once. */
   private async call<T>(url: string | URL, init?: RequestInit): Promise<T> {
-    const res = await this.fetchFn(url, { ...init, headers: this.headers(), signal: AbortSignal.timeout(10_000) });
-    const body = (await res.json().catch(() => ({}))) as T & { error?: string; errorCode?: string };
-    if (!res.ok || body.error) throw new Error(`jupiter: ${body.error ?? body.errorCode ?? `HTTP ${res.status}`}`);
-    return body;
+    for (let attempt = 0; ; attempt++) {
+      const res = await this.fetchFn(url, { ...init, headers: this.headers(), signal: AbortSignal.timeout(10_000) });
+      const body = (await res.json().catch(() => ({}))) as T & { error?: string; errorCode?: string };
+      if (res.ok && !body.error) return body;
+      const busy = res.status === 429 || res.status >= 500;
+      if (!busy || attempt >= 3) throw new Error(`jupiter: ${body.error ?? body.errorCode ?? `HTTP ${res.status}`}`);
+      await new Promise((r) => setTimeout(r, this.busyRetryMs * 2 ** attempt));
+    }
   }
 
   /** ExactIn quote. `maxAccounts` keeps the route small enough to add our fee transfer to the transaction. */

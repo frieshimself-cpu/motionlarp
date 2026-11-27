@@ -257,30 +257,45 @@ describe('timed sells, stop loss, dead coin', () => {
     expect(open()[0]!.tokensHeld).toBe(25_000n);
   });
 
-  it('a failed timed sell is retried after a pause, not on every tick', async () => {
+  it('a failed sell is retried a quarter of a second later, not on every tick', async () => {
     addCopy({ sell: { mirror: { enabled: false }, timed: [{ afterSec: 1, percent: 100 }] } });
     await engine.onLeaderTrade(trade());
     await engine.idle();
     ex.failNextSell = 1;
     clock += 1000; await engine.tick(); await engine.idle();
-    clock += 1000; await engine.tick(); await engine.idle(); // retry not due yet (2 s pause)
+    clock += 100; await engine.tick(); await engine.idle(); // retry not due yet (0.25 s pause)
     expect(open()).toHaveLength(1);
     expect(feed().filter((f) => /retrying/.test(f))).toHaveLength(1);
-    clock += 1000; await engine.tick(); await engine.idle();
+    clock += 200; await engine.tick(); await engine.idle();
     expect(open()).toHaveLength(0);
   });
 
-  it('keeps retrying with longer pauses, then gives up and says to use Sell now', async () => {
+  it('a sell of everything never gives up: after the quick tries it keeps trying, and says so once', async () => {
     addCopy({ sell: { mirror: { enabled: false }, timed: [{ afterSec: 1, percent: 100 }] } });
     await engine.onLeaderTrade(trade());
     await engine.idle();
     ex.failNextSell = 100;
     for (let i = 0; i < 12; i++) { clock += 61_000; await engine.tick(); await engine.idle(); }
     expect(open()).toHaveLength(1);
-    expect(feed().some((f) => /gave up.*8 failed tries.*Sell now/i.test(f))).toBe(true);
+    expect(feed().some((f) => /gave up/i.test(f))).toBe(false);
+    expect(feed().filter((f) => /still trying/.test(f))).toHaveLength(1);
     ex.failNextSell = 0;
     clock += 61_000; await engine.tick(); await engine.idle();
-    expect(open()).toHaveLength(1); // given up: no more automatic tries
+    expect(open()).toHaveLength(0); // it sold as soon as selling worked again
+  });
+
+  it('a sell of a PART gives up after 8 tries (later rules sell what is left) and says so', async () => {
+    addCopy({ sell: { mirror: { enabled: false }, timed: [{ afterSec: 1, percent: 50 }] } });
+    await engine.onLeaderTrade(trade());
+    await engine.idle();
+    ex.failNextSell = 100;
+    for (let i = 0; i < 12; i++) { clock += 61_000; await engine.tick(); await engine.idle(); }
+    expect(open()).toHaveLength(1);
+    expect(feed().some((f) => /gave up.*8 failed tries/i.test(f))).toBe(true);
+    ex.failNextSell = 0;
+    const attempts = ex.sells.length;
+    clock += 61_000; await engine.tick(); await engine.idle();
+    expect(ex.sells.length).toBe(attempts); // given up: no more automatic tries for that step
   });
 
   it('a failed "sell when they sell" is retried too', async () => {

@@ -89,3 +89,28 @@ describe('appendInstruction: the whole transaction must fit in one packet', () =
     await expect(appendInstruction(build(3), transfer(), async () => [])).resolves.toBeInstanceOf(VersionedTransaction);
   });
 });
+
+describe('Jupiter is busy (429 / 5xx)', () => {
+  // The sweep of 27 Nov hit Jupiter's rate limit; in production one such answer would have lost a copy outright.
+  const ok = () => new Response(JSON.stringify({ inAmount: '1', outAmount: '7', otherAmountThreshold: '6', routePlan: [] }), { status: 200 });
+  it('a rate-limit or server error is retried quickly, then the answer is used', async () => {
+    let n = 0;
+    const j = new Jupiter('https://jup.test', '', async () => (++n < 3 ? new Response('{}', { status: n === 1 ? 429 : 503 }) : ok()), 1, 1);
+    expect((await j.quote(SOL, MINT, 1n, 100)).outAmount).toBe('7');
+    expect(n).toBe(3);
+  });
+
+  it('gives up after a few tries and says why', async () => {
+    let n = 0;
+    const j = new Jupiter('https://jup.test', '', async () => { n++; return new Response('{}', { status: 429 }); }, 1, 1);
+    await expect(j.quote(SOL, MINT, 1n, 100)).rejects.toThrow(/HTTP 429/);
+    expect(n).toBe(4);
+  });
+
+  it('a real refusal (400) is not retried as "busy"', async () => {
+    let n = 0;
+    const j = new Jupiter('https://jup.test', '', async () => { n++; return new Response(JSON.stringify({ error: 'Invalid slippage' }), { status: 400 }); }, 1, 1);
+    await expect(j.quote(SOL, MINT, 1n, 100)).rejects.toThrow(/Invalid slippage/);
+    expect(n).toBe(1);
+  });
+});

@@ -14,7 +14,7 @@
 import { PublicKey, SystemProgram, type Keypair, type TransactionInstruction, type VersionedTransaction } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { config } from '../config.js';
-import { getConnection } from '../chain/connection.js';
+import { getConnection, getShortBlockhash } from '../chain/connection.js';
 import { getTransaction } from '../chain/rpc.js';
 import { log, safeErrorMessage } from '../log.js';
 import { buildSignedTx } from '../tx/build.js';
@@ -36,7 +36,8 @@ export type FillResult =
       /** Live fills return at confirmation with an estimate; this resolves later with the exact SOL read from the transaction. */
       refine?: Promise<{ lamports: bigint } | null>;
     }
-  | { ok: false; error: string };
+  /** `uncertain`: the transaction went out and its fate could not be read (the RPC did not answer): it may have landed. */
+  | { ok: false; error: string; uncertain?: boolean };
 
 export interface TradeRequest {
   wallet: Keypair;
@@ -61,6 +62,8 @@ export interface Executor {
   tokenBalance(owner: string, mint: string): Promise<bigint>;
   /** True when a request with live=true would really be sent. */
   isLive(req: { live: boolean }): boolean;
+  /** Optional: look the coin up ahead of the buy (the engine calls it while it checks the wallet's balance). */
+  warm?(mint: string): Promise<void>;
 }
 
 const FETCH_FILL_TRIES = 6;
@@ -111,8 +114,9 @@ export class ChainExecutor implements Executor {
     const ata = getAssociatedTokenAddressSync(new PublicKey(mint), owner, true, program);
     const info = await getConnection().getAccountInfo(ata, 'confirmed');
     if (!info) return 0n;
-    const bal = await getConnection().getTokenAccountBalance(ata, 'confirmed');
-    return BigInt(bal.value.amount);
+    // One read: a token account's amount is a 64-bit number at byte 64 (classic and Token-2022 alike).
+    if (info.data.length < 72) throw new Error('unexpected token account layout');
+    return info.data.readBigUInt64LE(64);
   }
 
   /** SOL value of `amount` of any token (a stablecoin, another coin) — for leaders who did not pay in SOL. */
@@ -145,7 +149,9 @@ export class ChainExecutor implements Executor {
       return await this.withPool(mint, native);
     } catch (err) {
       if (err instanceof VenueError && USE_JUPITER.has(err.code)) {
-        this.viaJupiter.set(mint, Date.now() + 3_600_000);
+        // What a coin IS does not change (not a pump.fun coin, priced in another token): Jupiter for an hour. A coin
+        // that is only in between (its curve complete, its pool not there yet) is looked at again after 20 s.
+        this.viaJupiter.set(mint, Date.now() + (err.code === 'migrating' ? 20_000 : 3_600_000));
         return jupiter();
       }
       throw err;
@@ -164,6 +170,13 @@ export class ChainExecutor implements Executor {
       }
       throw err;
     }
+  }
+
+  /** Looks the coin up ahead of its buy (cached for a minute), so the buy itself has one round trip less to wait for. */
+  async warm(mint: string): Promise<void> {
+    const until = this.viaJupiter.get(mint);
+    if (until && until > Date.now()) return;
+    await this.pf.resolve(mint).catch(() => undefined);
   }
 
   // ── buy ────────────────────────────────────────────────────────────────
@@ -190,11 +203,13 @@ export class ChainExecutor implements Executor {
   }
 
   /** Sign a native transaction: priority fee, the trade, our platform fee, then the tip when one is set. */
-  private nativeTx(req: TradeRequest, instructions: TransactionInstruction[]) {
+  private nativeTx(req: TradeRequest, instructions: TransactionInstruction[], buy = false) {
     const tipped = this.tip(req) > 0n;
     return buildSignedTx({
       signer: req.wallet, instructions, validatorTipSol: req.priorityFeeSol, txFeeSol: tipped ? req.tipSol : 0,
       tipAccount: tipped ? tipAccount(tipRoute(config.senderUrl)) : undefined,
+      // A live buy lives only a few seconds: one that misses its moment must not fill half a minute later.
+      shortLived: buy,
       ...(this.heavy.has(req.mint) ? { cuLimit: this.heavy.get(req.mint)! } : {}),
     });
   }
@@ -226,12 +241,12 @@ export class ChainExecutor implements Executor {
     ]);
     // The fee transfer rides in the same transaction, after the swap: no trade, no fee.
     const ixs = withFee(built.instructions, req.wallet.publicKey, req.lamports, req.feeBps, config.feeWallet);
-    const tx = await this.nativeTx(req, ixs.instructions);
+    const tx = await this.nativeTx(req, ixs.instructions, true);
     return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'buy', built.expectedOut, req.lamports + ixs.fee + this.txCost(req), before, ixs.fee);
   }
 
   /** A Jupiter swap with our fee transfer appended, signed by the user; smaller routes are tried if it does not fit. */
-  private async jupiterTx(req: TradeRequest, inputMint: string, outputMint: string, amount: bigint, feeOn: (outAmount: bigint) => bigint) {
+  private async jupiterTx(req: TradeRequest, inputMint: string, outputMint: string, amount: bigint, feeOn: (outAmount: bigint) => bigint, shortLived = false) {
     let lastErr: unknown;
     for (const size of ROUTE_SIZES) {
       try {
@@ -246,8 +261,15 @@ export class ChainExecutor implements Executor {
         if (extra.length) {
           signed = await appendInstruction(tx, extra, async (keys) => (await Promise.all(keys.map((k) => getConnection().getAddressLookupTable(k)))).map((r) => r.value!).filter(Boolean));
         }
+        let lastValid = lastValidBlockHeight;
+        if (shortLived) {
+          // A live buy: our own blockhash with only a few seconds left, in place of Jupiter's fresh one.
+          const bh = await getShortBlockhash();
+          signed.message.recentBlockhash = bh.blockhash;
+          lastValid = bh.lastValidBlockHeight;
+        }
         signed.sign([req.wallet]);
-        return { tx: signed, lastValidBlockHeight, quote, fee };
+        return { tx: signed, lastValidBlockHeight: lastValid, quote, fee };
       } catch (err) {
         lastErr = err;
         if (!/overrun|too large|encoding/i.test(String(err))) throw err;
@@ -271,7 +293,7 @@ export class ChainExecutor implements Executor {
       if (!sim.ok) return { ok: false, error: sim.error };
       return { ok: true, signature: sim.signature, tokens: BigInt(built.quote.outAmount), lamports: req.lamports + built.fee + cost, feeLamports: built.fee, simulated: true, note: 'Jupiter route simulated on-chain, not sent (test mode)' };
     }
-    const [built, before] = await Promise.all([this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy), this.tokenBalance(owner, req.mint).catch(() => null)]);
+    const [built, before] = await Promise.all([this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy, true), this.tokenBalance(owner, req.mint).catch(() => null)]);
     return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'buy', BigInt(built.quote.outAmount), req.lamports + built.fee + this.txCost(req), before, built.fee);
   }
 
@@ -333,12 +355,16 @@ export class ChainExecutor implements Executor {
     // The owner switched live trading off while this was being built: it was only simulated. Nothing happened.
     if (sent.simulated) return { ok: false, error: 'live trading was switched off before this was sent' };
     // Until it lands, the same signed transaction is put out again about once a second (it can only land once).
-    const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight, { resend: () => resend(tx, tip) });
+    // A buy only for its first moments (it should land now or not at all); a sell until it lands.
+    const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight, { resend: () => resend(tx, tip), ...(side === 'buy' ? { resendForMs: config.buyResendMs } : {}) });
     const owner = req.wallet.publicKey.toBase58();
     if (!confirmed.landed) {
       // Out of compute units: the retry (the engine retries a failed trade) asks for twice as many.
       if (/ComputationalBudgetExceeded|ProgramFailedToComplete|exceeded CUs/i.test(confirmed.reason)) this.heavy.set(req.mint, config.computeUnitLimit * 2);
-      if (!confirmed.certain && balanceBefore !== null) {
+      if (!confirmed.certain) {
+        // The RPC never told us. By now the blockhash has long expired, so the wallet's balance settles it; if
+        // even that cannot be read the outcome stays unknown ("uncertain"): the caller must not book it as failed.
+        if (balanceBefore === null) return { ok: false, error: `sent, outcome unknown: ${confirmed.reason}`, uncertain: true };
         try {
           const after = await this.tokenBalance(owner, req.mint);
           const moved = side === 'buy' ? after - balanceBefore : balanceBefore - after;
@@ -346,7 +372,7 @@ export class ChainExecutor implements Executor {
             return { ok: true, signature: sent.signature, tokens: moved, lamports: side === 'buy' ? expectedLamports : (expectedLamports * moved) / (expectedTokens || 1n), simulated: false, feeLamports: platformFee, confirmedAt: Date.now(), note: 'landed late; fill estimated from the balance change' };
           }
         } catch {
-          // fall through
+          return { ok: false, error: `sent, outcome unknown: ${confirmed.reason}`, uncertain: true };
         }
       }
       return { ok: false, error: `sent but did not land: ${confirmed.reason}` };

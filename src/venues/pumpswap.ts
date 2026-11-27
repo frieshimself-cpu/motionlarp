@@ -3,7 +3,7 @@
 // Scope: pools quoted in (W)SOL only; the SDK wraps/unwraps WSOL and creates the user's missing ATA.
 import { PublicKey } from '@solana/web3.js';
 import BN from 'bn.js';
-import { getConnection } from '../chain/connection.js';
+import { getFastConnection } from '../chain/connection.js';
 import { pumpSwapSdk, type SwapSolanaState } from './sdk.js';
 import { VenueError, type BuildResult, type ResolvedPool, type Venue } from './types.js';
 
@@ -41,7 +41,7 @@ export class PumpSwapVenue implements Venue {
   private online: OnlinePumpAmmSdk | null = null;
 
   private sdk(): OnlinePumpAmmSdk {
-    if (!this.online) this.online = new OnlinePumpAmmSdk(getConnection());
+    if (!this.online) this.online = new OnlinePumpAmmSdk(getFastConnection());
     return this.online;
   }
 

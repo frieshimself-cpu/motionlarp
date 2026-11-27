@@ -157,6 +157,13 @@ describe('waiting for a transaction to land', () => {
     expect(resent).toBe(2); // after polls 3 and 6
   });
 
+  it('a buy is re-sent only for its first moments: one that missed its chance is left to expire, not pushed for 30 s', async () => {
+    chain([null, null, null, null, null, null, null, null, null, null, null, null, { confirmationStatus: 'confirmed', slot: 9 }]);
+    let resent = 0;
+    await confirmSignature('sig', 1_000, { resend: () => { resent++; }, pollMs: 10, resendForMs: 45 });
+    expect(resent).toBe(1); // at poll 3 (30 ms); polls 6, 9 and 12 are past the 45 ms budget
+  });
+
   it('stops re-sending once it has landed or failed on chain', async () => {
     chain([null, { err: { InstructionError: [2, 'Custom'] } }]);
     let resent = 0;

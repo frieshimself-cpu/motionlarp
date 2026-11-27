@@ -10,7 +10,7 @@ import {
   type TransactionInstruction,
 } from '@solana/web3.js';
 import { config, solToLamports } from '../config.js';
-import { getBlockhash } from '../chain/connection.js';
+import { getBlockhash, getShortBlockhash } from '../chain/connection.js';
 
 /** The priority fee (SOL) is the total the user wants to pay; spread it over the compute-unit limit. */
 export function priorityFeeMicroLamportsPerCu(validatorTipSol: number, cuLimit: number): bigint {
@@ -28,6 +28,8 @@ export interface BuildTxArgs {
   txFeeSol: number;
   tipAccount?: PublicKey;
   cuLimit?: number;
+  /** A buy: signed with a blockhash that has only a few seconds of life left, so it cannot land long after it was meant to. */
+  shortLived?: boolean;
 }
 
 export interface BuiltTx {
@@ -53,7 +55,7 @@ export async function buildSignedTx(args: BuildTxArgs): Promise<BuiltTx> {
     }
   }
 
-  const { blockhash, lastValidBlockHeight } = await getBlockhash();
+  const { blockhash, lastValidBlockHeight } = args.shortLived ? await getShortBlockhash() : await getBlockhash();
   const message = new TransactionMessage({ payerKey: args.signer.publicKey, recentBlockhash: blockhash, instructions: ixs }).compileToV0Message();
   const tx = new VersionedTransaction(message);
   tx.sign([args.signer]);

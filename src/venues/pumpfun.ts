@@ -3,7 +3,7 @@
 // Scope: SOL-quoted curves only. Token-quoted curves (quote mints) are refused in step 1.
 import { PublicKey } from '@solana/web3.js';
 import BN from 'bn.js';
-import { getConnection } from '../chain/connection.js';
+import { getFastConnection } from '../chain/connection.js';
 import { pumpSdk, type FeeConfig, type Global } from './sdk.js';
 import { VenueError, type BuildResult, type ResolvedPool, type Venue } from './types.js';
 
@@ -24,7 +24,7 @@ export class PumpFunVenue implements Venue {
   private globals: { global: Global; feeConfig: FeeConfig | null; at: number } | null = null;
 
   private sdk(): OnlinePumpSdk {
-    if (!this.online) this.online = new OnlinePumpSdk(getConnection());
+    if (!this.online) this.online = new OnlinePumpSdk(getFastConnection());
     return this.online;
   }
 

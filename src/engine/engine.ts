@@ -30,6 +30,8 @@ export interface EngineDeps {
   fastRetryMs?: number[];
   /** After those, the pause between further tries of the LAST step, which never gives up. */
   slowRetryMs?: number;
+  /** Pause before the wallet is read again when it answered "holds nothing" (default 300 ms). */
+  zeroRecheckMs?: number;
 }
 
 /** A step of a bag-based timed exit that fails is retried at once, then with these short pauses (about a minute in all). */
@@ -50,7 +52,7 @@ export function fmtTokens(amount: bigint, decimals: number): string {
 }
 
 /** An automatic sell that fails is retried after these pauses, then given up (Sell now stays available). */
-const RETRY_MS = [2_000, 4_000, 8_000, 15_000, 30_000, 60_000, 60_000];
+const RETRY_MS = [250, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const MAX_SELL_TRIES = RETRY_MS.length + 1;
 /** Dead coin needs a recent successful quote: an RPC outage is not "no trades". */
 const QUOTE_FRESH_MS = 15_000;
@@ -182,7 +184,8 @@ export class Engine {
         const lam = (v: number | undefined) => BigInt(Math.round(Math.max(0, v ?? 0) * 1e9));
         const costs = lam(s.priorityFeeSol) + lam(s.tipSol) + lam(s.sellPriorityFeeSol ?? s.priorityFeeSol) + lam(s.sellTipSol ?? s.tipSol) + TOKEN_ACCOUNTS_RENT;
         const need = lamports + platformFee + (costs > reserve ? costs : reserve);
-        const have = await this.solBalance(wallet.publicKey.toBase58());
+        // The coin is looked up while the balance is read (one round trip less in front of the buy).
+        const [have] = await Promise.all([this.solBalance(wallet.publicKey.toBase58()), executor.warm?.(t.mint).catch(() => undefined)]);
         if (have < need) {
           store.updatePosition(id, { status: 'failed', closedAt: this.now() });
           store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: wallet has ${fmtSol(have)}, needs ${fmtSol(need)} (buy${platformFee > 0n ? ' + platform fee' : ''} + ${costs > reserve ? 'the fees to get in and out again' : 'fee reserve'})`, mint: t.mint, signature: t.signature });
@@ -190,6 +193,12 @@ export class Engine {
         }
       }
       const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: true, feeBps });
+      if (!fill.ok && fill.uncertain) {
+        // It went out and nobody could tell us what became of it. Not failed, not bought: the position stays
+        // "opening" (so the coin is not bought twice) and restore() settles it from the wallet within a minute.
+        store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'error', message: `Buy of ${label}: sent, but its outcome is not known yet (the connection did not answer). It is settled from the wallet within a minute.`, mint: t.mint, signature: t.signature });
+        return;
+      }
       if (!fill.ok) {
         store.updatePosition(id, { status: 'failed', closedAt: this.now() });
         store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: 0n, lamports, signature: null, simulated: false, error: fill.error });
@@ -314,7 +323,7 @@ export class Engine {
         if (order.everything) {
           // The last step: whatever the wallet holds now (live), in-flight earlier steps included, as specified.
           // In test mode the books stand in for the wallet, minus what overlapping steps are already selling.
-          tokens = live ? await executor.tokenBalance(owner, p.mint) : p.tokensHeld - this.reservedExcept(p.id, key);
+          tokens = live ? await this.walletTokens(owner, p.mint) : p.tokensHeld - this.reservedExcept(p.id, key);
           if (tokens <= 0n) {
             if (!live && this.reservedExcept(p.id, key) > 0n) { await pause(20); continue; } // overlapping steps finish first
             const fresh = store.position(p.id);
@@ -428,7 +437,30 @@ export class Engine {
   async sellNow(userId: number, positionId: number): Promise<{ ok: boolean; error?: string }> {
     const p = this.deps.store.position(positionId);
     if (!p || p.userId !== userId || p.status !== 'open') return { ok: false, error: 'no open position with that id' };
-    return this.enqueue(positionId, () => this.sell(positionId, { reason: 'manual', percent: 100 }));
+    // A click deserves more than one try: when the first fails (often because one of our own timed sells landed in
+    // between and the amount was stale) it is tried again at once, and once more a moment later. Only the last
+    // failure is shown.
+    let result: { ok: boolean; error?: string } = { ok: false, error: 'not tried' };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt === 2) await new Promise((r) => setTimeout(r, this.deps.zeroRecheckMs ?? 300));
+      result = await this.enqueue(positionId, () => this.sell(positionId, { reason: 'manual', percent: 100 }, attempt < 2));
+      if (result.ok || result.error === 'position is not open') break;
+    }
+    return result;
+  }
+
+  /**
+   * The wallet's balance of a coin, for deciding that a position is empty. A read of zero right after our own buy
+   * can come from an RPC node that is one block behind: it is believed only when two more reads, a moment apart,
+   * say zero too. (A failed read throws, as before: unknown is never zero.)
+   */
+  private async walletTokens(owner: string, mint: string): Promise<bigint> {
+    let balance = await this.deps.executor.tokenBalance(owner, mint);
+    for (let again = 0; balance === 0n && again < 2; again++) {
+      await new Promise((r) => setTimeout(r, this.deps.zeroRecheckMs ?? 300));
+      balance = await this.deps.executor.tokenBalance(owner, mint);
+    }
+    return balance;
   }
 
   private markDone(p: Position, order: SellOrder): Partial<Pick<Position, 'firedTimed' | 'firedStop' | 'deadFired'>> {
@@ -438,7 +470,7 @@ export class Engine {
     return {};
   }
 
-  private async sell(positionId: number, order: SellOrder): Promise<{ ok: boolean; error?: string }> {
+  private async sell(positionId: number, order: SellOrder, quiet = false): Promise<{ ok: boolean; error?: string }> {
     const { store, executor } = this.deps;
     const p = store.position(positionId);
     if (!p || p.status !== 'open' || p.tokensHeld <= 0n) return { ok: false, error: 'position is not open' };
@@ -455,19 +487,23 @@ export class Engine {
       || (order.reason === 'dead_coin' && p.deadFired)) return { ok: true };
     const live = p.mode === 'live';
     if (live && !executor.isLive({ live: true })) {
-      return this.sellFailed(p, order, label, 'the server is in test mode: a live position can only be sold once LIVE_TRADING is back on');
+      return this.sellFailed(p, order, label, 'the server is in test mode: a live position can only be sold once LIVE_TRADING is back on', quiet);
     }
     try {
       // Live: this position's own tokens, never more than the wallet really holds (other copies or coins the user
       // holds by hand in the same wallet are not touched).
-      const onChain = live ? await executor.tokenBalance(owner, p.mint) : p.tokensHeld;
+      const onChain = live ? await this.walletTokens(owner, p.mint) : p.tokensHeld;
       const held = onChain < p.tokensHeld ? onChain : p.tokensHeld;
       if (held <= 0n) {
         store.updatePosition(p.id, { status: 'closed', tokensHeld: 0n, closedAt: this.now(), ...this.markDone(p, order) });
         store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${label}: the wallet holds none of it any more (sold elsewhere?) — closed`, mint: p.mint });
         return { ok: true };
       }
-      const tokens = portion(held, order.percent);
+      // Tokens one of our timed steps is selling right now are already on their way: this sell takes its share of
+      // the rest (asking for them too would fail on chain, or make the step fail, and cost a fee either way).
+      const inFlight = this.reservedExcept(p.id, '');
+      const free = held > inFlight ? held - inFlight : 0n;
+      const tokens = portion(free, order.percent);
       if (tokens <= 0n) {
         store.updatePosition(p.id, this.markDone(p, order));
         return { ok: true };
@@ -479,7 +515,7 @@ export class Engine {
       const tipSol = copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0;
       const sentAt = this.now();
       const fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0 });
-      if (!fill.ok) return this.sellFailed(p, order, label, fill.error);
+      if (!fill.ok) return this.sellFailed(p, order, label, fill.error, quiet);
 
       this.retries.delete(this.orderKey(p.id, order));
       let left = held - fill.tokens;
@@ -508,29 +544,34 @@ export class Engine {
       store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, fill.lamports, sentAt, fill.simulated, closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
       return { ok: true };
     } catch (err) {
-      return this.sellFailed(p, order, label, safeErrorMessage(err));
+      return this.sellFailed(p, order, label, safeErrorMessage(err), quiet);
     }
   }
 
-  private sellFailed(p: Position, order: SellOrder, label: string, rawError: string): { ok: boolean; error: string } {
+  private sellFailed(p: Position, order: SellOrder, label: string, rawError: string, quiet = false): { ok: boolean; error: string } {
     const { store } = this.deps;
     const error = friendlyError(rawError);
     const why = REASON_TEXT[order.reason](order, p);
     if (order.reason === 'manual') {
-      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error}`, mint: p.mint });
+      if (!quiet) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error}`, mint: p.mint });
       return { ok: false, error };
     }
     const key = this.orderKey(p.id, order);
     const tries = (this.retries.get(key)?.tries ?? 0) + 1;
-    if (tries >= MAX_SELL_TRIES) {
+    // A sell of EVERYTHING never gives up: the coins are still in the wallet and nobody may be watching. A sell of a
+    // part does, after its quick tries: the rules that come later sell what it left.
+    const fullExit = order.percent >= 100;
+    if (tries >= MAX_SELL_TRIES && !fullExit) {
       this.retries.delete(key);
       store.updatePosition(p.id, this.markDone(p, order));
       store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Gave up on the ${why} of ${label} after ${tries} failed tries: ${error}. Use Sell now.`, mint: p.mint });
     } else {
-      const wait = RETRY_MS[tries - 1]!;
+      const slow = this.deps.slowRetryMs ?? SLOW_RETRY_MS;
+      const wait = RETRY_MS[tries - 1] ?? slow;
       this.retries.set(key, { positionId: p.id, order, tries, nextAt: this.now() + wait });
-      // One feed line per failing sell, not one per retry.
+      // One feed line per failing sell, not one per retry; one more when it turns into the slow, endless kind.
       if (tries === 1) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error} — retrying`, mint: p.mint });
+      if (tries === MAX_SELL_TRIES) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `The sell of ${label} (${why}) has failed ${tries} times (${error}): still trying every ${Math.max(1, Math.round(slow / 1000))} s until it sells. Sell now works too.`, mint: p.mint });
     }
     return { ok: false, error };
   }

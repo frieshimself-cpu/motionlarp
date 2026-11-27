@@ -3,13 +3,16 @@
 // Every other coin is not resolved here: the executor sends it through Jupiter.
 import { PublicKey, type Connection } from '@solana/web3.js';
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
-import { getConnection } from '../chain/connection.js';
+import { getFastConnection } from '../chain/connection.js';
 import { pumpSdk } from './sdk.js';
 import { PumpFunVenue } from './pumpfun.js';
 import { PumpSwapVenue } from './pumpswap.js';
 import { VenueError, type ResolvedPool, type Venue } from './types.js';
 
 const RESOLVE_TTL_MS = 60_000;
+/** A mint that is not visible yet is read again this often, this many times (about a second in all). */
+const MINT_RETRY_MS = 60;
+const MINT_RETRIES = 16;
 const { PUMP_AMM_PROGRAM_ID, PUMP_PROGRAM_ID, PUMP_SDK, bondingCurvePda, canonicalPumpPoolPda } = pumpSdk;
 
 
@@ -26,7 +29,7 @@ export class PfDispatcher {
   async resolve(mint: string, opts: { forceRefresh?: boolean } = {}): Promise<ResolvedPool> {
     const hit = this.cache.get(mint);
     if (hit && !opts.forceRefresh && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.pool;
-    const resolved = await this.fromMint(getConnection(), new PublicKey(mint));
+    const resolved = await this.fromMint(getFastConnection(), new PublicKey(mint));
     if (!resolved) throw new VenueError('not a pump.fun or PumpSwap coin', 'unresolved');
     this.cache.set(mint, { pool: resolved, at: Date.now() });
     return resolved;
@@ -36,8 +39,19 @@ export class PfDispatcher {
   private async fromMint(connection: Connection, mint: PublicKey): Promise<ResolvedPool | null> {
     const curvePda = bondingCurvePda(mint);
     const poolPda = canonicalPumpPoolPda(mint);
-    const [mintInfo, curveInfo, poolInfo] = await connection.getMultipleAccountsInfo([mint, curvePda, poolPda], 'confirmed');
-    if (!mintInfo) throw new VenueError(`mint ${mint.toBase58()} not found`, 'unresolved');
+    // Read at 'processed', the commitment a leader's trade is heard at: a coin bought in the very slot it was
+    // created in does not exist at 'confirmed' yet. If the node answering is a block behind the one the trade came
+    // from, the mint is not there at all: read again for about a second. A mint that never shows up is 'not_found',
+    // NOT 'unresolved': the executor must not take it for "not a pump.fun coin" and pin it to Jupiter.
+    let mintInfo = null;
+    let curveInfo = null;
+    let poolInfo = null;
+    for (let attempt = 0; ; attempt++) {
+      [mintInfo, curveInfo, poolInfo] = await connection.getMultipleAccountsInfo([mint, curvePda, poolPda], 'processed');
+      if (mintInfo || attempt >= MINT_RETRIES) break;
+      await new Promise((r) => setTimeout(r, MINT_RETRY_MS));
+    }
+    if (!mintInfo) throw new VenueError(`mint ${mint.toBase58()} is not visible on the chain yet`, 'not_found');
     const tokenProgram = mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : mintInfo.owner.equals(TOKEN_PROGRAM_ID) ? TOKEN_PROGRAM_ID : null;
     if (!tokenProgram) throw new VenueError(`${mint.toBase58()} is not a token mint`, 'unresolved');
     const ammPool = poolInfo && poolInfo.owner.equals(PUMP_AMM_PROGRAM_ID) ? poolPda : null;

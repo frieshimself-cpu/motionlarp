@@ -13,10 +13,16 @@ import { VenueError } from '../src/venues/types.js';
 const BONK = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
 const account = (owner: PublicKey) => ({ owner, data: Buffer.alloc(0), lamports: 1_000_000, executable: false });
 
-function chain(opts: { canonicalPool?: boolean }) {
-  const calls = { programAccounts: 0 };
+function chain(opts: { canonicalPool?: boolean; missingReads?: number }) {
+  const calls = { programAccounts: 0, reads: 0, commitments: [] as unknown[] };
   const fake = {
-    getMultipleAccountsInfo: async (keys: PublicKey[]) => [account(TOKEN_PROGRAM_ID), null, opts.canonicalPool ? account(pumpSdk.PUMP_AMM_PROGRAM_ID) : null].slice(0, keys.length),
+    getMultipleAccountsInfo: async (keys: PublicKey[], commitment?: unknown) => {
+      calls.reads++;
+      calls.commitments.push(commitment);
+      // A coin in the slot it was created in: nothing is there yet for the first reads.
+      if (calls.reads <= (opts.missingReads ?? 0)) return keys.map(() => null);
+      return [account(TOKEN_PROGRAM_ID), null, opts.canonicalPool ? account(pumpSdk.PUMP_AMM_PROGRAM_ID) : null].slice(0, keys.length);
+    },
     // Side pools exist for this coin (anyone can create one): they must not be looked for, let alone used.
     getProgramAccounts: async () => { calls.programAccounts++; return [{ pubkey: PublicKey.unique(), account: account(pumpSdk.PUMP_AMM_PROGRAM_ID) }]; },
   };
@@ -40,5 +46,32 @@ describe('which coins the site trades natively', () => {
     expect(pool.kind).toBe('pumpswap');
     expect(pool.pool.equals(pumpSdk.canonicalPumpPoolPda(new PublicKey(BONK)))).toBe(true);
     expect(calls.programAccounts).toBe(0);
+  });
+});
+
+describe('a coin bought in the slot it was created in (the Scharo wallet does this most of the time)', () => {
+  // Review, 27 Nov 2026: the leader's buy is heard at 'processed', the coin was looked up at 'confirmed', where it
+  // did not exist yet (6 of 21 on mainnet). It was then taken for "not a pump.fun coin" and sent to Jupiter, which
+  // has no route for a coin that young, for a whole hour.
+  it('is looked up at the commitment the trade was heard at', async () => {
+    const calls = chain({ canonicalPool: true });
+    await new PfDispatcher().resolve(BONK);
+    expect(calls.commitments).toEqual(['processed']);
+  });
+
+  it('not visible on the first reads: it is read again within a fraction of a second and stays on the native route', async () => {
+    const calls = chain({ canonicalPool: true, missingReads: 3 });
+    const t0 = Date.now();
+    const pool = await new PfDispatcher().resolve(BONK);
+    expect(pool.kind).toBe('pumpswap');
+    expect(calls.reads).toBe(4);
+    expect(Date.now() - t0).toBeLessThan(600);
+  });
+
+  it('a mint that never shows up is "not found", which is not the same as "not a pump.fun coin"', async () => {
+    chain({ missingReads: 1000 });
+    const err = await new PfDispatcher().resolve(BONK).catch((e) => e);
+    expect(err).toBeInstanceOf(VenueError);
+    expect((err as VenueError).code).toBe('not_found');
   });
 });

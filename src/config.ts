@@ -43,6 +43,11 @@ function load() {
     /** Ask Helius (RPC and Sender) to route trades away from validators linked to sandwich attacks. On by default:
      *  a buy at 100 % slippage has no price limit of its own. MEV_PROTECT=off for raw speed. */
     mevProtect: bool('MEV_PROTECT', true),
+    /** Time limit of every RPC request (a stalled read must not hold a trade or an exit for minutes). */
+    rpcTimeoutMs: num('RPC_TIMEOUT_MS', 4_000),
+    /** A BUY that has not landed is re-sent for this long only (sells are re-sent until they land): a copy that
+     *  misses its moment should die, not fill seconds later at any price. */
+    buyResendMs: num('BUY_RESEND_MS', 1_500),
     /** How long one lane (the RPC, Sender) may take to accept a transaction before it counts as not answering. */
     sendLaneTimeoutMs: num('SEND_LANE_TIMEOUT_MS', 3_000),
     /** Testing only: 'rpc' or 'sender' sends through that lane alone. */

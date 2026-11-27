@@ -64,7 +64,7 @@ beforeEach(() => {
   ex = new Market(() => clock);
   uid = store.createUser('kol', 'x');
   store.setWallet(uid, wallet.publicKey.toBase58(), 'enc');
-  engine = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1], slowRetryMs: 1 });
+  engine = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1], slowRetryMs: 1, zeroRecheckMs: 1 });
 });
 
 const scharo = (patch: Record<string, unknown> = {}) => store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, ...patch }));
@@ -277,6 +277,114 @@ describe('one position per coin', () => {
     await at(2); await at(4); await at(6);
     expect(open()).toHaveLength(0);
     await engine.onLeaderTrade(buyTrade({ slot: 50 })); await engine.idle();
+    expect(open()).toHaveLength(1);
+  });
+});
+
+describe('found by the review of 27 Nov 2026 (reading the wallet, overlapping sells, unknown outcomes)', () => {
+  it('live: one stale "zero" from the wallet right after our buy does not close the position', async () => {
+    // An RPC node one block behind answers 0 for a bag that is there: the position was closed with the whole bag
+    // still in the wallet and nothing ever sold it.
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    const real = ex.tokenBalance.bind(ex);
+    let stale = 1;
+    ex.tokenBalance = async () => (stale-- > 0 ? 0n : real());
+    await engine.onLeaderTrade(sellTrade(0n)); await engine.idle(); // their full exit: our sell reads the wallet first
+    expect(ex.sells.map((x) => x.tokens)).toEqual([BAG]);
+    expect(ex.held).toBe(0n);
+    expect(open()).toHaveLength(0);
+    expect(feed().some((f) => /sold elsewhere/.test(f))).toBe(false);
+  });
+
+  it('live: the last timed step also reads again before it believes the wallet is empty', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    await at(2); await at(4);
+    const real = ex.tokenBalance.bind(ex);
+    let stale = 2;
+    ex.tokenBalance = async () => (stale-- > 0 ? 0n : real());
+    await at(6);
+    expect(ex.held).toBe(0n);
+    expect(ex.sells.map((x) => x.tokens)).toEqual([400_000n, 300_000n, 300_000n]);
+  });
+
+  it('live: a wallet that really is empty (three reads in a row) still closes the position', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.held = 0n; // sold by hand elsewhere
+    await engine.onLeaderTrade(sellTrade(0n)); await engine.idle();
+    expect(open()).toHaveLength(0);
+    expect(feed().some((f) => /sold elsewhere/.test(f))).toBe(true);
+    expect(ex.sells).toHaveLength(0);
+  });
+
+  it('live: their full exit while one of our timed sells is in flight sells the rest at once, not the tokens already on their way', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    let release: () => void = () => undefined;
+    ex.plan = (n) => (n === 1 ? new Promise((r) => { release = () => r('ok'); }) : 'ok'); // the +2 s sell stays in flight
+    clock = 1_000_000 + 2000;
+    await engine.tick();
+    await sleep(5);
+    const exit = engine.onLeaderTrade(sellTrade(0n));
+    await sleep(20);
+    expect(ex.sells.map((x) => x.tokens)).toEqual([600_000n]); // everything except the 40 % in flight, right away
+    release();
+    await exit; await engine.idle();
+    expect(ex.sells.map((x) => x.tokens).sort()).toEqual([400_000n, 600_000n]);
+    expect(ex.held).toBe(0n);
+    expect(open()).toHaveLength(0);
+  });
+
+  it('Sell now tries again at once when the first attempt fails (one of our own sells landed in between)', async () => {
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.plan = (n) => (n === 1 ? 'fail' : 'ok');
+    const r = await engine.sellNow(uid, open()[0]!.id);
+    expect(r.ok).toBe(true);
+    expect(ex.attempts).toBe(2);
+    expect(open()).toHaveLength(0);
+    expect(feed().some((f) => /failed/.test(f))).toBe(false);
+  });
+
+  it('Sell now that keeps failing says so once', async () => {
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.plan = () => 'fail';
+    const r = await engine.sellNow(uid, open()[0]!.id);
+    expect(r.ok).toBe(false);
+    expect(ex.attempts).toBe(3);
+    expect(feed().filter((f) => /Sell of .* failed/.test(f))).toHaveLength(1);
+  });
+
+  it('live: a buy whose fate could not be read is not thrown away: it waits and is settled from the wallet', async () => {
+    ex.live = true;
+    scharo();
+    ex.buy = async () => { ex.held += 500_000n; return { ok: false, error: 'sent, outcome unknown: confirmation unknown (RPC unreachable)', uncertain: true }; };
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    expect(store.openingPositions()).toHaveLength(1);
+    expect(feed().some((f) => /not known yet/.test(f))).toBe(true);
+    // the coin is not bought a second time meanwhile
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    expect(store.openingPositions()).toHaveLength(1);
+    await engine.restore();
+    expect(open()[0]).toMatchObject({ status: 'open', tokensHeld: 500_000n });
+  });
+
+  it('the coin is looked up while the wallet balance is read, not after', async () => {
+    ex.live = true;
+    scharo();
+    const order: string[] = [];
+    (ex as unknown as { warm: (m: string) => Promise<void> }).warm = async () => { order.push('warm'); };
+    const bal = ex.solBalance.bind(ex);
+    ex.solBalance = async () => { order.push('balance'); await sleep(5); order.push('balance done'); return bal(); };
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    expect(order.indexOf('warm')).toBeLessThan(order.indexOf('balance done'));
     expect(open()).toHaveLength(1);
   });
 });

@@ -33,6 +33,11 @@ const wallet = readKey(keyfile);
 const owner = wallet.publicKey.toBase58();
 const tipSol = Number(tipArg ?? 0.001);
 const priorityFeeSol = Number(prioArg ?? 0.0002);
+const { startBlockhashRefresher } = await import('../src/chain/connection.js');
+// As on the server: blockhashes are fetched every 2 s and kept, so a buy can be signed with one that expires soon.
+startBlockhashRefresher();
+const warmUp = Number(process.env.WARM_UP_SEC ?? 0);
+if (warmUp) { console.log(`collecting blockhashes for ${warmUp} s (as a server that has been up for a while)`); await new Promise((r) => setTimeout(r, warmUp * 1000)); }
 const ex = new ChainExecutor();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const sol = (l: bigint) => (Number(l) / 1e9).toFixed(6);

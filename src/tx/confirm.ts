@@ -14,6 +14,8 @@ const RESEND_EVERY_POLLS = 3;
 export interface ConfirmOptions {
   /** Puts the same signed transaction out again (never a newly signed one). */
   resend?: () => void;
+  /** Re-send only for this long after the first poll (a buy); omitted = until it lands or expires (a sell). */
+  resendForMs?: number;
   /** For tests. */
   pollMs?: number;
 }
@@ -22,7 +24,8 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
   if (signature.startsWith('SIMULATED_') || signature.startsWith('PAPER_')) return { landed: true };
   const connection = getConnection();
   const pollMs = opts.pollMs ?? POLL_MS;
-  const deadline = Date.now() + HARD_CAP_MS;
+  const started = Date.now();
+  const deadline = started + HARD_CAP_MS;
   let polls = 0;
   while (Date.now() < deadline) {
     try {
@@ -40,7 +43,7 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
         }
       }
       // Not seen yet (or only processed): give it another push.
-      if (!status && opts.resend && polls > 0 && polls % RESEND_EVERY_POLLS === 0) opts.resend();
+      if (!status && opts.resend && polls > 0 && polls % RESEND_EVERY_POLLS === 0 && (opts.resendForMs === undefined || Date.now() - started <= opts.resendForMs)) opts.resend();
     } catch {
       // RPC hiccup: keep polling.
     }
