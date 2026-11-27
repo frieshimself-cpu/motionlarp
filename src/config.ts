@@ -40,6 +40,13 @@ function load() {
     /** Helius Sender: where tipped trades are sent (Jito + staked connections at once). The global endpoint routes
      *  to the nearest region; 'off' sends tipped trades through Jito's block engine instead. */
     senderUrl: str('SENDER_URL', 'https://sender.helius-rpc.com/fast'),
+    /** Ask Helius (RPC and Sender) to route trades away from validators linked to sandwich attacks. On by default:
+     *  a buy at 100 % slippage has no price limit of its own. MEV_PROTECT=off for raw speed. */
+    mevProtect: bool('MEV_PROTECT', true),
+    /** How long one lane (the RPC, Sender) may take to accept a transaction before it counts as not answering. */
+    sendLaneTimeoutMs: num('SEND_LANE_TIMEOUT_MS', 3_000),
+    /** Testing only: 'rpc' or 'sender' sends through that lane alone. */
+    sendOnly: str('SEND_ONLY'),
     /** Jupiter routes every coin the native pump.fun / PumpSwap path does not cover. The free endpoint is
      *  rate-limited; with a key from portal.jup.ag use https://api.jup.ag and set JUPITER_API_KEY. */
     jupiterUrl: str('JUPITER_URL', 'https://lite-api.jup.ag'),
@@ -62,7 +69,10 @@ function load() {
     dbPath: str('DB_PATH', './data/motionlarp.db'),
     logLevel: str('LOG_LEVEL', 'info'),
 
-    computeUnitLimit: num('COMPUTE_UNIT_LIMIT', 300_000),
+    /** Compute units a native trade asks for. The priority fee is a total spread over this number, so a tighter
+     *  limit means a higher bid per unit for the same SOL. Trades use 55-95k (measured on mainnet); one that runs
+     *  out is retried with twice this. */
+    computeUnitLimit: num('COMPUTE_UNIT_LIMIT', 200_000),
     confirmTimeoutMs: num('CONFIRM_TIMEOUT_MS', 45_000),
     blockhashRefreshMs: num('BLOCKHASH_REFRESH_MS', 2_000),
     /** How often each leader is also polled, in case the websocket missed a transaction. */

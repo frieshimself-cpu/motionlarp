@@ -1,6 +1,6 @@
 // The process: website + API, the leader watcher, the copy engine's clock. One per server.
 import { Keypair } from '@solana/web3.js';
-import { canSendLive } from './tx/send.js';
+import { canSendLive, laneStats } from './tx/send.js';
 import { config } from './config.js';
 import { startBlockhashRefresher, stopBlockhashRefresher } from './chain/connection.js';
 import { decryptSecret } from './crypto.js';
@@ -124,7 +124,7 @@ const app = createApp({
   trustProxy: config.trustProxy,
   feeBpsFor,
   maxCopiesPerUser: config.maxCopiesPerUser,
-  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: senderNote, feed: feedNote(), keys: keysNote(), health }),
+  serverInfo: () => ({ live: canSendLive(), maxSolPerBuy: config.maxSolPerBuy, watching: watcher?.watching().length ?? 0, mode: mode(), sender: config.senderUrl === GLOBAL_SENDER && autoSender && senderRegion ? 'global (region dropped after failed sends)' : senderNote, feed: feedNote(), keys: keysNote(), health, sends: laneStats.text() }),
 });
 
 // Five times a second, so a timed sell goes out within 0.2 s of its time. Ticks may overlap: the engine runs one
@@ -159,16 +159,28 @@ if (config.feeBps > 0 && config.rpcUrl) {
 
 // Tipped trades go through the Helius Sender region nearest this server; its connection is kept warm.
 let senderNote = config.senderUrl === 'off' ? 'off' : 'global';
-if (config.rpcUrl && config.senderUrl === GLOBAL_SENDER) {
+/** The owner did not pin a Sender address: the nearest region is measured and used. */
+const autoSender = config.senderUrl === GLOBAL_SENDER;
+async function pickSender(): Promise<void> {
+  if (!config.rpcUrl || !autoSender) return;
   const nearest = await chooseSender().catch(() => null);
   if (nearest) {
     config.senderUrl = nearest.url;
     senderRegion = nearest.region;
     senderNote = `${nearest.region} (${nearest.ms} ms)`;
-    const warm = setInterval(() => void pingRegion(nearest.region).catch(() => undefined), 20_000);
-    warm.unref();
+  } else {
+    config.senderUrl = GLOBAL_SENDER;
+    senderRegion = null;
+    senderNote = 'global';
   }
+}
+await pickSender();
+if (autoSender && config.rpcUrl) {
   log.info('helius sender', { endpoint: senderNote });
+  // Kept warm: an idle connection would cost a handshake on the next trade.
+  setInterval(() => { if (senderRegion) void pingRegion(senderRegion).catch(() => undefined); }, 5_000).unref();
+  // Measured again every five minutes: a region that went slow, or was dropped after failed sends, is replaced.
+  setInterval(() => void pickSender().catch(() => undefined), 300_000).unref();
 }
 
 app.listen(config.port, config.host, () => {

@@ -386,6 +386,40 @@ describe('platform fee', () => {
   });
 });
 
+describe('a live buy keeps enough SOL to get out again', () => {
+  // Review, 27 Nov 2026: the check before a live buy counted the buy and a flat 0.01 SOL. With large fees (the
+  // Scharo preset pays 0.006 SOL on the buy and 0.002 on each sell) a wallet could afford the buy and then be
+  // unable to pay for its own sells, leaving the coins stuck.
+  const setup = (sol: bigint) => {
+    const fx = new FakeExecutor(); fx.live = true; fx.sol = sol;
+    const e = new Engine({ store, executor: fx, walletFor: () => wallet, now: () => clock, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01 });
+    addCopy({ priorityFeeSol: 0.01, tipSol: 0.02, sellPriorityFeeSol: 0.004, sellTipSol: 0.006 });
+    return { fx, e };
+  };
+  // buy 0.1 + buy fees 0.03 + one sell's fees 0.01 + two token accounts' rent 0.0042 = 0.1442 (above the flat 0.01 reserve)
+  it('a wallet that covers the buy and the flat reserve but not the fees is skipped, and told the real number', async () => {
+    const { fx, e } = setup(SOL / 10n + SOL / 50n); // 0.12
+    await e.onLeaderTrade(trade()); await e.idle();
+    expect(fx.buys).toHaveLength(0);
+    expect(feed()[0]).toMatch(/needs 0\.144\d* SOL/);
+  });
+
+  it('a wallet that covers all of it buys', async () => {
+    const { fx, e } = setup(SOL / 10n + SOL / 20n); // 0.15
+    await e.onLeaderTrade(trade()); await e.idle();
+    expect(fx.buys).toHaveLength(1);
+  });
+
+  it('with small fees the flat reserve still decides', async () => {
+    const fx = new FakeExecutor(); fx.live = true; fx.sol = SOL / 10n + SOL / 200n; // 0.105: under buy + 0.01
+    const e = new Engine({ store, executor: fx, walletFor: () => wallet, now: () => clock, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01 });
+    addCopy({ priorityFeeSol: 0.0001, tipSol: 0 });
+    await e.onLeaderTrade(trade()); await e.idle();
+    expect(fx.buys).toHaveLength(0);
+    expect(feed()[0]).toMatch(/needs 0\.11 SOL/);
+  });
+});
+
 describe('trading fees per copy reach the trade', () => {
   it('buys use the buy fees, sells the sell fees', async () => {
     addCopy({ priorityFeeSol: 0.001, tipSol: 0.002, sellPriorityFeeSol: 0.0001, sellTipSol: 0.0005, sell: { mirror: { enabled: true, mode: 'all' } } });

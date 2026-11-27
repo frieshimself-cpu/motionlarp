@@ -20,7 +20,7 @@ import { log, safeErrorMessage } from '../log.js';
 import { buildSignedTx } from '../tx/build.js';
 import { feeLamports, withFee } from '../fee.js';
 import { confirmSignature } from '../tx/confirm.js';
-import { canSendLive, sendTransaction } from '../tx/send.js';
+import { canSendLive, resend, sendTransaction } from '../tx/send.js';
 import { tipAccount, tipInstruction, tipLamports, tipRoute } from '../tx/tip.js';
 import { appendInstruction, Jupiter } from '../venues/jupiter.js';
 import { PfDispatcher } from '../venues/pf.js';
@@ -195,8 +195,12 @@ export class ChainExecutor implements Executor {
     return buildSignedTx({
       signer: req.wallet, instructions, validatorTipSol: req.priorityFeeSol, txFeeSol: tipped ? req.tipSol : 0,
       tipAccount: tipped ? tipAccount(tipRoute(config.senderUrl)) : undefined,
+      ...(this.heavy.has(req.mint) ? { cuLimit: this.heavy.get(req.mint)! } : {}),
     });
   }
+
+  /** Coins whose trades ran out of compute units once: their next transactions ask for twice the usual limit. */
+  private readonly heavy = new Map<string, number>();
 
   private async nativeBuy(req: TradeRequest & { lamports: bigint }, pool: ResolvedPool): Promise<FillResult> {
     const venue = this.pf.venueFor(pool);
@@ -323,11 +327,17 @@ export class ChainExecutor implements Executor {
    * timed steps overlapping, another sell's balance change must not be mistaken for this one's.
    */
   private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBefore: bigint | null, platformFee: bigint): Promise<FillResult> {
-    const sent = await sendTransaction(tx, true, this.tip(req));
+    const tip = this.tip(req);
+    const sent = await sendTransaction(tx, true, tip);
     if (!sent.ok) return { ok: false, error: sent.error };
-    const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight);
+    // The owner switched live trading off while this was being built: it was only simulated. Nothing happened.
+    if (sent.simulated) return { ok: false, error: 'live trading was switched off before this was sent' };
+    // Until it lands, the same signed transaction is put out again about once a second (it can only land once).
+    const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight, { resend: () => resend(tx, tip) });
     const owner = req.wallet.publicKey.toBase58();
     if (!confirmed.landed) {
+      // Out of compute units: the retry (the engine retries a failed trade) asks for twice as many.
+      if (/ComputationalBudgetExceeded|ProgramFailedToComplete|exceeded CUs/i.test(confirmed.reason)) this.heavy.set(req.mint, config.computeUnitLimit * 2);
       if (!confirmed.certain && balanceBefore !== null) {
         try {
           const after = await this.tokenBalance(owner, req.mint);

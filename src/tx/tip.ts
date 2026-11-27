@@ -59,7 +59,7 @@ export function tipInstruction(from: PublicKey, tipSol: number, route: TipRoute)
 }
 
 /** Where a tipped transaction goes on Sender, or null (switched off / no tip). The Helius key lifts its rate limit. */
-export function senderEndpoint(senderUrl: string, rpcUrl: string, tip: bigint): string | null {
+export function senderEndpoint(senderUrl: string, rpcUrl: string, tip: bigint, mevProtect = false): string | null {
   if (tipRoute(senderUrl) !== 'sender' || tip <= 0n) return null;
   const u = new URL(senderUrl);
   try {
@@ -70,5 +70,7 @@ export function senderEndpoint(senderUrl: string, rpcUrl: string, tip: bigint): 
     // no usable RPC URL: keyless
   }
   if (tip < SENDER_MAX_TIP) u.searchParams.set('swqos_only', 'true');
+  // Helius "MEV Protect": the trade is kept away from validators linked to sandwich attacks (opt-in per request).
+  if (mevProtect) u.searchParams.set('mev-protect', 'true');
   return u.toString();
 }

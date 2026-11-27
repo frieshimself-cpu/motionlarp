@@ -14,6 +14,9 @@ export interface JupiterQuote {
 
 type FetchFn = (url: string | URL, init?: RequestInit) => Promise<Response>;
 
+/** The most a Solana transaction may weigh on the wire (one network packet). */
+export const MAX_TRANSACTION_BYTES = 1232;
+
 export class Jupiter {
   /** `retryMs`: pause between tries when a coin has no route yet (a coin seconds old is not indexed yet; seen on
    *  mainnet: a LaunchLab coin routed after ~10 s). Pauses grow 1×, 2×, … 5×: about 15 s in all. */
@@ -74,6 +77,8 @@ export async function appendInstruction(tx: VersionedTransaction, ix: Transactio
   const msg = TransactionMessage.decompile(tx.message, { addressLookupTableAccounts: tables });
   msg.instructions.push(...(Array.isArray(ix) ? ix : [ix]));
   const out = new VersionedTransaction(msg.compileToV0Message(tables));
-  out.serialize(); // throws "encoding overruns" when the transaction is too large
+  // A transaction may be 1232 bytes in all, signatures included. serialize() only throws when the MESSAGE alone is
+  // over that, so the size is checked here (the empty signature slots are already counted).
+  if (out.serialize().length > MAX_TRANSACTION_BYTES) throw new Error(`transaction too large: ${out.serialize().length} bytes`);
   return out;
 }

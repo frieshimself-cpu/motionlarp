@@ -34,6 +34,8 @@ export interface EngineDeps {
 
 /** A step of a bag-based timed exit that fails is retried at once, then with these short pauses (about a minute in all). */
 const FAST_RETRY_MS = [0, 250, 250, 500, 500, 1_000, 1_000, 2_000, 2_000, 4_000, 4_000, 8_000, 8_000, 15_000, 15_000];
+/** Rent of the two token accounts a trade can open: the coin's own and a temporary wrapped-SOL one (about 0.0021 SOL each). */
+const TOKEN_ACCOUNTS_RENT = 4_200_000n;
 /** The last step of such an exit never gives up (the coins are still in the wallet): after the quick tries, one every 15 s. */
 const SLOW_RETRY_MS = 15_000;
 
@@ -173,11 +175,17 @@ export class Engine {
       const feeBps = this.deps.feeBpsFor?.(copy.userId) ?? 0;
       if (executor.isLive({ live: true })) {
         const platformFee = (lamports * BigInt(Math.floor(feeBps))) / 10_000n;
-        const need = lamports + platformFee + BigInt(Math.round(this.deps.feeReserveSol * 1e9));
+        // Besides the buy itself the wallet must be able to get out again: the buy's own fees, one sell's fees (they
+        // are paid before its proceeds arrive) and the rent of two token accounts (the coin's, and the temporary
+        // wrapped-SOL one a PumpSwap or Jupiter trade opens). The flat reserve is the floor.
+        const reserve = BigInt(Math.round(this.deps.feeReserveSol * 1e9));
+        const lam = (v: number | undefined) => BigInt(Math.round(Math.max(0, v ?? 0) * 1e9));
+        const costs = lam(s.priorityFeeSol) + lam(s.tipSol) + lam(s.sellPriorityFeeSol ?? s.priorityFeeSol) + lam(s.sellTipSol ?? s.tipSol) + TOKEN_ACCOUNTS_RENT;
+        const need = lamports + platformFee + (costs > reserve ? costs : reserve);
         const have = await this.solBalance(wallet.publicKey.toBase58());
         if (have < need) {
           store.updatePosition(id, { status: 'failed', closedAt: this.now() });
-          store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: wallet has ${fmtSol(have)}, needs ${fmtSol(need)} (buy${platformFee > 0n ? ' + platform fee' : ''} + fee reserve)`, mint: t.mint, signature: t.signature });
+          store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: wallet has ${fmtSol(have)}, needs ${fmtSol(need)} (buy${platformFee > 0n ? ' + platform fee' : ''} + ${costs > reserve ? 'the fees to get in and out again' : 'fee reserve'})`, mint: t.mint, signature: t.signature });
           return;
         }
       }

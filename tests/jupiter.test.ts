@@ -70,3 +70,22 @@ describe('appendInstruction (our fee inside Jupiter\'s transaction)', () => {
     expect(back.payerKey.equals(user.publicKey)).toBe(true);
   });
 });
+
+describe('appendInstruction: the whole transaction must fit in one packet', () => {
+  // Review, 27 Nov 2026: only the MESSAGE was checked against 1232 bytes; with the signature on top a transaction
+  // of up to 1297 bytes passed here, was refused by the network, and the smaller route was never tried.
+  it('refuses a transaction that only fits without its signature, so a smaller route is tried', async () => {
+    const payer = Keypair.generate().publicKey;
+    const transfer = () => SystemProgram.transfer({ fromPubkey: payer, toPubkey: Keypair.generate().publicKey, lamports: 1 });
+    const build = (n: number) => new VersionedTransaction(new TransactionMessage({ payerKey: payer, recentBlockhash: '11111111111111111111111111111111', instructions: Array.from({ length: n }, transfer) }).compileToV0Message());
+    // The largest transaction that still fits: one more transfer puts it between 1233 and 1297 bytes.
+    let n = 1;
+    while (build(n + 1).serialize().length <= 1232) n++;
+    const full = build(n);
+    expect(full.serialize().length).toBeLessThanOrEqual(1232);
+    expect(full.message.serialize().length + 44).toBeLessThanOrEqual(1232); // the message alone would still pass
+    await expect(appendInstruction(full, transfer(), async () => [])).rejects.toThrow(/too large/);
+    // one with room left is fine
+    await expect(appendInstruction(build(3), transfer(), async () => [])).resolves.toBeInstanceOf(VersionedTransaction);
+  });
+});

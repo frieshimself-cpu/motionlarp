@@ -7,7 +7,7 @@ import { getConnection } from '../chain/connection.js';
 import { pumpSwapSdk, type SwapSolanaState } from './sdk.js';
 import { VenueError, type BuildResult, type ResolvedPool, type Venue } from './types.js';
 
-const { OnlinePumpAmmSdk, PUMP_AMM_SDK, buyQuoteInput, sellBaseInput, isSolLikeQuoteMint } = pumpSwapSdk;
+const { OnlinePumpAmmSdk, PUMP_AMM_SDK, buyQuoteInput, sellBaseInput, isSolLikeQuoteMint, supportsTradeV2 } = pumpSwapSdk;
 type OnlinePumpAmmSdk = InstanceType<typeof OnlinePumpAmmSdk>;
 
 function bn(v: bigint): BN {
@@ -32,6 +32,7 @@ function poolArgs(s: SwapSolanaState) {
     quoteMint: s.pool.quoteMint,
     isMayhemMode: s.pool.isMayhemMode,
     creatorFeeBps: s.pool.creatorFeeBps,
+    quoteTransferFee: s.quoteTransferFee,
   };
 }
 
@@ -52,7 +53,7 @@ export class PumpSwapVenue implements Venue {
 
   async quoteBuy(pool: ResolvedPool, lamportsIn: bigint): Promise<bigint> {
     const s = await this.state(pool, PublicKey.default);
-    const q = buyQuoteInput({ ...poolArgs(s), quote: bn(lamportsIn), slippage: 0 });
+    const q = buyQuoteInput({ ...poolArgs(s), quote: bn(lamportsIn), slippage: 0, tradeV2: supportsTradeV2(s.pool) });
     return big(q.base);
   }
 
@@ -64,12 +65,19 @@ export class PumpSwapVenue implements Venue {
 
   async buildBuy({ pool, user, lamportsIn, slippagePct }: { pool: ResolvedPool; user: PublicKey; lamportsIn: bigint; slippagePct: number }): Promise<BuildResult> {
     const s = await this.state(pool, user);
-    const q = buyQuoteInput({ ...poolArgs(s), quote: bn(lamportsIn), slippage: slippagePct });
+    // Spend exactly `lamportsIn` (fees included) and take whatever coins that buys, at least the quote less
+    // slippage: a price that moved means fewer coins, never more SOL. The SDK's usual buy (buyQuoteInput) asks for
+    // a fixed number of coins and lets the pool take up to lamportsIn x (1 + slippage): at 100 % slippage it wraps
+    // TWICE the amount (a 7 SOL buy needs 14 SOL in the wallet and can spend up to 14). Only the newer instruction
+    // (buy_exact_quote_in_v2) spends a fixed budget; pools it does not accept (cashback coins) are not traded
+    // here: 'unsupported_pool' sends them through Jupiter, which also spends an exact amount.
+    if (!supportsTradeV2(s.pool)) throw new VenueError('this pool does not take the exact-spend buy (a cashback coin): traded through Jupiter', 'unsupported_pool');
+    const q = buyQuoteInput({ ...poolArgs(s), quote: bn(lamportsIn), slippage: 0, tradeV2: true });
     if (q.base.isZero()) throw new VenueError('quote returned zero tokens for this amount', 'zero_quote');
-    // Spend `quote` lamports, receive base − slippage. `v2: true` builds the leaner buy_v2 where supported.
-    const instructions = await PUMP_AMM_SDK.buyQuoteInput(s, bn(lamportsIn), slippagePct, { v2: true });
     const expectedOut = big(q.base);
-    const minOut = expectedOut - (expectedOut * BigInt(Math.round(Math.min(100, Math.max(0, slippagePct)) * 10))) / 1000n;
+    let minOut = expectedOut - (expectedOut * BigInt(Math.round(Math.min(100, Math.max(0, slippagePct)) * 10))) / 1000n;
+    if (minOut < 1n) minOut = 1n; // the program refuses a minimum of zero
+    const instructions = await PUMP_AMM_SDK.buyExactQuoteInV2Instructions(s, bn(lamportsIn), bn(minOut));
     return { instructions, expectedOut, minOut };
   }
 

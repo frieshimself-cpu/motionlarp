@@ -32,7 +32,7 @@ export interface AppDeps {
   brand?: string;
   /** Forget the cached keypair of a user (after a wallet change). */
   forgetWallet: (userId: number) => void;
-  serverInfo: () => { live: boolean; maxSolPerBuy: number; watching: number; mode: string; sender?: string; feed?: string; keys?: string; health?: string };
+  serverInfo: () => { live: boolean; maxSolPerBuy: number; watching: number; mode: string; sender?: string; feed?: string; keys?: string; health?: string; sends?: string };
   trustProxy?: boolean;
   /** Platform fee (basis points) this user pays. */
   feeBpsFor?: (userId: number) => number;
