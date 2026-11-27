@@ -578,6 +578,8 @@ export class Engine {
       const kept = this.pendingMirror.get(p.id) ?? [];
       kept.push(order);
       this.pendingMirror.set(p.id, kept);
+      // Their full exit is also written down: a restart before the buy is settled must not forget it.
+      if (order.percent >= 100 && !p.exitOwed) store.updatePosition(p.id, { exitOwed: { reason: order.reason, ...(order.tag ? { tag: order.tag } : {}) } });
       if (kept.length === 1) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${shortMint(p.mint)} (${p.copyName}): they sold while our buy's outcome is not known yet — sold as soon as the buy is settled`, mint: p.mint });
       return { ok: false, error: 'waiting for the buy to be settled' };
     }
@@ -626,7 +628,7 @@ export class Engine {
         // Everything is on its way in our other sells. A full exit stays owed: whatever they do not sell (a step
         // that fails for good, a market that pays for only part) is sold after them (it was disarmed, having sold
         // nothing).
-        if (order.percent >= 100 && inFlight > 0n) this.exitOwed.set(p.id, order);
+        if (order.percent >= 100 && inFlight > 0n) this.oweExit(p.id, order);
         this.retries.delete(this.orderKey(p.id, order));
         store.updatePosition(p.id, this.markDone(books, order));
         return { ok: true };
@@ -638,8 +640,9 @@ export class Engine {
       const tipSol = copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0;
       const sentAt = this.now();
       const key = this.orderKey(p.id, order);
-      // A retry, or the rest of a full exit (it follows a sell that already went out), is simulated first.
-      const checkFirst = retry || !!order.rest || (this.retries.get(key)?.tries ?? 0) > 0;
+      // A retry, the rest of a full exit (it follows a sell that already went out), or the safety net's exit (their exit
+      // was missed or failed), is simulated first: one that cannot work then costs nothing.
+      const checkFirst = retry || !!order.rest || order.tag === 'reconcile' || (this.retries.get(key)?.tries ?? 0) > 0;
       // While this sell is out, its tokens are reserved: a timed step that comes due meanwhile does not ask for them.
       const mine = this.reserved.get(p.id) ?? new Map<string, bigint>();
       mine.set(key, tokens);
@@ -684,7 +687,7 @@ export class Engine {
           if (partial && order.reason !== 'manual') this.retries.set(key, { positionId: p.id, order, tries: 1, nextAt: this.now() + (this.deps.slowRetryMs ?? SLOW_RETRY_MS) });
           // A full exit that left coins (to our other sells on their way, or to one between its retries that may yet
           // fail for good): once nothing else is out, whatever is still held is sold too.
-          if (!closed && !partial && order.percent >= 100) this.exitOwed.set(p.id, order);
+          if (!closed && !partial && order.percent >= 100) this.oweExit(p.id, order);
           fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
         }
       } finally {
@@ -733,6 +736,8 @@ export class Engine {
       const slow = this.deps.slowRetryMs ?? SLOW_RETRY_MS;
       const wait = RETRY_MS[tries - 1] ?? slow;
       this.retries.set(key, { positionId: p.id, order, tries, nextAt: this.now() + wait });
+      // A full exit that keeps failing is also written down: a restart must not forget it (its retry is in memory).
+      if (fullExit && !p.exitOwed) store.updatePosition(p.id, { exitOwed: { reason: order.reason, ...(order.tag ? { tag: order.tag } : {}) } });
       // One feed line per failing sell, not one per retry; one more when it turns into the slow, endless kind.
       if (tries === 1) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error} — retrying`, mint: p.mint });
       if (tries === MAX_SELL_TRIES) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `The sell of ${label} (${why}) has failed ${tries} times (${error}): still trying every ${Math.max(1, Math.round(slow / 1000))} s until it sells. Sell now works too.`, mint: p.mint });
@@ -746,6 +751,19 @@ export class Engine {
    * if it holds the coin, the position opens with those tokens (so its sell rules run), otherwise it failed.
    */
   async restore(): Promise<void> {
+    const { store } = this.deps;
+    await this.settleOpening();
+    // Full exits owed (written down when they failed, left coins, or came while the buy was unsettled): after a restart
+    // nothing in memory remembers them. One that this process is already retrying or waiting on is left to that.
+    for (const p of store.activePositions()) {
+      if (p.status !== 'open' || !p.exitOwed || this.queues.has(p.id) || this.exitOwed.has(p.id) || this.pendingMirror.has(p.id)) continue;
+      if ([...this.retries.values()].some((r) => r.positionId === p.id)) continue;
+      this.run(p.id, { reason: p.exitOwed.reason, percent: 100, tag: `${p.exitOwed.tag ?? ''}:owed`, rest: true });
+    }
+  }
+
+  /** Buys that were in flight when the server stopped, or whose outcome was unknown: settled from their own transaction. */
+  private async settleOpening(): Promise<void> {
     const { store, executor } = this.deps;
     for (const p of store.openingPositions()) {
       if (this.queues.has(p.id)) continue; // still running in this process
@@ -820,6 +838,14 @@ export class Engine {
         this.run(p.id, { reason: 'mirror', percent: 100, tag: 'reconcile' });
       }
     }
+  }
+
+  /** A full exit is owed to this position: remembered in memory (to run when nothing else is out) and in the database
+   *  (a restart must not forget it: its retry used to be held in memory only). */
+  private oweExit(positionId: number, order: SellOrder): void {
+    this.exitOwed.set(positionId, order);
+    const p = this.deps.store.position(positionId);
+    if (p && !p.exitOwed) this.deps.store.updatePosition(positionId, { exitOwed: { reason: order.reason, ...(order.tag ? { tag: order.tag } : {}) } });
   }
 
   /** A full exit owed to this position (see exitOwed): sold now if nothing else of ours is on its way. */

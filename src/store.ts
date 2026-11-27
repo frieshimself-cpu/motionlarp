@@ -28,6 +28,9 @@ export interface Position {
   closedAt: number | null;
   leaderSig: string;
   buySig: string | null;
+  /** A full exit (their exit, a 100 % stop, dead coin, Sell now's rest) that is owed and not done yet: kept in the
+   *  database so a restart cannot forget it (its retry was held in memory only). */
+  exitOwed: { reason: SellReason; tag?: string } | null;
   firedTimed: number[];
   firedStop: number[];
   deadFired: boolean;
@@ -112,7 +115,8 @@ CREATE TABLE IF NOT EXISTS positions (
   sell TEXT NOT NULL,
   copy_name TEXT NOT NULL,
   leader TEXT NOT NULL,
-  decimals INTEGER NOT NULL DEFAULT 6
+  decimals INTEGER NOT NULL DEFAULT 6,
+  exit_owed TEXT
 );
 CREATE INDEX IF NOT EXISTS positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS positions_copy_mint ON positions(copy_id, mint);
@@ -190,6 +194,7 @@ function toPosition(r: Row): Position {
     closedAt: r.closed_at === null ? null : num(r.closed_at),
     leaderSig: String(r.leader_sig),
     buySig: r.buy_sig === null ? null : String(r.buy_sig),
+    exitOwed: r.exit_owed === null || r.exit_owed === undefined ? null : (JSON.parse(String(r.exit_owed)) as { reason: SellReason; tag?: string }),
     firedTimed: JSON.parse(String(r.fired_timed)) as number[],
     firedStop: JSON.parse(String(r.fired_stop)) as number[],
     deadFired: num(r.dead_fired) === 1,
@@ -210,12 +215,12 @@ function toFill(r: Row): Fill {
   };
 }
 
-export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt'>>;
+export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed'>>;
 
 const COLUMN: Record<keyof PositionPatch, string> = {
   mode: 'mode', status: 'status', tokensBought: 'tokens_bought', tokensHeld: 'tokens_held', costLamports: 'cost_lamports', proceedsLamports: 'proceeds_lamports',
   openedAt: 'opened_at', closedAt: 'closed_at', buySig: 'buy_sig', firedTimed: 'fired_timed', firedStop: 'fired_stop', deadFired: 'dead_fired',
-  refValueLamports: 'ref_value', lastChangeAt: 'last_change_at',
+  refValueLamports: 'ref_value', lastChangeAt: 'last_change_at', exitOwed: 'exit_owed',
 };
 
 export class Store {
@@ -233,6 +238,7 @@ export class Store {
     if (!userCols.includes('disabled')) this.db.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
     const posCols = this.all('PRAGMA table_info(positions)').map((r) => String(r.name));
     if (!posCols.includes('decimals')) this.db.exec('ALTER TABLE positions ADD COLUMN decimals INTEGER NOT NULL DEFAULT 6');
+    if (!posCols.includes('exit_owed')) this.db.exec('ALTER TABLE positions ADD COLUMN exit_owed TEXT');
   }
 
   private all(sql: string, ...params: unknown[]): Row[] {
@@ -429,7 +435,7 @@ export class Store {
     for (const [k, v] of Object.entries(patch) as [keyof PositionPatch, unknown][]) {
       if (v === undefined) continue;
       sets.push(`${COLUMN[k]} = ?`);
-      values.push(Array.isArray(v) ? JSON.stringify(v) : typeof v === 'boolean' ? (v ? 1 : 0) : v);
+      values.push(Array.isArray(v) || (v !== null && typeof v === 'object') ? JSON.stringify(v) : typeof v === 'boolean' ? (v ? 1 : 0) : v);
     }
     if (sets.length) this.run(`UPDATE positions SET ${sets.join(', ')} WHERE id = ?`, ...values, id);
   }

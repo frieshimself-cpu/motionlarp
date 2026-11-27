@@ -877,3 +877,37 @@ describe('their full exit while a timed step is between its retries (fuzzer case
     expect(open()).toHaveLength(0);
   });
 });
+
+describe('a full exit waiting for its retry survives a restart (fuzzer case 9)', () => {
+  it('their exit failed during an outage; the server restarts; the exit is still sold afterwards (it was held in memory only)', async () => {
+    ex.live = true;
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: true, mode: 'exit' }, timedOf: 'left', timed: [], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } } }));
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.plan = () => 'fail'; // an RPC outage
+    await engine.onLeaderTrade({ ...sellTrade(5_000n), signature: 'out' }); await engine.idle(); // they sold 99.7 %: out
+    expect(open()[0]).toMatchObject({ status: 'open', tokensHeld: BAG });
+    // An update restarts the server: a new engine on the same database; the outage is over.
+    engine.stop();
+    ex.plan = () => 'ok';
+    const after = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1], slowRetryMs: 1, zeroRecheckMs: 1 });
+    await after.restore(); await after.idle();
+    expect(ex.held).toBe(0n);
+    expect(open()).toHaveLength(0);
+  });
+});
+
+describe('their full exit kept while our buy was unconfirmed survives a restart', () => {
+  it('the buy is settled after the restart as landed, and their exit is then sold (it was held in memory only)', async () => {
+    ex.live = true;
+    store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, sell: { mirror: { enabled: true, mode: 'same' }, timedOf: 'left', timed: [], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } } }));
+    ex.buy = async (req) => { req.onSigned?.('BUYSIG'); ex.held += BAG; return { ok: false, error: 'sent, outcome unknown', uncertain: true }; };
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    await engine.onLeaderTrade({ ...sellTrade(0n), signature: 'out' }); await engine.idle(); // they sold out: kept
+    expect(ex.sells).toHaveLength(0);
+    engine.stop(); // an update restarts the server
+    const after = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1], slowRetryMs: 1, zeroRecheckMs: 1 });
+    await after.restore(); await after.idle(); // the buy is settled (it landed), then their exit runs
+    expect(ex.held).toBe(0n);
+    expect(open()).toHaveLength(0);
+  });
+});
