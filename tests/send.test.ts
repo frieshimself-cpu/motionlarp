@@ -141,10 +141,12 @@ describe('sending a live transaction', () => {
 });
 
 describe('waiting for a transaction to land', () => {
-  function chain(statuses: (null | { confirmationStatus?: string; err?: unknown; slot?: number })[], height = 0) {
+  /** `statusSlot`: the slot of the node that answers the n-th status read (by default as far along as the height's). */
+  function chain(statuses: (null | { confirmationStatus?: string; err?: unknown; slot?: number })[], height = 0, statusSlot?: (n: number) => number) {
     let i = 0;
     setConnectionForTests({
-      getSignatureStatuses: async () => ({ value: [statuses[Math.min(i++, statuses.length - 1)]] }),
+      getSignatureStatuses: async () => { const n = i++; return { context: { slot: statusSlot ? statusSlot(n) : 1_000 + height }, value: [statuses[Math.min(n, statuses.length - 1)]] }; },
+      getEpochInfo: async () => ({ blockHeight: height, absoluteSlot: 1_000 + height }),
       getBlockHeight: async () => height,
     } as unknown as Connection);
   }
@@ -182,5 +184,16 @@ describe('waiting for a transaction to land', () => {
     chain([null], 2_000);
     const r = await confirmSignature('sig', 1_000, { pollMs: 1 });
     expect(r).toEqual({ landed: false, reason: 'expired before landing', certain: true });
+  });
+
+  it('not expired on the word of a node behind the one that gave the height: one that landed in its last blocks is found on the next look', async () => {
+    // the height says it has run out; the last look's status comes from a node seven slots behind, which has not seen it yet
+    chain([...Array.from({ length: 11 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }], 2_000, (n) => (n <= 10 ? 1_000 + 2_000 - 7 : 1_000 + 2_000));
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 9 });
+  });
+
+  it('not expired at the last block it can still land in: the chain takes a blockhash one block past the height it is said to be valid up to', async () => {
+    chain([...Array.from({ length: 11 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }], 1_001);
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 9 });
   });
 });

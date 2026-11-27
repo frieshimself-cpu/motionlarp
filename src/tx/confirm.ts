@@ -2,7 +2,7 @@
 // timeout; RPC errors while polling are retried, not taken as failure. While waiting, the same signed transaction is
 // re-sent about once a second: one that was dropped on the way to a block leader gets another chance at the next
 // leader instead of sitting until it expires (about 30 s).
-import { getConnection } from '../chain/connection.js';
+import { getConnection, LAST_BLOCK_PAST_VALID } from '../chain/connection.js';
 
 export type ConfirmOutcome = { landed: true; slot?: number } | { landed: false; reason: string; certain: boolean };
 
@@ -56,12 +56,17 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
       if (settled && status!.err) return { landed: false, reason: `transaction errored: ${JSON.stringify(status!.err)}`, certain: true };
       if (settled) return { landed: true, slot: status!.slot };
       if (lastValidBlockHeight !== undefined && polls % 10 === 9) {
-        const height = await connection.getBlockHeight('confirmed');
-        if (height > lastValidBlockHeight) {
-          // Expired: one last look, then it is certain the transaction will never land.
-          const last = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0];
+        // The height and the slot it was read at, from one node.
+        const tip = await connection.getEpochInfo('confirmed');
+        if (tip.blockHeight !== undefined && tip.blockHeight > lastValidBlockHeight + LAST_BLOCK_PAST_VALID) {
+          // Expired: one last look, then it is certain the transaction will never land, provided that look was answered
+          // by a node at least as far along as the one that gave the height (the two are separate requests, maybe to
+          // two nodes: one some blocks behind has not seen a transaction that landed in its last blocks yet).
+          const res = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+          const last = res.value[0];
           if (last && !last.err && last.confirmationStatus) return { landed: true, slot: last.slot };
-          return { landed: false, reason: 'expired before landing', certain: true };
+          const seenFrom = (res as { context?: { slot?: number } }).context?.slot;
+          if (seenFrom === undefined || seenFrom >= tip.absoluteSlot) return { landed: false, reason: 'expired before landing', certain: true };
         }
       }
       // In a block: no more pushing for now. If that block is dropped the status goes away and pushing resumes.

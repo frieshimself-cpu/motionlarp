@@ -19,6 +19,9 @@ let refreshTimer: NodeJS.Timeout | null = null;
 
 /** A blockhash can be used for 150 blocks after the one it comes from. */
 export const BLOCKHASH_LIFE_BLOCKS = 150;
+/** The chain takes a blockhash one block past the height it is said to be valid up to (lastValidBlockHeight is 150
+ *  blocks on, the bank accepts one 151 back): a transaction can still land in that block. */
+export const LAST_BLOCK_PAST_VALID = 1;
 /** Fastest block time seen on mainnet (about 0.2 s in Nov 2026): used to guess, on the safe side, how many blocks went by. */
 const FASTEST_SLOT_MS = 200;
 /** A buy is signed with a blockhash that has at least this many blocks left (about 8 s) and as few more as possible. */

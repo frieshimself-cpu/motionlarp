@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 393 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 547 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -493,10 +493,77 @@ process could block every pass of the new one). On the final code, seeds flagged
 ghost, outage and the core profiles **0** of 3,000 each; slow-read **6** of 3,000 (the same six seeds, the known quoted
 coin count case); all 22 saved cases pass; the self-test catches every planted fault. `npm test`: 490 tests.
 
+## 27 Nov 2026 (evening): the site on phones; a database that cannot be written; a lagging RPC node
+
+**The site** (what the every-button reviewers found, fixed by a helper and merged): long sell rules (the Scharo
+preset's "40% @ 2s → 30% @ 4s → rest @ 6s · of the bag") and long nicknames stay inside their cards, and the copy
+editor fits a 320 px phone; History fits a phone (each day on one line, every profit on the screen); the owner's page
+keeps its password form alone after Log out, checks the connections after any login and keeps its figures moving while
+something is typed; History's heading says which kind of trade its numbers count; a copy's line counts one kind of
+position; each trade is put on the day it closed on the viewer's own calendar, also across a change of the clocks; on a
+320 px phone the owner's Status tab no longer runs past the screen; Sell now that sells nothing itself says what
+happens instead of "Sold". The browser suite now runs at four sizes (1280, 390, 360 and 320 px): on the live site
+(version 49f9fd5), **586 checks passed at each size, no page errors, nothing wider than the screen**.
+
+**The engine.** A second round of reviewers (money, restarts, the user's view, the fuzzer) read the fixes above; each
+finding was checked by a separate verifier, and the eight checked were all confirmed. Fixed, each with a test that
+fails on the code before (`tests/restarts.test.ts`, `tests/db-faults.test.ts`, `tests/send.test.ts`):
+- **Nothing goes out that the server could not write down first.** A sell's row in `sells_out`, and a buy's signature,
+  is written the moment it is signed; when that write fails (a full disk, a failing one), the trade is not sent and
+  fails like any other: it is tried again, and Sell now says "the server cannot save to its database right now, its
+  disk may be full: nothing was sent, the coins are still in the wallet". It used to be sent all the same, and with its
+  booking failing too the sale was never booked and its rule sold again: a 40 % step sold the whole bag in four ticks
+  of a full disk, and a full exit closed with no SOL booked. While the database cannot write nothing sells; the coins
+  stay in the user's own wallet, where any wallet app can sell them.
+- **A failure while the database cannot write keeps to its own retry pauses**: the retry is set before anything about
+  the failure is written, and a feed line that cannot be written is skipped. A timed step used to be sent again on every
+  tick of the clock (five times a second), and errors escaped unhandled.
+- **A transaction whose commit fails is undone whole**, and the next one can start. The connection used to stay inside
+  it, and every later write went into a transaction that was never committed.
+- **A buy that landed but could not be booked stays "opening"**, and the safety pass books it from its own transaction;
+  a feed line that cannot be written after a buy no longer marks it failed. Both used to mark the position failed, and
+  its coins were never sold.
+- **A sell left by a crash is dropped as "never landed" only on the word of an RPC node at least as far along as the one
+  that gave the chain's height**, and only a few blocks (about 4 s) past the last block it could land in, which is one
+  past its blockhash's last valid height. The height and the status are two requests, perhaps answered by two nodes (a
+  load-balanced link, or the backup link taking over one request); a node some blocks behind had not seen a sale that
+  landed in its last blocks, which was then never booked, and its rule sold again. The same check now guards a trade
+  declared expired while it waits for its confirmation (a buy that landed in its last block could be marked failed, its
+  coins never sold). Without the slots of the two reads to compare (an executor that does not tell them), only well past
+  it (about 12 s).
+- **Sell now pressed while their exit, or a stop loss, is selling everything** answers "Nothing was left to sell: the
+  position was closed just before (see the feed)" instead of the red error "position is not open"; so does a press on a
+  position closed a moment before the page caught up. A press whose own sale landed but could not be booked at once
+  answers "Sold: it shows in the feed and History within a few seconds" (it was tried twice more and answered as not
+  sold); Sell now while every coin is in such a sale of ours says it was just sold, not "if it did not go through".
+- **The exact figures of a trade are written whole or not at all**: a sell's exact SOL with the proceeds; a buy's exact
+  coins and SOL with its position; the coins beyond a quote opened again together with their exit owed. A failure
+  between two of those writes left the books wrong for good, or the coins in the wallet.
+- **A buy settled from its own transaction keeps its platform fee**: it is written with the buy's signature when the buy
+  is signed (the fees shown were short; profit was right).
+- **A stop loss level or the dead-coin rule is written down the moment its sell goes out** and sold even if the price has
+  come back by the time it can be: a level whose sell failed and waited for its retry, or went out and did not land, was
+  lost by a crash or a restart once the stored price had come back.
+- **The stop loss level that sells everything is named in the feed** when it is sold as an exit owed after a restart, or
+  as the rest of a sell that took fewer; it was named after the first level. One whose level is not known says "stop
+  loss".
+- **The rest of a Sell now that keeps failing says so once**: its first try and the safety pass's re-runs carried other
+  tags, and each said so.
+- Tests now guard what only the reviewers' own probes covered: the fee, and "the market could pay for only part", on
+  sells booked from their own transaction (left by a crash, or of unknown outcome) and on the last step of the bag (at
+  once, and left by a crash); two sells left by a crash, one whose booking fails. Each of 18 planted regressions of these
+  fixes fails at least one test.
+
+The fuzzer on this code, seeds flagged: default mix **0** of 3,000; crash, ghost, outage and partial **0** of 2,000 each;
+slow-read **5** of 2,000 (the same seeds as before, the known quoted coin count case); all 22 saved cases pass; the
+self-test catches every planted fault. `npm test`: 547 tests.
+
 ## Not yet verified
 
 - A crash or a restart with a real sell out on the real server: the settling of sells written down before a crash is
   proven offline only (tests, the fuzzer's crash and ghost profiles).
+- A full disk on the real server: proven offline only (every write of the store failing in tests, and a real SQLite on a
+  full disk by a reviewer).
 - The Helius RPC lane with `mev-protect=true` on its own (it carried the trades above together with Sender).
 - A real 7 SOL trade. 7 SOL buys are proven by simulation on 8 live coins (above); the largest real buy so far is
   0.02 SOL. On a curve with less than 7 SOL of coins left, our buy completes it and spends the whole amount

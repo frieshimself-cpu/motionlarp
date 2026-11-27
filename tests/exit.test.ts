@@ -57,7 +57,8 @@ class Market implements Executor {
       this.held -= this.live ? sold : 0n;
       this.sells.push({ tokens: sold, at: this.clock() });
       await this.plan(n, req); // the confirmation reaches the engine only now
-      return { ok: true, signature: `S${n}`, tokens: sold, lamports: (sold * SOL) / BAG, simulated: !this.live };
+      // (as the real executor, it says whether the market could pay for only part of it)
+      return { ok: true, signature: `S${n}`, tokens: sold, lamports: (sold * SOL) / BAG, simulated: !this.live, marketShort: sold < req.tokens };
     }
     const outcome = await this.plan(n, req);
     if (outcome === 'fail') return { ok: false, error: 'boom' };
@@ -74,7 +75,7 @@ class Market implements Executor {
     const tokens = cap !== null && cap < req.tokens ? cap : req.tokens;
     this.held -= this.live ? tokens : 0n;
     this.sells.push({ tokens, at: this.clock() });
-    return { ok: true, signature: `S${n}`, tokens, lamports: (tokens * SOL) / BAG, simulated: !this.live };
+    return { ok: true, signature: `S${n}`, tokens, lamports: (tokens * SOL) / BAG, simulated: !this.live, marketShort: tokens < req.tokens };
   }
   async quoteSell(_m: string, tokens: bigint) { return (tokens * SOL) / BAG; }
   async solBalance() { return 100n * SOL; }

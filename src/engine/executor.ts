@@ -103,11 +103,15 @@ export interface Executor {
    *  when the RPC cannot be read. */
   settleBuy?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }>;
   /** Optional: what became of a sell whose outcome was unknown, from its own transaction: landed (tokens sold, SOL
-   *  received net of every fee), failed, or not found (yet). Throws when the RPC cannot be read. */
-  settleSell?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }>;
+   *  received net of every fee), failed, or not found (yet; `slot`: how far along the node that said so was, when
+   *  known). Throws when the RPC cannot be read. */
+  settleSell?(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' } | { state: 'not_found'; slot?: number }>;
   /** Optional: the chain's block height now (a transaction not found once the chain is past its blockhash's last
    *  valid height can never land). Throws when the RPC cannot be read. */
   blockHeight?(): Promise<number>;
+  /** Optional, used instead of blockHeight when there: the height with the slot it was read at, both from one node (a
+   *  "not found" counts only from a node at least that far along). Throws when the RPC cannot be read. */
+  chainTip?(): Promise<{ height: number; slot: number }>;
 }
 
 const FETCH_FILL_TRIES = 6;
@@ -309,7 +313,7 @@ export class ChainExecutor implements Executor {
   }
 
   /** What became of a sell, from its own transaction: landed (tokens sold, SOL received net), failed, or not found. */
-  async settleSell(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
+  async settleSell(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' } | { state: 'not_found'; slot?: number }> {
     const r = await this.settled(signature, owner, mint);
     if (r.state !== 'landed') return r;
     if (r.tokens >= 0n) return { state: 'failed' };
@@ -320,12 +324,21 @@ export class ChainExecutor implements Executor {
     return getConnection().getBlockHeight('confirmed');
   }
 
-  /** A transaction's fate and, when it landed, the wallet's exact change in the coin and in SOL. */
-  private async settled(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' | 'not_found' }> {
-    const status = (await getConnection().getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0];
-    if (!status) return { state: 'not_found' };
+  async chainTip(): Promise<{ height: number; slot: number }> {
+    const e = await getConnection().getEpochInfo('confirmed');
+    if (e.blockHeight === undefined) throw new Error('the RPC did not tell the block height');
+    return { height: e.blockHeight, slot: e.absoluteSlot };
+  }
+
+  /** A transaction's fate and, when it landed, the wallet's exact change in the coin and in SOL. Not found says how far
+   *  along the node that answered was (its slot). */
+  private async settled(signature: string, owner: string, mint: string): Promise<{ state: 'landed'; tokens: bigint; lamports: bigint } | { state: 'failed' } | { state: 'not_found'; slot?: number }> {
+    const res = await getConnection().getSignatureStatuses([signature], { searchTransactionHistory: true });
+    const status = res.value[0];
+    const notFound = () => ({ state: 'not_found' as const, ...(res.context?.slot !== undefined ? { slot: res.context.slot } : {}) });
+    if (!status) return notFound();
     if (status.err) return { state: 'failed' };
-    if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') return { state: 'not_found' };
+    if (status.confirmationStatus !== 'confirmed' && status.confirmationStatus !== 'finalized') return notFound();
     const got = await getTransaction(signature);
     // Confirmed, but this node cannot return it yet: not "not found" (that would read as "never landed" and sell
     // again); the caller asks again.
@@ -582,7 +595,14 @@ export class ChainExecutor implements Executor {
     const sendOpts = { exit: !!req.exit, simulateFirst: !!req.checkFirst };
     const mine = signatureOf(tx);
     const short = marketShort === undefined ? {} : { marketShort };
-    try { req.onSigned?.(mine, { lastValidBlockHeight, feeLamports: platformFee, ...short }); } catch { /* bookkeeping must not stop the trade */ }
+    // Written down before it goes out, or not sent at all: a trade the server could not write down (its database is
+    // full or failing) would be lost to its books if its answer were lost too (a sale booked by no one, its rule selling
+    // the same coins again; a buy whose coins no rule ever sells). It fails like any trade and is tried again.
+    try {
+      req.onSigned?.(mine, { lastValidBlockHeight, feeLamports: platformFee, ...short });
+    } catch (err) {
+      return { ok: false, error: `could not write it down before sending it (${safeErrorMessage(err)}): nothing was sent${side === 'sell' ? ', the coins are still in the wallet' : ''}` };
+    }
     const t0 = Date.now();
     const sent = await sendTransaction(tx, true, tip, sendOpts);
     log.info('trade sent', { side, mint: req.mint, wallet: req.wallet.publicKey.toBase58(), signature: mine, ok: sent.ok, tip: Number(tip) / 1e9, priorityFee: req.priorityFeeSol, retry: !!req.checkFirst, ...(req.heardAt ? { msAfterHeard: t0 - req.heardAt } : {}), ...(sent.ok ? {} : { error: sent.error }) });

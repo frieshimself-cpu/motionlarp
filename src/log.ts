@@ -89,7 +89,13 @@ export function safeErrorMessage(err: unknown, max = 200): string {
 }
 
 /** Short, plain-words version of an error for the user's feed. */
+/** What SQLite says when a write cannot be made (a full disk, a failing one, a database it may not write). */
+const DB_WRITE_ERROR = /database or disk is full|disk I\/O error|attempt to write a readonly database/gi;
+
 export function friendlyError(text: string): string {
+  // The server's database refused a write: said in plain words, and whatever else the message says is kept (a trade
+  // that was not sent because of it says so).
+  if (text.search(DB_WRITE_ERROR) >= 0) return text.replace(DB_WRITE_ERROR, 'the server cannot save to its database right now, its disk may be full');
   // A site whose owner has not set its Helius link yet: test trades need it too (the coin is priced on the chain). The
   // setting's own name meant nothing to the person who pressed Sell now.
   if (/RPC_URL is not configured/.test(text)) return 'no connection to Solana: the site\'s link to it is not set up yet (the owner sets it on the server), so nothing can be traded';

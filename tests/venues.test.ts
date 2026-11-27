@@ -103,7 +103,7 @@ describe('re-sending does not depend on the status checks working', () => {
     let polls = 0;
     setConnectionForTests({
       getSignatureStatuses: async () => { polls++; if (polls < 6) throw new Error('fetch failed'); return { value: [{ confirmationStatus: 'confirmed', slot: 1 }] }; },
-      getBlockHeight: async () => 0,
+      getBlockHeight: async () => 0, getEpochInfo: async () => ({ blockHeight: 0, absoluteSlot: 0 }),
     } as unknown as Connection);
     let resent = 0;
     const r = await confirmSignature('sig', 1_000, { resend: () => { resent++; }, pollMs: 10, resendEveryMs: 15 });
@@ -167,7 +167,7 @@ describe('a transaction first seen in a block that is then dropped (from the Vel
     let i = 0;
     setConnectionForTests({
       getSignatureStatuses: async () => ({ value: [statuses[Math.min(i++, statuses.length - 1)]] }),
-      getBlockHeight: async () => 0,
+      getBlockHeight: async () => 0, getEpochInfo: async () => ({ blockHeight: 0, absoluteSlot: 0 }),
     } as unknown as Connection);
   }
   it('an error seen only at "processed" is not final: the same transaction can still land in the real chain', async () => {

@@ -28,9 +28,12 @@ export interface Position {
   closedAt: number | null;
   leaderSig: string;
   buySig: string | null;
+  /** The platform fee our buy carried, written with its signature when it was signed (a buy settled later from its own
+   *  transaction is booked with it); null for buys written down by earlier versions. */
+  buyFeeLamports: bigint | null;
   /** A full exit (their exit, a 100 % stop, dead coin, Sell now's rest) that is owed and not done yet: kept in the
    *  database so a restart cannot forget it (its retry was held in memory only). */
-  exitOwed: { reason: SellReason; tag?: string } | null;
+  exitOwed: { reason: SellReason; tag?: string; stage?: number } | null;
   /** Their partial sells ("same share") whose share of ours is not sold yet: written down until it is (sold, nothing
    *  left for it, or given up), so a restart cannot forget one waiting for its retry. */
   owedSells: OwedSell[];
@@ -149,7 +152,8 @@ CREATE TABLE IF NOT EXISTS positions (
   leader TEXT NOT NULL,
   decimals INTEGER NOT NULL DEFAULT 6,
   exit_owed TEXT,
-  owed_sells TEXT
+  owed_sells TEXT,
+  buy_fee_lamports INTEGER
 );
 CREATE INDEX IF NOT EXISTS positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS positions_copy_mint ON positions(copy_id, mint);
@@ -240,7 +244,8 @@ function toPosition(r: Row): Position {
     closedAt: r.closed_at === null ? null : num(r.closed_at),
     leaderSig: String(r.leader_sig),
     buySig: r.buy_sig === null ? null : String(r.buy_sig),
-    exitOwed: r.exit_owed === null || r.exit_owed === undefined ? null : (JSON.parse(String(r.exit_owed)) as { reason: SellReason; tag?: string }),
+    buyFeeLamports: r.buy_fee_lamports === null || r.buy_fee_lamports === undefined ? null : big(r.buy_fee_lamports),
+    exitOwed: r.exit_owed === null || r.exit_owed === undefined ? null : (JSON.parse(String(r.exit_owed)) as { reason: SellReason; tag?: string; stage?: number }),
     owedSells: r.owed_sells === null || r.owed_sells === undefined ? [] : (JSON.parse(String(r.owed_sells)) as OwedSell[]),
     firedTimed: JSON.parse(String(r.fired_timed)) as number[],
     firedStop: JSON.parse(String(r.fired_stop)) as number[],
@@ -262,11 +267,11 @@ function toFill(r: Row): Fill {
   };
 }
 
-export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed' | 'owedSells'>>;
+export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'buyFeeLamports' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed' | 'owedSells'>>;
 
 const COLUMN: Record<keyof PositionPatch, string> = {
   mode: 'mode', status: 'status', tokensBought: 'tokens_bought', tokensHeld: 'tokens_held', costLamports: 'cost_lamports', proceedsLamports: 'proceeds_lamports',
-  openedAt: 'opened_at', closedAt: 'closed_at', buySig: 'buy_sig', firedTimed: 'fired_timed', firedStop: 'fired_stop', deadFired: 'dead_fired',
+  openedAt: 'opened_at', closedAt: 'closed_at', buySig: 'buy_sig', buyFeeLamports: 'buy_fee_lamports', firedTimed: 'fired_timed', firedStop: 'fired_stop', deadFired: 'dead_fired',
   refValueLamports: 'ref_value', lastChangeAt: 'last_change_at', exitOwed: 'exit_owed', owedSells: 'owed_sells',
 };
 
@@ -293,6 +298,7 @@ export class Store {
     if (!posCols.includes('decimals')) this.db.exec('ALTER TABLE positions ADD COLUMN decimals INTEGER NOT NULL DEFAULT 6');
     if (!posCols.includes('exit_owed')) this.db.exec('ALTER TABLE positions ADD COLUMN exit_owed TEXT');
     if (!posCols.includes('owed_sells')) this.db.exec('ALTER TABLE positions ADD COLUMN owed_sells TEXT');
+    if (!posCols.includes('buy_fee_lamports')) this.db.exec('ALTER TABLE positions ADD COLUMN buy_fee_lamports INTEGER');
     // (sells_out, added 27 Nov 2026, is created by SCHEMA above in a database that does not have it yet; a table
     // made before its last three columns gets them)
     const outCols = this.all('PRAGMA table_info(sells_out)').map((r) => String(r.name));
@@ -318,9 +324,17 @@ export class Store {
       return out;
     } finally {
       this.txDepth = 0;
-      if (done) this.db.exec('COMMIT');
+      const rollback = () => { try { this.db.exec('ROLLBACK'); } catch { /* already rolled back */ } };
+      if (!done) rollback();
       else {
-        try { this.db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        // A COMMIT that fails (a full disk) can leave the transaction open: it is undone, so the whole of it is gone
+        // and the next one can start (every later write used to go into that open transaction, never committed).
+        try {
+          this.db.exec('COMMIT');
+        } catch (err) {
+          rollback();
+          throw err;
+        }
       }
     }
   }
