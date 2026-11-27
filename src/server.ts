@@ -189,9 +189,10 @@ async function pickSender(): Promise<void> {
     senderNote = 'global';
   }
 }
-await pickSender();
+// Measured in the background: watching and trading start at once (a trade meanwhile goes through the global address,
+// which Helius routes to a region itself), so a restart for an update is a gap of seconds.
+void pickSender().catch(() => undefined).then(() => { if (autoSender && config.rpcUrl) log.info('helius sender', { endpoint: senderNote }); });
 if (autoSender && config.rpcUrl) {
-  log.info('helius sender', { endpoint: senderNote });
   // Kept warm: an idle connection would cost a handshake on the next trade.
   setInterval(() => { if (senderRegion) void pingRegion(senderRegion).catch(() => undefined); }, 5_000).unref();
   // Measured again every five minutes: a region that went slow, or was dropped after failed sends, is replaced.
@@ -235,6 +236,9 @@ async function shutdown(signal: string) {
   // Sells and buys still in flight get up to 100 s to confirm (restore() settles anything cut off). Docker allows
   // 150 s in all (stop_grace_period).
   await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 100_000))]);
+  // The exact SOL of the last trades is read from their transactions (a few seconds); one cut off is read by the
+  // safety pass after the restart (the fill says it is still an estimate).
+  await Promise.race([engine.refined(), new Promise((r) => setTimeout(r, 5_000))]);
   stopBlockhashRefresher();
   store.close();
   process.exit(0);

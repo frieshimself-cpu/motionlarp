@@ -109,6 +109,8 @@ export class Engine {
   /** Full exits that went out while another of our sells was on its way: once nothing is out any more, whatever is
    *  still held is sold too (an overlapping sell the market paid only part of, or one that failed for good). */
   private readonly exitOwed = new Map<number, SellOrder>();
+  /** Failures of an owed Sell now's re-runs, per order (its feed line is written on the first one only). */
+  private readonly owedFails = new Map<string, { positionId: number; n: number }>();
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? Date.now;
@@ -298,19 +300,9 @@ export class Engine {
       const now = fill.confirmedAt ?? this.now();
       // The position is live only if the buy really went on-chain (a copy flipped to Live on a test server is paper).
       store.updatePosition(id, { mode: fill.simulated ? 'paper' : 'live', status: 'open', tokensBought: fill.tokens, tokensHeld: fill.tokens, costLamports: fill.lamports, openedAt: now, lastChangeAt: now, refValueLamports: fill.lamports, buySig: fill.signature });
-      const fillId = store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
+      const fillId = store.insertFill({ positionId: id, userId: copy.userId, side: 'buy', reason: 'copy', tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n, exactPending: !!fill.refine && !fill.simulated });
       // The exact SOL spent is read from the confirmed transaction afterwards; the position does not wait for it.
-      void fill.refine?.then((exact) => {
-        if (!exact) return;
-        store.updateFillLamports(fillId, exact.lamports);
-        store.updatePosition(id, { costLamports: exact.lamports });
-        // The buy was handed back with the quote's coin count (the exact one could not be read at once): corrected.
-        const now = store.position(id);
-        if (exact.tokens !== undefined && exact.tokens !== fill.tokens && now && now.status === 'open') {
-          const held = now.tokensHeld + (exact.tokens - fill.tokens);
-          store.updatePosition(id, { tokensBought: exact.tokens, tokensHeld: held > 0n ? held : 0n });
-        }
-      }).catch(() => undefined);
+      this.refineLater(fillId, fill.refine, (exact) => this.exactBuy(id, fillId, fill.tokens, exact));
       store.addEvent({
         userId: copy.userId, copyId: copy.id, kind: 'buy',
         message: `Bought ${fmtSol(fill.lamports)} of ${label} — they bought ${fmtSol(t.solLamports)}${copyMs !== null && !fill.simulated ? ` · sent ${copyMs} ms after their trade was seen` : ''}${fill.simulated ? ' (test)' : ''}`,
@@ -333,6 +325,7 @@ export class Engine {
       if (this.deps.store.position(r.positionId)?.status !== 'open') { this.retries.delete(key); continue; }
       if (r.nextAt <= now && !this.inFlight.has(key)) this.run(r.positionId, r.order);
     }
+    for (const [key, f] of this.owedFails) if (this.deps.store.position(f.positionId)?.status !== 'open') this.owedFails.delete(key);
     const positions = this.deps.store.activePositions().filter((p) => p.status === 'open');
     await Promise.all(positions.map((p) => this.tickOne(p)));
   }
@@ -463,6 +456,10 @@ export class Engine {
           // wallet holds now may be the next position's coins. Nothing is sold for this one then.
           const still = store.position(p.id);
           if (!still || still.status !== 'open') return;
+          // Coins the wallet holds besides this position's (bought by hand, before the copy or meanwhile) are not the
+          // copy's to sell: when the wallet holds clearly more than the books (over 2 %), only the books' coins are
+          // sold. (Within 2 % it is the position's own remainder, a count that came in a little low: swept up.)
+          if (live && tokens > still.tokensHeld + still.tokensHeld / 50n) tokens = still.tokensHeld;
           if (tokens <= 0n) {
             if (!live && this.reservedExcept(p.id, key) > 0n) { await pause(20); continue; } // overlapping steps finish first
             const fresh = store.position(p.id);
@@ -566,13 +563,9 @@ export class Engine {
       ...(keepOwed && !closed ? {} : this.markDone(p, order)),
     });
     if (sold === 0n && fill.simulated) return; // nothing was left for this step in test mode: no fill, no feed line
-    const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
-    void fill.refine?.then((exact) => {
-      if (!exact) return;
-      const now = store.position(p.id);
-      store.updateFillLamports(fillId, exact.lamports);
-      if (now) store.updatePosition(p.id, { proceedsLamports: now.proceedsLamports + (exact.lamports - lamports) });
-    }).catch(() => undefined);
+    const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n, exactPending: !!fill.refine && !fill.simulated });
+    this.refineLater(fillId, fill.refine, (exact) => this.exactSell(p.id, fillId, lamports, exact.lamports));
+    this.soldSome(p.id);
     store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, lamports, sentAt, fill.simulated, closed, marketShort && !closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
   }
 
@@ -755,7 +748,7 @@ export class Engine {
           // A full exit that left coins (to our other sells on their way, or to one between its retries that may yet
           // fail for good): once nothing else is out, whatever is still held is sold too.
           if (!closed && !partial && order.percent >= 100) this.oweExit(p.id, order);
-          fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
+          fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n, exactPending: !!fill.refine && !fill.simulated });
         }
       } finally {
         mine.delete(key);
@@ -768,12 +761,8 @@ export class Engine {
       }
       if (!fill.simulated) this.balanceChanged(owner); // the wallet's SOL just changed: read again, in the background
       const booked = fill.lamports;
-      void fill.refine?.then((exact) => {
-        if (!exact) return;
-        const cur = store.position(p.id);
-        store.updateFillLamports(fillId, exact.lamports);
-        if (cur) store.updatePosition(p.id, { proceedsLamports: cur.proceedsLamports + (exact.lamports - booked) });
-      }).catch(() => undefined);
+      this.refineLater(fillId, fill.refine, (exact) => this.exactSell(p.id, fillId, booked, exact.lamports));
+      this.soldSome(p.id);
       store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, fill.lamports, sentAt, fill.simulated, closed, partial), mint: p.mint, signature: fill.simulated ? null : fill.signature });
       this.followUpExit(p.id);
       return { ok: true };
@@ -782,11 +771,26 @@ export class Engine {
     }
   }
 
+  /** Something of this position sold: a sell of it that fails from now on says so again. */
+  private soldSome(positionId: number): void {
+    for (const [key, f] of this.owedFails) if (f.positionId === positionId) this.owedFails.delete(key);
+  }
+
   private sellFailed(p: Position, order: SellOrder, label: string, rawError: string, quiet = false): { ok: boolean; error: string } {
     const { store } = this.deps;
     const error = friendlyError(rawError);
     const why = REASON_TEXT[order.reason](order, p);
     if (order.reason === 'manual') {
+      // Pressed by the user: every press gets its answer. The rest of a Sell now that is owed (run again by the
+      // settling pass every 30 s until it sells) says so once, not every 30 s (it filled the feed on a coin that
+      // cannot be sold).
+      if (order.rest) {
+        const key = this.orderKey(p.id, order);
+        const n = (this.owedFails.get(key)?.n ?? 0) + 1;
+        this.owedFails.set(key, { positionId: p.id, n });
+        if (n === 1 && !quiet) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error} — tried again every 30 s until it sells`, mint: p.mint });
+        return { ok: false, error };
+      }
       if (!quiet) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error}`, mint: p.mint });
       return { ok: false, error };
     }
@@ -812,6 +816,81 @@ export class Engine {
     return { ok: false, error };
   }
 
+  // ── exact figures ─────────────────────────────────────────────────────
+  /** Fills whose exact figures this process is reading right now (the safety pass leaves them alone). */
+  private readonly refining = new Map<number, Promise<void>>();
+
+  /**
+   * A trade booked from its quote: its exact figures are read from its own transaction a moment later and applied by
+   * `apply`. The fill says it is an estimate until then, so a restart in between, or a read that fails every try,
+   * leaves it to the safety pass (settleEstimates), never to the quote for good.
+   */
+  private refineLater<T>(fillId: number, refine: Promise<T | null> | undefined, apply: (exact: T) => void): void {
+    if (!refine || !fillId) return;
+    const job = refine.then((exact) => { if (exact) apply(exact); }).catch(() => undefined).finally(() => this.refining.delete(fillId));
+    this.refining.set(fillId, job);
+  }
+
+  /**
+   * Our buy's exact SOL (and coins, when the quote's count stood in) applied to its fill and position. The coins held
+   * are what the buy received less what this position has sold since: never the difference taken off a second time
+   * (a sell's booking may already have matched the books to the wallet). A position that was closed on the quote's
+   * count although the buy received more: it is opened again and the rest is sold too.
+   */
+  private exactBuy(positionId: number, fillId: number, bookedTokens: bigint, exact: { lamports: bigint; tokens?: bigint }): void {
+    const { store } = this.deps;
+    store.setFillExact(fillId, exact.lamports, exact.tokens);
+    store.updatePosition(positionId, { costLamports: exact.lamports });
+    if (exact.tokens === undefined || exact.tokens === bookedTokens) return;
+    const p = store.position(positionId);
+    if (!p || (p.status !== 'open' && p.status !== 'closed')) return;
+    const sold = store.sellsOf(positionId);
+    const held = exact.tokens > sold.tokens ? exact.tokens - sold.tokens : 0n;
+    if (p.status === 'open') {
+      const empty = held === 0n && this.reservedExcept(positionId, '') === 0n;
+      store.updatePosition(positionId, { tokensBought: exact.tokens, tokensHeld: held, ...(empty ? { status: 'closed' as const, closedAt: this.now() } : {}) });
+      return;
+    }
+    store.updatePosition(positionId, { tokensBought: exact.tokens });
+    if (held <= 0n) return;
+    store.updatePosition(positionId, { status: 'open', tokensHeld: held, closedAt: null, lastChangeAt: this.now() });
+    store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `Our buy of ${shortMint(p.mint)} (${p.copyName}) received ${fmtTokens(held, p.decimals)} tokens more than its quote said (the exact count came in after the position was sold): they are sold too.`, mint: p.mint });
+    this.run(positionId, { reason: sold.lastReason ?? 'manual', percent: 100, tag: ':exact', rest: true });
+  }
+
+  /** A sell's exact SOL applied to its fill and to the position's proceeds (booked: what was booked from the quote). */
+  private exactSell(positionId: number, fillId: number, booked: bigint, exact: bigint): void {
+    const { store } = this.deps;
+    store.setFillExact(fillId, exact);
+    const now = store.position(positionId);
+    if (now) store.updatePosition(positionId, { proceedsLamports: now.proceedsLamports + (exact - booked) });
+  }
+
+  /** Real trades still booked from their quote (a restart came before their exact figures, or every read failed):
+   *  read from their own transactions. Tried for a day. */
+  private async settleEstimates(): Promise<void> {
+    const { store, executor } = this.deps;
+    if (!executor.settleBuy || !executor.settleSell) return;
+    for (const f of store.fillsAwaitingExact(Date.now() - 86_400_000)) {
+      if (this.refining.has(f.id) || !f.signature) continue;
+      const p = store.position(f.positionId);
+      const wallet = this.deps.walletFor(f.userId);
+      if (!p || !wallet) { store.setFillExact(f.id, null); continue; }
+      const owner = wallet.publicKey.toBase58();
+      let r: Awaited<ReturnType<NonNullable<Executor['settleSell']>>>;
+      try {
+        r = f.side === 'buy' ? await executor.settleBuy(f.signature, owner, p.mint) : await executor.settleSell(f.signature, owner, p.mint);
+      } catch {
+        continue; // not readable yet: the next pass
+      }
+      if (r.state === 'not_found') continue;
+      if (r.state !== 'landed') { store.setFillExact(f.id, null); continue; } // nothing exact to take from it
+      if (this.refining.has(f.id) || !store.fillsAwaitingExact(f.createdAt).some((x) => x.id === f.id)) continue; // applied meanwhile
+      if (f.side === 'buy') this.exactBuy(p.id, f.id, f.tokens, { lamports: r.lamports, tokens: r.tokens });
+      else this.exactSell(p.id, f.id, f.lamports, r.lamports);
+    }
+  }
+
   // ── after a restart, and as a safety net ─────────────────────────────
   /**
    * Buys that were in flight when the server stopped. Test fills are dropped; a live one is settled by the wallet:
@@ -820,6 +899,7 @@ export class Engine {
   async restore(): Promise<void> {
     const { store } = this.deps;
     await this.settleOpening();
+    await this.settleEstimates().catch(() => undefined);
     // Full exits owed (written down when they failed, left coins, or came while the buy was unsettled): after a restart
     // nothing in memory remembers them. One that this process is already retrying or waiting on is left to that.
     for (const p of store.activePositions()) {
@@ -957,10 +1037,27 @@ export class Engine {
       p.status === 'opening' || (p.status === 'open' && p.sell.timed.some((t, i) => !p.firedTimed.includes(i) && p.openedAt + t.afterSec * 1000 - now <= withinMs)));
   }
 
+  /**
+   * How busy the engine is, for the updater (deploy/update.sh restarts the app at a quiet moment): 'trading' while a
+   * buy or sell is under way; 'due' when a timed sell, a retry or the settling of a buy comes up within `withinMs`;
+   * 'calm' when positions are open with nothing due that soon; 'idle' when nothing is open.
+   */
+  quietness(withinMs = 30_000): 'idle' | 'calm' | 'due' | 'trading' {
+    if (this.queues.size > 0 || this.loose.size > 0) return 'trading';
+    const now = this.now();
+    if (this.exitsDueWithin(withinMs) || [...this.retries.values()].some((r) => r.nextAt - now <= withinMs)) return 'due';
+    return this.deps.store.activePositions().length ? 'calm' : 'idle';
+  }
+
   private stopped = false;
   /** Shutdown: retry loops end (their steps stay owed and are picked up after the restart). */
   stop(): void {
     this.stopped = true;
+  }
+
+  /** Resolves once the exact figures being read for trades already booked are in (or given up on). */
+  async refined(): Promise<void> {
+    while (this.refining.size > 0) await Promise.all([...this.refining.values()]);
   }
 
   async idle(): Promise<void> {

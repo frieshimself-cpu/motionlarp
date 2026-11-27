@@ -14,8 +14,9 @@ pump.fun trades around the clock: your buy size, your minimum, your exits.
   - **Timed sells**: e.g. 25 % after 3 s → 50 % after 6 s → 100 % after 9 s, each a share of what you still hold.
     Or "% of the original bag": every step sells a share of the coins your buy received, on its own clock from the
     moment your buy is confirmed; a failed sell is retried at once without pushing the later steps back, and the
-    last step always sells whatever is left in the wallet. Every sell is logged with its time after the buy, the
-    tokens sold and the SOL received.
+    last step always sells whatever is left of the position (coins of the same coin you hold besides the copy's,
+    bought by hand, are left alone). Every sell is logged with its time after the buy, the tokens sold and the SOL
+    received.
   - **Stop loss levels**: e.g. −30 % sell half, −60 % sell the rest. Each fires once.
   - **Dead coin**: no trades for N seconds → sell everything.
 - **Presets.** One click fills a whole copy. "Scharo": buys 7 SOL when `wtb3G6oV…8ksih` buys 1 SOL or more;

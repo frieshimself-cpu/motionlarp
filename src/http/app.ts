@@ -148,6 +148,11 @@ export function positionView(p: Position) {
   };
 }
 
+/** A connection from this machine itself (the socket's own address, never a header). */
+function isLoopback(address: string | undefined): boolean {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
 export function createApp(deps: AppDeps): Server {
   const { store } = deps;
   const publicDir = deps.publicDir ?? PUBLIC_DIR;
@@ -400,6 +405,13 @@ export function createApp(deps: AppDeps): Server {
       if (token) store.deleteSession(sha256(token));
       res.setHeader('set-cookie', `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
       return json(res, 200, { ok: true });
+    }
+    // For the updater on this machine only (deploy/update.sh asks from inside the app's container): whether a restart
+    // now would cut into trading. The proxy's requests come from another address (and a forwarded header does not
+    // count): to anyone else this path does not exist.
+    if (path === '/api/quiet' && method === 'GET') {
+      if (!isLoopback(req.socket.remoteAddress)) throw new HttpError(404, 'not found');
+      return json(res, 200, { state: deps.engine.quietness() });
     }
     if (path === '/api/config' && method === 'GET') {
       return json(res, 200, { brand: deps.brand ?? 'WalletMotion', adminEnabled: !!deps.adminPassword, defaults: defaultSettings(), presets: PRESETS, limits: LIMITS, server: deps.serverInfo() });

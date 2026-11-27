@@ -133,7 +133,8 @@ CREATE TABLE IF NOT EXISTS fills (
   simulated INTEGER NOT NULL,
   error TEXT,
   fee_lamports INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  exact_pending INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS fills_position ON fills(position_id);
 CREATE INDEX IF NOT EXISTS fills_user ON fills(user_id);
@@ -237,6 +238,9 @@ export class Store {
     // Migrations for databases created by earlier versions.
     const fillCols = this.all('PRAGMA table_info(fills)').map((r) => String(r.name));
     if (!fillCols.includes('fee_lamports')) this.db.exec('ALTER TABLE fills ADD COLUMN fee_lamports INTEGER NOT NULL DEFAULT 0');
+    if (!fillCols.includes('exact_pending')) this.db.exec('ALTER TABLE fills ADD COLUMN exact_pending INTEGER NOT NULL DEFAULT 0');
+    // The few trades still booked from their quote (their exact figures are read from the chain by the safety pass).
+    this.db.exec('CREATE INDEX IF NOT EXISTS fills_exact_pending ON fills(exact_pending) WHERE exact_pending = 1');
     const userCols = this.all('PRAGMA table_info(users)').map((r) => String(r.name));
     if (!userCols.includes('disabled')) this.db.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
     const posCols = this.all('PRAGMA table_info(positions)').map((r) => String(r.name));
@@ -472,6 +476,12 @@ export class Store {
   countCopies(userId: number): number {
     return Number(this.get('SELECT COUNT(*) AS n FROM copies WHERE user_id = ? AND deleted = 0', userId)?.n ?? 0);
   }
+  /** The coins this position has sold (its sells that went through) and why its last sell was made. */
+  sellsOf(positionId: number): { tokens: bigint; lastReason: SellReason | null } {
+    const sum = this.get("SELECT COALESCE(SUM(tokens), 0) AS t FROM fills WHERE position_id = ? AND side = 'sell' AND error IS NULL", positionId);
+    const last = this.get("SELECT reason FROM fills WHERE position_id = ? AND side = 'sell' AND error IS NULL ORDER BY id DESC LIMIT 1", positionId);
+    return { tokens: big(sum?.t ?? 0), lastReason: (last?.reason as SellReason | undefined) ?? null };
+  }
   hasTraded(copyId: number, mint: string): boolean {
     return !!this.get("SELECT 1 FROM positions WHERE copy_id = ? AND mint = ? AND status != 'failed' LIMIT 1", copyId, mint);
   }
@@ -513,11 +523,22 @@ export class Store {
       offsetMs, userId,
     ).map((r) => ({ day: num(r.day), mode: String(r.mode), trades: num(r.trades), wins: num(r.wins), pnlLamports: big(r.pnl) }));
   }
-  insertFill(f: Omit<Fill, 'id' | 'createdAt' | 'feeLamports'> & { feeLamports?: bigint }): number {
+  /** `exactPending`: booked from the quote; its exact figures are still to be read from its transaction. */
+  insertFill(f: Omit<Fill, 'id' | 'createdAt' | 'feeLamports'> & { feeLamports?: bigint; exactPending?: boolean }): number {
     return this.run(
-      'INSERT INTO fills (position_id, user_id, side, reason, tokens, lamports, signature, simulated, error, fee_lamports, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      f.positionId, f.userId, f.side, f.reason, f.tokens, f.lamports, f.signature, f.simulated ? 1 : 0, f.error, f.feeLamports ?? 0n, Date.now(),
+      'INSERT INTO fills (position_id, user_id, side, reason, tokens, lamports, signature, simulated, error, fee_lamports, created_at, exact_pending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      f.positionId, f.userId, f.side, f.reason, f.tokens, f.lamports, f.signature, f.simulated ? 1 : 0, f.error, f.feeLamports ?? 0n, Date.now(), f.exactPending ? 1 : 0,
     ).lastInsertRowid;
+  }
+  /** Real trades booked since `since` whose exact figures were never read (a restart came first, or every read failed). */
+  fillsAwaitingExact(since: number): Fill[] {
+    return this.all('SELECT * FROM fills WHERE exact_pending = 1 AND simulated = 0 AND signature IS NOT NULL AND created_at >= ? ORDER BY id', since).map(toFill);
+  }
+  /** The exact SOL (and coins) of a trade, read from its transaction (null: nothing to change, stop waiting for it). */
+  setFillExact(fillId: number, lamports: bigint | null, tokens?: bigint): void {
+    if (lamports === null) this.run('UPDATE fills SET exact_pending = 0 WHERE id = ?', fillId);
+    else if (tokens === undefined) this.run('UPDATE fills SET lamports = ?, exact_pending = 0 WHERE id = ?', lamports, fillId);
+    else this.run('UPDATE fills SET lamports = ?, tokens = ?, exact_pending = 0 WHERE id = ?', lamports, tokens, fillId);
   }
   /** Platform fees a user has paid: real ones, and the ones test mode only pretended to. */
   userFees(userId: number): { live: bigint; test: bigint } {
