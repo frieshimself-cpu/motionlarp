@@ -21,6 +21,8 @@ import { buildSignedTx } from '../tx/build.js';
 import { feeLamports, withFee } from '../fee.js';
 import { confirmSignature } from '../tx/confirm.js';
 import { canSendLive, resend, sendTransaction, signatureOf } from '../tx/send.js';
+import { signTx } from '../tx/sign.js';
+import { rememberAddressText, rememberProgramAddresses } from '../chain/pda.js';
 import { programError } from '../tx/errors.js';
 import { tipAccount, tipInstruction, tipLamports, tipRoute } from '../tx/tip.js';
 import { appendInstruction, Jupiter, MAX_TRANSACTION_BYTES, ROUTE_SMALL } from '../venues/jupiter.js';
@@ -29,6 +31,10 @@ import { VenueError, type CurveHint, type ResolvedPool } from '../venues/types.j
 import { pumpSdk } from '../venues/sdk.js';
 import { walletChange, WSOL_MINT } from '../watch/parse.js';
 
+// Program addresses, and an address's text, are worked out once and remembered (src/chain/pda.ts): most of the copy
+// buy's build (2.9 ms to 0.65 ms on a coin traded before, measured offline).
+rememberProgramAddresses();
+rememberAddressText();
 const bondingCurvePdaOf = (mint: PublicKey) => pumpSdk.bondingCurvePda(mint);
 
 export type FillResult =
@@ -495,7 +501,7 @@ export class ChainExecutor implements Executor {
           signed.message.recentBlockhash = bh.blockhash;
           lastValid = bh.lastValidBlockHeight;
         }
-        signed.sign([req.wallet]);
+        signTx(signed, [req.wallet]);
         return { tx: signed, lastValidBlockHeight: lastValid, quote, fee, tip: tip ? this.tip(req) : 0n };
       } catch (err) {
         lastErr = err;

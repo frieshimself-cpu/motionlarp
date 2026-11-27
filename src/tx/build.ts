@@ -11,6 +11,7 @@ import {
 } from '@solana/web3.js';
 import { config, solToLamports } from '../config.js';
 import { getBlockhash, getShortBlockhash } from '../chain/connection.js';
+import { signTx } from './sign.js';
 
 /** The priority fee (SOL) is the total the user wants to pay; spread it over the compute-unit limit. */
 export function priorityFeeMicroLamportsPerCu(validatorTipSol: number, cuLimit: number): bigint {
@@ -58,6 +59,6 @@ export async function buildSignedTx(args: BuildTxArgs): Promise<BuiltTx> {
   const { blockhash, lastValidBlockHeight } = args.shortLived ? await getShortBlockhash() : await getBlockhash();
   const message = new TransactionMessage({ payerKey: args.signer.publicKey, recentBlockhash: blockhash, instructions: ixs }).compileToV0Message();
   const tx = new VersionedTransaction(message);
-  tx.sign([args.signer]);
+  signTx(tx, [args.signer]); // Node's own ed25519: the same signature, about 0.3 ms sooner
   return { tx, blockhash, lastValidBlockHeight, priorityFeeMicroLamports: price, tipLamports };
 }
