@@ -346,7 +346,13 @@ export function createApp(deps: AppDeps): Server {
     if (!token) return;
     const expiry = store.sessionExpiry(sha256(token));
     if (expiry === null || expiry - Date.now() > (SESSION_DAYS - 1) * 86_400_000) return;
-    store.extendSession(sha256(token), Date.now() + SESSION_DAYS * 86_400_000);
+    // (a write: when the database cannot take it, a full disk, the page still loads and a later refresh renews it; it
+    // answered 500 for every session a day old, so nothing could be seen while the disk was full)
+    try {
+      store.extendSession(sha256(token), Date.now() + SESSION_DAYS * 86_400_000);
+    } catch {
+      return;
+    }
     res.setHeader('set-cookie', sessionCookie(token));
   }
 

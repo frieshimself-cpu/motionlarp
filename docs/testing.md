@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 581 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 582 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -612,6 +612,9 @@ the speed of the hot paths) read the fixes above. Fixed from it, each with a tes
   (it promised a sell nothing would make); Sell now that finds the wallet holding none of the coin says nothing was sold
   (the page said "Sold"); a press whose own sale landed and was paid for only in part says so; "Nothing was left to
   sell" no longer sends the user to a feed line that may not be there.
+- The dashboard loads while the database cannot be written: renewing a session (a write, once a day) that fails waits for
+  a later refresh (GET /api/state answered 500 for every session a day old, so nothing could be seen during a full
+  disk; tests/db-faults-http.test.ts).
 
 The fuzzer on this code, seeds flagged: default mix 0 of 3,000; crash, ghost and diskfull 0 of 2,000 each; outage and
 partial 0 of 1,500 each; dbfault 1 of 2,000 (seed 1411, the known quoted coin count case); all saved cases pass; the
