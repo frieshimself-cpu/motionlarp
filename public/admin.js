@@ -53,7 +53,7 @@ function render() {
 
       <div class="stack">
         <div class="card">
-          <div class="card-head"><h2>License keys<span class="sub">one key = one account</span></h2></div>
+          <div class="card-head"><h2>License keys<span class="sub">one key = one account · the key is the login</span></h2></div>
           <div class="card-body">
             <form id="new-license" class="inline-form">
               <div class="field"><label for="lic-label">Who is it for</label><input id="lic-label" type="text" maxlength="40" placeholder="e.g. Tom" required></div>
@@ -73,6 +73,7 @@ function render() {
               <td class="dim">${ago(l.createdAt)}</td>
               <td class="right-align"><div class="actions" style="justify-content:flex-end">
                 <button class="btn small" data-fee="${l.id}">Set fee</button>
+                <button class="btn small" data-reissue="${l.id}" title="Lost key: make a new one for the same account">New key</button>
                 ${l.status === 'revoked' ? `<button class="btn small" data-restore="${l.id}">Restore</button>` : `<button class="btn small danger" data-revoke="${l.id}">Revoke</button>`}
                 ${l.status === 'unused' ? `<button class="btn small ghost" data-delete="${l.id}">Delete</button>` : ''}
               </div></td></tr>`).join('')}</tbody></table></div>` : ''}
@@ -89,7 +90,7 @@ function render() {
               <td class="num">${u.copies}</td><td class="num">${u.open}</td><td class="num">${u.closed}</td>
               <td class="num ${cls(u.pnlSol)}">${signed(u.pnlSol, 3)}</td>
               <td class="num">${fmtSol(u.feesLiveSol, 4)}</td>
-              <td class="right-align">${u.disabled ? `<button class="btn small" data-enable="${u.id}">Enable</button>` : `<button class="btn small danger" data-disable="${u.id}">Disable</button>`}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No users yet</b>Create a key above, send it to a friend, and they sign up with it.</div>'}</div>
+              <td class="right-align"><div class="actions" style="justify-content:flex-end">${u.license ? '' : `<button class="btn small" data-userkey="${u.id}" title="This account has no key yet: make one so they can get in">Create key</button>`}${u.disabled ? `<button class="btn small" data-enable="${u.id}">Enable</button>` : `<button class="btn small danger" data-disable="${u.id}">Disable</button>`}</div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No users yet</b>Create a key above and send it to a friend: pasting it on the site is all they need to get in.</div>'}</div>
         </div>
 
         <div class="card">
@@ -133,6 +134,17 @@ function bind() {
     try { await fn(Number(b.dataset[attr])); await load(); } catch (err) { toast(err.message, true); }
   }));
   act('[data-revoke]', 'revoke', async (id) => { if (confirm('Revoke this key? Its user is locked out and gets no new copies; open positions still sell by their rules.')) await api('PUT', `/api/admin/licenses/${id}`, { revoked: true }); });
+  act('[data-reissue]', 'reissue', async (id) => {
+    if (!confirm('Make a new key for this account? The old key stops working.')) return;
+    const l = state.licenses.find((x) => x.id === id);
+    const r = await api('POST', `/api/admin/licenses/${id}/reissue`);
+    newKey = { key: r.key, label: l?.label ?? '' };
+  });
+  act('[data-userkey]', 'userkey', async (id) => {
+    const u = state.users.find((x) => x.id === id);
+    const r = await api('POST', `/api/admin/users/${id}/key`);
+    newKey = { key: r.key, label: u?.username ?? '' };
+  });
   act('[data-restore]', 'restore', (id) => api('PUT', `/api/admin/licenses/${id}`, { revoked: false }));
   act('[data-delete]', 'delete', async (id) => { if (confirm('Delete this unused key?')) await api('DELETE', `/api/admin/licenses/${id}`); });
   act('[data-fee]', 'fee', async (id) => {

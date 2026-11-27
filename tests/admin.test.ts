@@ -84,32 +84,56 @@ describe('admin area', () => {
     expect((s.body.licenses as { label: string; feePercent: number | null; status: string }[])[0]).toMatchObject({ label: 'Tom', feePercent: 0.5, status: 'unused' });
   });
 
-  it('sign-up needs a valid, unused key; the key then belongs to that account', async () => {
+  it('the key opens an account named after it; the key belongs to that one account', async () => {
     const tom = new Client();
-    expect((await tom.call('POST', '/api/signup', { username: 'tom', password: 'password1', license: 'WM-AAAA-AAAA-AAAA-AAAA' })).status).toBe(403);
-    expect((await tom.call('POST', '/api/signup', { username: 'tom', password: 'password1', license: key.toLowerCase() })).status).toBe(200);
+    expect((await tom.call('POST', '/api/enter', { license: 'WM-AAAA-AAAA-AAAA-AAAA' })).status).toBe(403);
+    const r = await tom.call('POST', '/api/enter', { license: key.toLowerCase() });
+    expect(r.body).toMatchObject({ ok: true, username: 'Tom' });
     expect((await tom.call('GET', '/api/state')).body.feeBps).toBe(50);
-    const again = new Client();
-    const r = await again.call('POST', '/api/signup', { username: 'tom2', password: 'password1', license: key });
-    expect(r.status).toBe(403);
-    expect(String(r.body.error)).toMatch(/already been used/);
-    expect(store.userByName('tom2')).toBeUndefined();
     const s = await admin.call('GET', '/api/admin/state');
-    expect((s.body.licenses as { status: string; username: string }[])[0]).toMatchObject({ status: 'active', username: 'tom' });
-    expect((s.body.users as { username: string; license: string }[])[0]).toMatchObject({ username: 'tom', license: 'Tom' });
+    expect((s.body.licenses as { status: string; username: string }[])[0]).toMatchObject({ status: 'active', username: 'Tom' });
+    expect((s.body.users as { username: string; license: string }[])[0]).toMatchObject({ username: 'Tom', license: 'Tom' });
   });
 
   it('revoking the key locks the user out; restoring lets them back in', async () => {
     const tom = new Client();
-    await tom.call('POST', '/api/login', { username: 'tom', password: 'password1' });
+    await tom.call('POST', '/api/enter', { license: key });
     expect((await admin.call('PUT', `/api/admin/licenses/${licenseId}`, { revoked: true })).status).toBe(200);
     expect((await tom.call('GET', '/api/state')).status).toBe(401);
-    const login = await tom.call('POST', '/api/login', { username: 'tom', password: 'password1' });
+    const login = await tom.call('POST', '/api/enter', { license: key });
     expect(login.status).toBe(403);
     expect(String(login.body.error)).toMatch(/revoked/);
     await admin.call('PUT', `/api/admin/licenses/${licenseId}`, { revoked: false, feePercent: 2 });
-    expect((await tom.call('POST', '/api/login', { username: 'tom', password: 'password1' })).status).toBe(200);
+    expect((await tom.call('POST', '/api/enter', { license: key })).status).toBe(200);
     expect((await tom.call('GET', '/api/state')).body.feeBps).toBe(200);
+  });
+
+  it('a lost key is replaced: the new key opens the same account, the old one stops working', async () => {
+    const r = await admin.call('POST', `/api/admin/licenses/${licenseId}/reissue`);
+    const fresh = String(r.body.key);
+    expect(fresh).toMatch(/^WM-/);
+    expect(fresh).not.toBe(key);
+    const tom = new Client();
+    expect((await tom.call('POST', '/api/enter', { license: key })).status).toBe(403);
+    expect((await tom.call('POST', '/api/enter', { license: fresh })).body.username).toBe('Tom');
+    key = fresh;
+  });
+
+  it('an account from before license keys gets a key from the admin page', async () => {
+    const legacy = store.createUser('oldtimer', 'x');
+    const r = await admin.call('POST', `/api/admin/users/${legacy}/key`);
+    expect(String(r.body.key)).toMatch(/^WM-/);
+    const c = new Client();
+    expect((await c.call('POST', '/api/enter', { license: String(r.body.key) })).body.username).toBe('oldtimer');
+  });
+
+  it('two keys with the same name get distinct accounts', async () => {
+    const a = await admin.call('POST', '/api/admin/licenses', { label: 'Tom' });
+    const c = new Client();
+    const r = await c.call('POST', '/api/enter', { license: String(a.body.key) });
+    expect(r.status).toBe(200);
+    expect(r.body.username).not.toBe('Tom');
+    expect(String(r.body.username)).toMatch(/^Tom/);
   });
 
   it('an unused key can be deleted, a used one cannot', async () => {

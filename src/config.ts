@@ -37,6 +37,9 @@ function load() {
     /** Websocket endpoint; derived from RPC_URL (https → wss) when empty. */
     rpcWsUrl: str('RPC_WS_URL'),
     jitoUrl: str('JITO_URL', 'https://frankfurt.mainnet.block-engine.jito.wtf'),
+    /** Helius Sender: where tipped trades are sent (Jito + staked connections at once). The global endpoint routes
+     *  to the nearest region; 'off' sends tipped trades through Jito's block engine instead. */
+    senderUrl: str('SENDER_URL', 'https://sender.helius-rpc.com/fast'),
     /** Jupiter routes every coin the native pump.fun / PumpSwap path does not cover. The free endpoint is
      *  rate-limited; with a key from portal.jup.ag use https://api.jup.ag and set JUPITER_API_KEY. */
     jupiterUrl: str('JUPITER_URL', 'https://lite-api.jup.ag'),

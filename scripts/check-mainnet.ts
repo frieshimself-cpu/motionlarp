@@ -64,9 +64,9 @@ for (const [program, venue] of [[PUMP_PROGRAM, 'pumpfun'], [PUMP_AMM_PROGRAM, 'p
     const quote = await v.quoteBuy(pool, lamports);
     const buy = await v.buildBuy({ pool, user, lamportsIn: lamports, slippagePct: 25 });
     const buyFee = withFee(buy.instructions, user, lamports, 100, FEE_TO);
-    // …and a tip to Jito, as a copy with a tip set would carry.
+    // …and a tip to a Helius Sender tip account, as a copy with a tip set would carry.
     const { tipInstruction } = await import('../src/tx/tip.js');
-    const simBuy = await simulateAs(user, [...buyFee.instructions, tipInstruction(user, 0.0001)!]);
+    const simBuy = await simulateAs(user, [...buyFee.instructions, tipInstruction(user, 0.001, 'sender')!]);
     console.log(`our ${Number(lamports) / 1e9} SOL buy + ${Number(buyFee.fee) / 1e9} SOL fee + tip: quote ${quote} tokens; simulation ${simBuy.err ? 'FAILED ' + JSON.stringify(simBuy.err) : `ok (${simBuy.unitsConsumed} CU)`}`);
     if (simBuy.err) { failures++; console.log((simBuy.logs ?? []).slice(-8).join('\n')); }
 

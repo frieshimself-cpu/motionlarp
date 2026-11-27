@@ -36,7 +36,7 @@ beforeAll(async () => {
     return w ? (cache.get(id) ?? Keypair.fromSecretKey(decryptSecret(w.encKey, id, MASTER))) : null;
   };
   engine = new Engine({ store, executor, walletFor, priceMs: 0, maxSolPerBuy: 1, feeReserveSol: 0.01 });
-  server = createApp({ store, engine, executor, masterKey: MASTER, secureCookies: false, forgetWallet: (id) => cache.delete(id), serverInfo: () => ({ live: false, maxSolPerBuy: 1, watching: 0, mode: 'test' }), feeBpsFor: (id) => (store.user(id)?.username === 'bob' ? 0 : 100) });
+  server = createApp({ store, engine, executor, masterKey: MASTER, secureCookies: false, forgetWallet: (id) => cache.delete(id), serverInfo: () => ({ live: false, maxSolPerBuy: 1, watching: 0, mode: 'test' }), feeBpsFor: (id) => (id === store.users()[0]?.id ? 100 : 0) });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -61,24 +61,29 @@ class Client {
   }
 }
 
-describe('accounts', () => {
-  it('sign-up needs a license key', async () => {
+const aliceKey = () => (keys.alice ??= lic());
+const keys: Record<string, string> = {};
+
+describe('getting in', () => {
+  it('the license key is all it takes: the first use opens the account, later uses come back to it', async () => {
     const c = new Client();
-    expect((await c.call('POST', '/api/signup', { username: 'alice', password: 'password1', license: 'nope' })).status).toBe(403);
-    expect((await c.call('POST', '/api/signup', { username: 'alice', password: 'password1', license: lic() })).status).toBe(200);
+    expect((await c.call('POST', '/api/enter', { license: 'nope' })).status).toBe(403);
+    const first = await c.call('POST', '/api/enter', { license: aliceKey() });
+    expect(first.status).toBe(200);
     expect((await c.call('GET', '/api/state')).status).toBe(200);
+    const again = new Client();
+    expect((await again.call('POST', '/api/enter', { license: ` ${aliceKey().toLowerCase()} ` })).body.username).toBe(first.body.username);
+    expect(store.users()).toHaveLength(1);
   });
-  it('refuses a taken username, a short password, a wrong password', async () => {
+  it('there is no sign-up or password login any more', async () => {
     const c = new Client();
-    expect((await c.call('POST', '/api/signup', { username: 'ALICE', password: 'password1', license: lic() })).status).toBe(409);
-    expect((await c.call('POST', '/api/signup', { username: 'carol', password: 'short', license: lic() })).status).toBe(400);
-    expect((await c.call('POST', '/api/login', { username: 'alice', password: 'wrong-pass' })).status).toBe(401);
-    expect((await c.call('POST', '/api/login', { username: 'alice', password: 'password1' })).status).toBe(200);
+    expect((await c.call('POST', '/api/signup', { username: 'x', password: 'password1', license: lic() })).status).toBe(401);
+    expect((await c.call('POST', '/api/login', { username: 'x', password: 'password1' })).status).toBe(401);
   });
   it('logged out: 401; a POST without the app header: 403', async () => {
     const c = new Client();
     expect((await c.call('GET', '/api/state')).status).toBe(401);
-    expect((await c.call('POST', '/api/login', { username: 'alice', password: 'password1' }, {})).status).toBe(403);
+    expect((await c.call('POST', '/api/enter', { license: aliceKey() }, {})).status).toBe(403);
   });
 });
 
@@ -88,7 +93,7 @@ describe('wallet and copies', () => {
   let copyId = 0;
 
   it('imports a key and never returns it', async () => {
-    await alice.call('POST', '/api/login', { username: 'alice', password: 'password1' });
+    await alice.call('POST', '/api/enter', { license: aliceKey() });
     const bad = await alice.call('POST', '/api/wallet', { key: secret.publicKey.toBase58() });
     expect(bad.status).toBe(400);
     expect(String(bad.body.error)).toMatch(/address, not a private key/);
@@ -98,7 +103,7 @@ describe('wallet and copies', () => {
     expect(state.text).not.toContain(bs58.encode(secret.secretKey));
     expect(state.text).not.toContain('v1:');
     expect((state.body.wallet as { sol: number }).sol).toBe(2);
-    const row = store.wallet(store.userByName('alice')!.id)!;
+    const row = store.wallet(store.users()[0]!.id)!;
     expect(row.encKey).not.toContain(bs58.encode(secret.secretKey));
   });
 
@@ -113,7 +118,7 @@ describe('wallet and copies', () => {
   });
 
   it("another user cannot see or change alice's copy", async () => {
-    await bob.call('POST', '/api/signup', { username: 'bob', password: 'password2', license: lic() });
+    await bob.call('POST', '/api/enter', { license: lic() });
     expect((await bob.call('PUT', `/api/copies/${copyId}`, { leader: LEADER, buySol: 1 })).status).toBe(404);
     expect((await bob.call('DELETE', `/api/copies/${copyId}`)).status).toBe(404);
     expect(((await bob.call('GET', '/api/state')).body.copies as unknown[]).length).toBe(0);

@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url';
 import type { Keypair } from '@solana/web3.js';
 import { lamportsToSol } from '../config.js';
 import { timingSafeEqual } from 'node:crypto';
-import { encryptSecret, hashPassword, newToken, sha256, verifyPassword } from '../crypto.js';
+import { encryptSecret, newToken, sha256 } from '../crypto.js';
 import { licenseHash, newLicenseKey } from '../licenses.js';
+import { pnlSummary } from '../pnl.js';
 import type { Engine } from '../engine/engine.js';
 import type { Executor } from '../engine/executor.js';
 import { lossPercent } from '../engine/rules.js';
@@ -244,6 +245,23 @@ export function createApp(deps: AppDeps): Server {
       const id = store.createLicense({ keyHash: licenseHash(key), hint: key.slice(-4), label, feeBps });
       return json(res, 200, { ok: true, id, key }); // the only time the key is shown
     }
+    const reissue = /^\/api\/admin\/licenses\/(\d+)\/reissue$/.exec(path);
+    if (reissue && method === 'POST') {
+      const key = newLicenseKey();
+      if (!store.rekeyLicense(Number(reissue[1]), licenseHash(key), key.slice(-4))) throw new HttpError(404, 'no such key');
+      return json(res, 200, { ok: true, key });
+    }
+    const userKey = /^\/api\/admin\/users\/(\d+)\/key$/.exec(path);
+    if (userKey && method === 'POST') {
+      const uid = Number(userKey[1]);
+      const user = store.user(uid);
+      if (!user) throw new HttpError(404, 'no such user');
+      const key = newLicenseKey();
+      const existing = store.userLicense(uid);
+      if (existing) store.rekeyLicense(existing.id, licenseHash(key), key.slice(-4));
+      else store.redeemLicense(store.createLicense({ keyHash: licenseHash(key), hint: key.slice(-4), label: user.username.slice(0, 40), feeBps: null }), uid);
+      return json(res, 200, { ok: true, key });
+    }
     const lic = /^\/api\/admin\/licenses\/(\d+)$/.exec(path);
     if (lic && method === 'PUT') {
       const id = Number(lic[1]);
@@ -334,35 +352,28 @@ export function createApp(deps: AppDeps): Server {
     if (path.startsWith('/api/admin/')) return adminRoute(req, res, path, method);
 
     // ── accounts ──
-    if (path === '/api/signup' && method === 'POST') {
-      const ip = clientIp(req);
-      if (!authLimiter.hit(`signup:${ip}`)) throw new HttpError(429, 'too many attempts, try again in a few minutes');
+    // The license key is the login: its first use opens the account (named after the key), later uses return to it.
+    if (path === '/api/enter' && method === 'POST') {
+      if (!authLimiter.hit(`enter:${clientIp(req)}`)) throw new HttpError(429, 'too many attempts, try again in a few minutes');
       const b = await readJson(req);
-      const username = String(b.username ?? '').trim();
-      const password = String(b.password ?? '');
       const license = store.licenseByHash(licenseHash(String(b.license ?? '')));
-      if (!license || license.revoked) throw new HttpError(403, 'that license key is not valid');
-      if (license.usedBy !== null) throw new HttpError(403, 'that license key has already been used');
-      if (!/^[A-Za-z0-9_.-]{3,24}$/.test(username)) throw new HttpError(400, 'username: 3–24 letters, numbers, _ . -');
-      if (password.length < 8) throw new HttpError(400, 'password: at least 8 characters');
-      if (store.userByName(username)) throw new HttpError(409, 'that username is taken');
-      const id = store.createUser(username, await hashPassword(password));
-      if (!store.redeemLicense(license.id, id)) {
-        store.deleteUser(id); // someone redeemed the key in the same instant
-        throw new HttpError(403, 'that license key has already been used');
+      if (!license) throw new HttpError(403, 'that license key is not valid');
+      if (license.revoked) throw new HttpError(403, 'this license key was revoked: ask the owner');
+      let uid = license.usedBy;
+      if (uid === null) {
+        // Unique account name from the key's label; the password slot is filled with random bytes (never used).
+        let name = license.label;
+        if (store.userByName(name)) name = `${license.label} #${license.id}`;
+        uid = store.createUser(name, `nologin:${newToken()}`);
+        if (!store.redeemLicense(license.id, uid)) {
+          store.deleteUser(uid); // the same key was entered twice in the same instant: use the account that won
+          uid = store.licenseByHash(licenseHash(String(b.license ?? '')))?.usedBy ?? null;
+          if (uid === null) throw new HttpError(403, 'that license key is not valid');
+        }
       }
-      setSession(res, id);
-      return json(res, 200, { ok: true, username });
-    }
-    if (path === '/api/login' && method === 'POST') {
-      const b = await readJson(req);
-      const username = String(b.username ?? '').trim();
-      const ip = clientIp(req);
-      if (!authLimiter.hit(`login:${ip}:${username.toLowerCase()}`)) throw new HttpError(429, 'too many attempts, try again in a few minutes');
-      const user = store.userByName(username);
-      if (!user || !(await verifyPassword(String(b.password ?? ''), user.passHash))) throw new HttpError(401, 'wrong username or password');
-      if (user.disabled) throw new HttpError(403, 'your license was revoked: ask the owner');
-      setSession(res, user.id);
+      const user = store.user(uid);
+      if (!user || user.disabled) throw new HttpError(403, 'this account is disabled: ask the owner');
+      setSession(res, uid);
       return json(res, 200, { ok: true, username: user.username });
     }
     if (path === '/api/logout' && method === 'POST') {
@@ -443,6 +454,7 @@ export function createApp(deps: AppDeps): Server {
         user: { username: user?.username },
         server: deps.serverInfo(),
         feeBps: deps.feeBpsFor?.(uid) ?? 0,
+        pnl: (({ days: _days, ...rest }) => rest)(pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0))),
         wallet: w ? { pubkey: w.pubkey, sol: await walletSol(uid, w.pubkey) } : null,
         copies: store.copies(uid).map((c) => ({ id: c.id, ...c.settings, stats: stats.get(c.id) ?? { open: 0, closed: 0, pnlSol: 0 } })),
         positions: store.activePositions(uid).map(positionView),
@@ -460,7 +472,7 @@ export function createApp(deps: AppDeps): Server {
       });
       const total = closed.reduce((a, p) => a + (p.proceedsLamports - p.costLamports), 0n);
       const wins = closed.filter((p) => p.proceedsLamports > p.costLamports).length;
-      return json(res, 200, { positions: views, totalPnlSol: sol(total), totalFeesSol: sol(feesTotal), trades: closed.length, wins });
+      return json(res, 200, { positions: views, totalPnlSol: sol(total), totalFeesSol: sol(feesTotal), trades: closed.length, wins, pnl: pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0)) });
     }
 
     throw new HttpError(404, 'not found');

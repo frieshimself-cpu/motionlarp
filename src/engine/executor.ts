@@ -21,7 +21,7 @@ import { buildSignedTx } from '../tx/build.js';
 import { feeLamports, withFee } from '../fee.js';
 import { confirmSignature } from '../tx/confirm.js';
 import { canSendLive, sendTransaction } from '../tx/send.js';
-import { JITO_TIP_ACCOUNTS, tipInstruction, tipLamports } from '../tx/tip.js';
+import { tipAccount, tipInstruction, tipLamports, tipRoute } from '../tx/tip.js';
 import { appendInstruction, Jupiter } from '../venues/jupiter.js';
 import { PfDispatcher } from '../venues/pf.js';
 import { VenueError, type ResolvedPool } from '../venues/types.js';
@@ -175,15 +175,20 @@ export class ChainExecutor implements Executor {
 
   /** What one transaction costs besides the trade itself: base fee + priority fee + tip (counted in test fills). */
   private txCost(req: TradeRequest): bigint {
-    return 5_000n + BigInt(Math.round(Math.max(0, req.priorityFeeSol) * 1e9)) + tipLamports(req.tipSol);
+    return 5_000n + BigInt(Math.round(Math.max(0, req.priorityFeeSol) * 1e9)) + this.tip(req);
+  }
+
+  /** The tip this request carries, in lamports (0 when unset or under the route's minimum). */
+  private tip(req: TradeRequest): bigint {
+    return tipLamports(req.tipSol, tipRoute(config.senderUrl));
   }
 
   /** Sign a native transaction: priority fee, the trade, our platform fee, then the tip when one is set. */
   private nativeTx(req: TradeRequest, instructions: TransactionInstruction[]) {
-    const tipped = tipLamports(req.tipSol) > 0n;
+    const tipped = this.tip(req) > 0n;
     return buildSignedTx({
       signer: req.wallet, instructions, validatorTipSol: req.priorityFeeSol, txFeeSol: tipped ? req.tipSol : 0,
-      tipAccount: tipped ? new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]!) : undefined,
+      tipAccount: tipped ? tipAccount(tipRoute(config.senderUrl)) : undefined,
     });
   }
 
@@ -226,7 +231,7 @@ export class ChainExecutor implements Executor {
         let signed: VersionedTransaction = tx;
         const extra: TransactionInstruction[] = [];
         if (fee > 0n) extra.push(SystemProgram.transfer({ fromPubkey: req.wallet.publicKey, toPubkey: new PublicKey(config.feeWallet), lamports: fee }));
-        const tip = tipInstruction(req.wallet.publicKey, req.tipSol);
+        const tip = tipInstruction(req.wallet.publicKey, req.tipSol, tipRoute(config.senderUrl));
         if (tip) extra.push(tip);
         if (extra.length) {
           signed = await appendInstruction(tx, extra, async (keys) => (await Promise.all(keys.map((k) => getConnection().getAddressLookupTable(k)))).map((r) => r.value!).filter(Boolean));
@@ -309,7 +314,7 @@ export class ChainExecutor implements Executor {
    * transaction that landed late is still recorded as a fill, never left as orphaned coins.
    */
   private async sendAndRead(req: TradeRequest, tx: VersionedTransaction, lastValidBlockHeight: number, side: 'buy' | 'sell', expectedTokens: bigint, expectedLamports: bigint, balanceBefore: bigint | null, platformFee: bigint): Promise<FillResult> {
-    const sent = await sendTransaction(tx, true, tipLamports(req.tipSol) > 0n);
+    const sent = await sendTransaction(tx, true, this.tip(req));
     if (!sent.ok) return { ok: false, error: sent.error };
     const confirmed = await confirmSignature(sent.signature, lastValidBlockHeight);
     const owner = req.wallet.publicKey.toBase58();

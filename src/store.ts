@@ -299,6 +299,10 @@ export class Store {
   redeemLicense(id: number, userId: number): boolean {
     return this.run('UPDATE licenses SET used_by = ?, used_at = ? WHERE id = ? AND used_by IS NULL AND revoked = 0', userId, Date.now(), id).changes === 1;
   }
+  /** A lost key is replaced: same license and account, new key; the old key stops working. */
+  rekeyLicense(id: number, keyHash: string, hint: string): boolean {
+    return this.run('UPDATE licenses SET key_hash = ?, hint = ? WHERE id = ?', keyHash, hint, id).changes === 1;
+  }
   updateLicense(id: number, patch: { label?: string; feeBps?: number | null }): void {
     if (patch.label !== undefined) this.run('UPDATE licenses SET label = ? WHERE id = ?', patch.label, id);
     if (patch.feeBps !== undefined) this.run('UPDATE licenses SET fee_bps = ? WHERE id = ?', patch.feeBps, id);
@@ -439,6 +443,17 @@ export class Store {
   }
   closedPositions(userId: number, limit = 100): Position[] {
     return this.all("SELECT * FROM positions WHERE user_id = ? AND status = 'closed' ORDER BY closed_at DESC LIMIT ?", userId, limit).map(toPosition);
+  }
+  /** Closed positions per local day (offset in ms east of UTC) and mode, newest day first. */
+  pnlByDay(userId: number, offsetMs: number): { day: number; mode: string; trades: number; wins: number; pnlLamports: bigint }[] {
+    return this.all(
+      `SELECT (closed_at + CAST(? AS INTEGER)) / 86400000 AS day, mode, COUNT(*) AS trades,
+              SUM(CASE WHEN proceeds_lamports > cost_lamports THEN 1 ELSE 0 END) AS wins,
+              SUM(proceeds_lamports - cost_lamports) AS pnl
+       FROM positions WHERE user_id = ? AND status = 'closed' AND closed_at IS NOT NULL
+       GROUP BY day, mode ORDER BY day DESC, mode`,
+      offsetMs, userId,
+    ).map((r) => ({ day: num(r.day), mode: String(r.mode), trades: num(r.trades), wins: num(r.wins), pnlLamports: big(r.pnl) }));
   }
   insertFill(f: Omit<Fill, 'id' | 'createdAt' | 'feeLamports'> & { feeLamports?: bigint }): number {
     return this.run(

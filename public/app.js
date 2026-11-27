@@ -6,39 +6,33 @@ let state = null;
 let tab = 'dash';
 let history = null;
 let pollTimer = null;
+/** The viewer's clock decides what "today" is. */
+const TZ = `?tz=${-new Date().getTimezoneOffset()}`;
 
-// ── sign in / sign up ────────────────────────────────────────────────────
-function renderAuth(mode = 'login', error = '') {
+// ── getting in: the license key is the login ────────────────────────────
+function renderAuth(error = '') {
   stopPolling();
-  const signup = mode === 'signup';
   app.innerHTML = `
     <section class="auth"><div class="auth-in">
       ${brandHtml(config.brand)}
       <p class="tagline">Copy any wallet's trades. Your size, your fees, your exits.</p>
       <div class="card">
-        <div class="tabs">
-          <button class="${signup ? '' : 'on'}" data-mode="login">Log in</button>
-          <button class="${signup ? 'on' : ''}" data-mode="signup">Sign up</button>
-        </div>
-        <form id="auth-form" autocomplete="on">
-          <div class="field"><label for="u">Username</label><input id="u" name="username" type="text" autocomplete="username" required minlength="3" maxlength="24"></div>
-          <div class="field"><label for="p">Password</label><input id="p" name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" required minlength="${signup ? 8 : 1}"></div>
-          ${signup ? '<div class="field"><label for="l">License key</label><input id="l" name="license" type="text" autocomplete="off" spellcheck="false" placeholder="WM-XXXX-XXXX-XXXX-XXXX" required><div class="hint">You get one from whoever runs this site. Each key works once.</div></div>' : ''}
-          <button class="btn primary block" type="submit">${signup ? 'Create account' : 'Log in'}</button>
+        <form id="auth-form" autocomplete="off">
+          <div class="field"><label for="l">License key</label><input id="l" name="license" type="text" autocomplete="off" spellcheck="false" placeholder="WM-XXXX-XXXX-XXXX-XXXX" required autofocus><div class="hint">Paste the key you were given. You stay logged in on this device.</div></div>
+          <button class="btn primary block" type="submit">Enter</button>
           ${error ? `<div class="err">${esc(error)}</div>` : ''}
         </form>
       </div>
       <div class="foot">Pump.fun, PumpSwap, Raydium, Meteora and more — routed automatically.</div>
     </div></section>`;
-  $$('[data-mode]', app).forEach((b) => b.addEventListener('click', () => renderAuth(b.dataset.mode)));
   $('#auth-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     try {
-      await api('POST', signup ? '/api/signup' : '/api/login', Object.fromEntries(new FormData(e.target)));
+      await api('POST', '/api/enter', { license: $('#l').value });
       await loadState();
       startPolling();
     } catch (err) {
-      renderAuth(mode, err.message);
+      renderAuth(err.message);
     }
   });
 }
@@ -48,8 +42,14 @@ function render() {
   if (!state) return;
   const s = state;
   const openPnl = s.positions.reduce((a, p) => a + p.pnlSol, 0);
-  const realized = s.copies.reduce((a, c) => a + c.stats.pnlSol, 0);
   const activeCopies = s.copies.filter((c) => c.enabled).length;
+  // Profit cards show real trades once there are any; until then, test trades (labelled).
+  const mode = s.pnl.primary;
+  const main = s.pnl[mode];
+  const other = s.pnl[mode === 'live' ? 'test' : 'live'];
+  const tag = mode === 'test' ? ' <span class="tag off">test</span>' : '';
+  const otherNote = (v) => (other.trades ? `${mode === 'live' ? 'test' : 'live'}: ${signed(v, 3)}` : '');
+  const winRate = main.trades ? `${Math.round((main.wins / main.trades) * 100)}% winners` : 'no closed trades yet';
   app.innerHTML = `
     <header class="topbar"><div class="topbar-in">
       ${brandHtml(config.brand)}
@@ -67,16 +67,16 @@ function render() {
     <main class="page">
       <section class="grid stats">
         <div class="card stat"><div class="label">Wallet balance</div><div class="value">${s.wallet ? `${fmtSol(s.wallet.sol ?? 0, 3)} <small>SOL</small>` : '—'}</div><div class="foot">${s.wallet ? esc(short(s.wallet.pubkey)) : 'no wallet yet'}</div></div>
-        <div class="card stat"><div class="label">Open positions</div><div class="value">${s.positions.length}</div><div class="foot"><span class="${cls(openPnl)}">${signed(openPnl)} SOL</span> unrealized</div></div>
-        <div class="card stat"><div class="label">Realized profit</div><div class="value ${cls(realized)}">${signed(realized, 3)} <small>SOL</small></div><div class="foot">closed positions, fees included</div></div>
-        <div class="card stat"><div class="label">Copying</div><div class="value">${activeCopies} <small>/ ${s.copies.length}</small></div><div class="foot">wallets active</div></div>
+        <div class="card stat"><div class="label">Profit today${tag}</div><div class="value ${cls(main.todaySol)}">${signed(main.todaySol, 3)} <small>SOL</small></div><div class="foot">last 7 days <span class="${cls(main.weekSol)}">${signed(main.weekSol, 3)}</span>${otherNote(other.todaySol) ? ` · ${otherNote(other.todaySol)}` : ''}</div></div>
+        <div class="card stat"><div class="label">Profit all time${tag}</div><div class="value ${cls(main.allSol)}">${signed(main.allSol, 3)} <small>SOL</small></div><div class="foot">${main.trades} trades · ${winRate}${otherNote(other.allSol) ? ` · ${otherNote(other.allSol)}` : ''}</div></div>
+        <div class="card stat"><div class="label">Open positions</div><div class="value">${s.positions.length}</div><div class="foot"><span class="${cls(openPnl)}">${signed(openPnl)} SOL</span> unrealized · copying ${activeCopies} of ${s.copies.length}</div></div>
       </section>
       ${tab === 'history' ? renderHistory() : renderDash()}
     </main>`;
-  $('#logout').addEventListener('click', async () => { await api('POST', '/api/logout').catch(() => {}); state = null; renderAuth(); });
+  $('#logout').addEventListener('click', async () => { if (!confirm('Log out on this device? You will need your license key to get back in.')) return; await api('POST', '/api/logout').catch(() => {}); state = null; renderAuth(); });
   $$('[data-tab]', app).forEach((b) => b.addEventListener('click', async () => {
     tab = b.dataset.tab;
-    if (tab === 'history') history = await api('GET', '/api/history').catch(() => null);
+    if (tab === 'history') history = await api('GET', `/api/history${TZ}`).catch(() => null);
     render();
   }));
   bindDash();
@@ -192,7 +192,20 @@ function renderHistory() {
   if (!history) return '<div class="card"><div class="empty">Loading…</div></div>';
   const h = history;
   const winRate = h.trades ? Math.round((h.wins / h.trades) * 100) : 0;
-  return `<div class="card">
+  const days = h.pnl.days;
+  const both = days.some((d) => d.mode === 'live') && days.some((d) => d.mode === 'test');
+  const dayName = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  return `<div class="stack">
+  <div class="card">
+    <div class="card-head"><h2>Profit by day<span class="sub">closed positions, fees included</span></h2></div>
+    <div class="card-body flush">${days.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Day</th>${both ? '<th></th>' : ''}<th class="num">Trades</th><th class="num">Winners</th><th class="num">Profit</th></tr></thead>
+      <tbody>${days.slice(0, 60).map((d) => `<tr>
+        <td>${esc(dayName(d.date))}</td>${both ? `<td>${d.mode === 'live' ? '<span class="pill live">LIVE</span>' : '<span class="tag off">test</span>'}</td>` : ''}
+        <td class="num">${d.trades}</td><td class="num">${d.trades ? Math.round((d.wins / d.trades) * 100) : 0}%</td>
+        <td class="num ${cls(d.pnlSol)}">${signed(d.pnlSol)} SOL</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed trades yet</b>Each day you trade gets a row here.</div>'}</div>
+  </div>
+  <div class="card">
     <div class="card-head"><h2>Closed positions<span class="sub">${h.trades} · total <span class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</span> · ${winRate}% winners${h.totalFeesSol ? ` · platform fees ${fmtSol(h.totalFeesSol)} SOL` : ''}</span></h2></div>
     <div class="card-body flush">${h.positions.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Coin</th><th>Copy</th><th>Sells</th><th class="num">Cost</th><th class="num">Returned</th><th class="num">P/L</th><th>Closed</th></tr></thead>
@@ -203,7 +216,7 @@ function renderHistory() {
         <td class="num">${fmtSol(p.costSol)}</td><td class="num">${fmtSol(p.proceedsSol)}</td>
         <td class="num ${cls(p.pnlSol)}">${signed(p.pnlSol)}<div style="font-size:11.5px">${pct(p.pnlPct)}</div></td>
         <td class="dim">${p.closedAt ? ago(p.closedAt) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed positions yet</b>They show up here with every sell and the profit.</div>'}</div>
-  </div>`;
+  </div></div>`;
 }
 
 function bindDash() {
@@ -271,7 +284,9 @@ function openEditor(copy) {
       <div class="group">
         <div class="title">Who and how much</div>
         <div class="row2">
-          <div class="field"><label for="f-leader">Wallet to copy</label><input id="f-leader" type="text" value="${esc(d.leader)}" placeholder="Solana wallet address" autocomplete="off" spellcheck="false" required></div>
+          <div class="field"><label for="f-leader">${copy ? 'Wallet to copy' : 'Wallets to copy'}</label>${copy
+            ? `<input id="f-leader" type="text" value="${esc(d.leader)}" placeholder="Solana wallet address" autocomplete="off" spellcheck="false" required>`
+            : '<textarea id="f-leader" rows="2" style="min-height:42px" placeholder="One wallet address — or several, one per line" autocomplete="off" spellcheck="false" required></textarea><div class="hint">Several addresses make one copy each, with these same settings.</div>'}</div>
           <div class="field"><label for="f-name">Nickname</label><input id="f-name" type="text" value="${esc(d.name)}" maxlength="40" placeholder="Optional"></div>
         </div>
         <div class="row2">
@@ -290,7 +305,7 @@ function openEditor(copy) {
         </div>
         <div class="row2">
           <div class="field"><label for="f-slip">Slippage</label><div class="unit"><input id="f-slip" type="number" min="0.5" max="100" step="any" value="${esc(d.slippagePct)}"><span>%</span></div></div>
-          <div class="hint" style="align-self:center">Priority fee: paid to the network on every transaction. Tip: an extra payment to land sooner (sent through Jito); 0 for none. Higher lands faster.</div>
+          <div class="hint" style="align-self:center">Priority fee: paid to the network on every transaction. Tip: an extra payment to land sooner, sent through Helius Sender; 0 for none. A tip of 0.001 SOL or more uses every fast lane.</div>
         </div>
       </div>
 
@@ -358,9 +373,11 @@ function openEditor(copy) {
     e.preventDefault();
     const on = (id) => $(`[data-rule="${id}"] [data-on]`, form).checked;
     const rows = (sel, a, b) => $$(sel, form).map((r) => ({ [a]: Number($('[data-a]', r).value), [b]: Number($('[data-b]', r).value) }));
+    const leaders = [...new Set($('#f-leader').value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean))];
+    const nick = $('#f-name').value.trim();
     const body = {
-      leader: $('#f-leader').value.trim(),
-      name: $('#f-name').value.trim(),
+      leader: leaders[0] ?? '',
+      name: nick,
       enabled: copy ? copy.enabled : true,
       mode: $('#f-mode .on').dataset.v,
       buySol: Number($('#f-buy').value),
@@ -379,14 +396,24 @@ function openEditor(copy) {
       },
     };
     if (body.mode === 'live' && !(copy && copy.mode === 'live') && !confirm(`Live mode buys ${body.buySol} SOL with your real wallet every time ${body.name || 'this wallet'} buys. Continue?`)) return;
+    let done = 0;
     try {
       if (copy) await api('PUT', `/api/copies/${copy.id}`, body);
-      else await api('POST', '/api/copies', body);
+      else {
+        // One copy per wallet, same settings; a nickname gets a number when it is shared.
+        for (const [i, leader] of leaders.entries()) {
+          await api('POST', '/api/copies', { ...body, leader, name: nick && leaders.length > 1 ? `${nick} ${i + 1}` : nick });
+          done++;
+        }
+      }
       closeModal();
-      toast(copy ? 'Saved' : 'Copying started');
+      toast(copy ? 'Saved' : leaders.length > 1 ? `Copying ${leaders.length} wallets` : 'Copying started');
       await loadState();
     } catch (err) {
-      $('#form-err').innerHTML = `<div class="err">${esc(err.message)}</div>`;
+      const which = !copy && leaders.length > 1 ? `Wallet ${done + 1} (${short(leaders[done] ?? '')}): ` : '';
+      const partial = done ? ` ${done} of ${leaders.length} were added.` : '';
+      $('#form-err').innerHTML = `<div class="err">${esc(which + err.message + partial)}</div>`;
+      if (done) loadState();
     }
   });
   setTimeout(() => (copy ? $('#f-buy') : $('#f-leader')).focus(), 30);
@@ -395,8 +422,8 @@ function openEditor(copy) {
 // ── data loop ────────────────────────────────────────────────────────────
 async function loadState() {
   try {
-    state = await api('GET', '/api/state');
-    if (tab === 'history') history = await api('GET', '/api/history').catch(() => history);
+    state = await api('GET', `/api/state${TZ}`);
+    if (tab === 'history') history = await api('GET', `/api/history${TZ}`).catch(() => history);
     // Never re-draw under someone typing (the private key box above all).
     const typing = document.activeElement && app.contains(document.activeElement) && /INPUT|TEXTAREA/.test(document.activeElement.tagName);
     if (modal.hidden && !typing && !$('#wk')?.value) render();
@@ -430,7 +457,7 @@ async function boot() {
   // waits and tries again, so nobody is thrown out of a session that is still good.
   for (let attempt = 0; ; attempt++) {
     try {
-      state = await api('GET', '/api/state');
+      state = await api('GET', `/api/state${TZ}`);
       render();
       startPolling();
       return;
