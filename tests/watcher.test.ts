@@ -32,6 +32,25 @@ describe('Watcher', () => {
     expect(fetched).toEqual([]);
   });
 
+  it("a buy that came by the Helius stream or a fetch carries pump.fun's curve from its event too (the copy needs no read)", async () => {
+    const viaStream = setup();
+    await viaStream.w.sync();
+    viaStream.w.handleStreamTx(buyTx);
+    await viaStream.w.drain();
+    const viaPoll = setup();
+    await viaPoll.w.sync();
+    viaPoll.push([{ signature: SIG, slot: 2, err: null, blockTime: 2 }]);
+    await viaPoll.w.sync();
+    for (const { trades } of [viaStream, viaPoll]) {
+      expect(trades).toHaveLength(1);
+      expect(trades[0]!.side).toBe('buy');
+      expect(trades[0]!.curve).toMatchObject({ tokenProgram: 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb', mayhem: true, cashback: false }); // (this coin is a mayhem coin)
+      expect(trades[0]!.curve!.realTokenReserves).toBeGreaterThan(0n);
+      expect(trades[0]!.heardAt).toBeGreaterThan(0);
+      expect(trades[0]!.approx).toBeUndefined(); // the amounts are the full transaction's own (exact), not the event's
+    }
+  });
+
   it('a new signature from the poller is fetched, parsed and passed on', async () => {
     const { w, push, trades } = setup();
     await w.sync();

@@ -344,7 +344,15 @@ export class Watcher {
         if (Date.now() < retryUntil) this.retryLater.set(`${signature}:${leader}`, { signature, leader, until: retryUntil });
         return;
       }
-      for (const t of parsed ?? parseLeaderTrades(tx, leader)) {
+      const trades = parsed ?? parseLeaderTrades(tx, leader);
+      // pump.fun's own event of their buy, in the transaction's logs, carries the curve as their buy left it: the copy
+      // is built from it with no read, whichever way the transaction came (the stream, the logs, a fetch).
+      const hints = tx.meta?.logMessages && trades.some((t) => t.side === 'buy' && t.venue === 'pumpfun' && !t.curve) ? fastBuysFromLogs(tx.meta.logMessages, signature, leader, tx.slot) : null;
+      for (const t of trades) {
+        if (hints && t.side === 'buy' && !t.curve) {
+          const hint = hints.find((h) => h.mint === t.mint)?.curve;
+          if (hint) t.curve = hint;
+        }
         t.heardAt ??= this.heardAt.get(signature) ?? Date.now();
         if (t.counter && t.side === 'buy' && this.deps.valueInSol) {
           // Paid in a stablecoin or another coin (perhaps with a little SOL too): its SOL value is what "bought at
