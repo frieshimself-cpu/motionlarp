@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 599 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 604 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -597,9 +597,12 @@ self-test (now with a booking dropped and a sale booked twice) catches every pla
 
 **A third round of reviewers** (money and database faults, chain reads and restarts, what the user sees, the fuzzer,
 the speed of the hot paths) read the fixes above. Fixed from it, each with a test that fails on the code before:
-- A status seen only at "processed" is not taken as "not found" from a node far enough along (its block may still be
-  confirmed: a sale that landed was dropped and its rule sold again), nor, while the transaction waits for its
-  confirmation, as landed once it has run out (a block the chain then dropped).
+- A status seen only at "processed" (in a block not confirmed yet) is asked again: never taken as "not found" (after a
+  crash, a sale that landed in its last block, read from a node behind on its confirmations, was dropped once the chain
+  was well past it, and its rule sold a second time: a 40 % step sold 80 %, the first sale's SOL never booked), nor,
+  with an error, as "failed" (its block may be dropped and the same transaction land in another), nor, while the
+  transaction waits for its confirmation, as landed once it has run out (a block the chain then dropped). The last of
+  these was checked with a model of two RPC nodes answering as the real ones do (tests/settle-status.test.ts).
 - A status node that is always some slots behind the one that gave the height is believed once the chain is well past
   the last block the sell could land in (about 12 s): a crash leftover waited for the 180 s fallback, and a sell that
   never landed was given its verdict only at the 150 s cap.
@@ -654,6 +657,11 @@ The whole stretch inside the server, from their trade heard to our buy handed to
 network mocked, a file database, the speed reviewers' probe, two rounds of 1,500): median **0.96 ms** (p90 1.3 to
 1.4 ms), against 3.06 to 3.21 ms before; 0.26 ms of it is the engine's own bookkeeping before the build (the trade
 marked seen, the position written down before anything goes out).
+
+**The browser suite on the last code of the day** (05c74a3 to ecbb282 as the sizes ran one after another, the later
+ones with the faster build): **0 failed checks at all seven sizes** (655 at 1280 px, 652 at each of 1024, 768, 412,
+390, 360 and 320 px), no page errors, no console errors, nothing wider than the screen, no click that could not land
+where its control is drawn.
 `npm test`: 599 tests.
 
 ## Not yet verified
