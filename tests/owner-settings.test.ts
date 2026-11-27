@@ -88,6 +88,38 @@ describe('the Helius link and the Jupiter key live in the server\'s file, not on
   });
 });
 
+describe('max per buy: 30 SOL unless the owner sets another', () => {
+  it('a site still on the old 0.05 SOL default moves to 30 once', () => {
+    store.setSettings({ max_sol_per_buy: '0.05' });
+    const c = cfg();
+    applyStoredSettings(store, c);
+    expect(c.maxSolPerBuy).toBe(30);
+    const again = cfg();
+    applyStoredSettings(store, again);
+    expect(again.maxSolPerBuy).toBe(30);
+  });
+
+  it('a limit the owner chose themselves is kept, also 0.05 chosen after the change', async () => {
+    store.setSettings({ max_sol_per_buy: '2' });
+    const c = cfg();
+    c.rpcUrl = RPC;
+    applyStoredSettings(store, c);
+    expect(c.maxSolPerBuy).toBe(2);
+    await saveOwnerSettings(store, c, { maxSolPerBuy: 0.05 }, checks);
+    const fresh = cfg();
+    applyStoredSettings(store, fresh);
+    expect(fresh.maxSolPerBuy).toBe(0.05);
+  });
+
+  it('nothing saved: the default of the server applies', async () => {
+    const { config } = await import('../src/config.js');
+    expect(process.env.MAX_SOL_PER_BUY ? true : config.maxSolPerBuy === 30).toBe(true);
+    const c = { ...cfg(), maxSolPerBuy: 30 };
+    applyStoredSettings(store, c);
+    expect(c.maxSolPerBuy).toBe(30);
+  });
+});
+
 describe('owner settings', () => {
   it('fee, max buy and the live switch apply at once, without a restart', async () => {
     const c = cfg();

@@ -47,7 +47,7 @@ function load() {
 
     // Nothing goes on-chain unless LIVE_TRADING=true AND the copy is set to live. The gate is in src/tx/send.ts.
     liveTrading: bool('LIVE_TRADING', false),
-    maxSolPerBuy: num('MAX_SOL_PER_BUY', 0.05),
+    maxSolPerBuy: num('MAX_SOL_PER_BUY', 30),
 
     /** Platform fee on every copy buy and sell, in basis points (100 = 1 %), paid to FEE_WALLET. 0 = off. */
     feeBps: num('FEE_BPS', 0),

@@ -46,6 +46,9 @@ export class OwnerSettingsError extends Error {
   override name = 'OwnerSettingsError';
 }
 
+/** The most a single buy may spend when the owner has set no limit of their own. */
+export const DEFAULT_MAX_SOL_PER_BUY = 30;
+const OLD_DEFAULT_MAX_SOL_PER_BUY = 0.05;
 const JUPITER_FREE = /lite-api\.jup\.ag/;
 const JUPITER_KEYED = 'https://api.jup.ag';
 
@@ -85,6 +88,16 @@ export function applyStoredSettings(store: Store, config: MutableConfig): void {
   config.sources = sources;
   if (s.fee_bps !== undefined) config.feeBps = Number(s.fee_bps);
   if (s.fee_wallet !== undefined) config.feeWallet = s.fee_wallet;
+  // The most a buy may spend is 30 SOL unless the owner sets another limit. The site's first default was 0.05 SOL,
+  // and the admin page saved it along with every other setting: a site still holding that old default moves to 30
+  // once (owner's decision, 27 Nov 2026). A limit set after that is kept, whatever it is.
+  if (s.max_buy_default !== String(DEFAULT_MAX_SOL_PER_BUY)) {
+    if (s.max_sol_per_buy !== undefined && Number(s.max_sol_per_buy) === OLD_DEFAULT_MAX_SOL_PER_BUY) {
+      s.max_sol_per_buy = String(DEFAULT_MAX_SOL_PER_BUY);
+      store.setSettings({ max_sol_per_buy: s.max_sol_per_buy });
+    }
+    store.setSettings({ max_buy_default: String(DEFAULT_MAX_SOL_PER_BUY) });
+  }
   if (s.max_sol_per_buy !== undefined) config.maxSolPerBuy = Number(s.max_sol_per_buy);
   if (s.live_trading !== undefined) config.liveTrading = s.live_trading === 'true';
 }
