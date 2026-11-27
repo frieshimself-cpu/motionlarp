@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 604 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 612 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -657,6 +657,28 @@ The whole stretch inside the server, from their trade heard to our buy handed to
 network mocked, a file database, the speed reviewers' probe, two rounds of 1,500): median **0.96 ms** (p90 1.3 to
 1.4 ms), against 3.06 to 3.21 ms before; 0.26 ms of it is the engine's own bookkeeping before the build (the trade
 marked seen, the position written down before anything goes out).
+
+**"Never landed", decided by the chain** (e6575c1). A sell whose outcome nobody could tell, a sell left by a crash, and
+a buy whose outcome nobody could tell are now taken as never landed when the chain says so: from the chain's tip (read
+before the trade's status) and the trade's last valid height, by the rule already used for a crash's leftovers (past its
+last block and the 10-block margin on the word of a node as far along, or 30 blocks past it whatever node answered),
+with ten minutes as a backstop should the tip never move. The fixed times (120 s for a sell of unknown outcome, 180 s for
+a crash's leftover, 90 s for a buy) are kept only for when the tip or the height cannot be read. Before, on a slow chain
+(blocks at twice their usual time, so that a blockhash's 151 blocks last two minutes), a sell could land after it was
+taken as never landed: its rule sold again and the first sale's SOL was never booked; and a buy marked failed after 90 s
+left its coins in the wallet, never sold. On a normal chain the verdict now comes about a minute after the sell was
+sent, instead of two. A buy's last valid height is written with its signature (`positions.buy_last_valid`). Found by
+the reviewers of the fuzzer's chain model (a model with slow blocks flagged the old engine). The tests in
+`tests/restarts.test.ts` fail on the code before; they also pin the 30-block rule exactly (cut to 29, it passed every
+test and every fuzz run before) and the rule that a "not found" that does not carry its node's slot is believed only
+well past; each of seven planted regressions of these rules fails at least one test. The fuzzer on this code: crash,
+diskfull and outage 0 of 1,000 to 1,500; dbfault 1 of 1,500 (seed 1411, the known case); default 9 of 2,000, lag 38 of
+2,000 and ghost 88 of 1,500, every one of them the harness's own copy of the old 120 s rule (the engine now decides
+earlier, from the chain; seven seeds traced by hand, each verdict about a sell that never landed, the chain 30 to 41
+blocks past its last block). With the harness taking a sell as settled exactly when the engine's rule does (a scratch
+change, kept out of the repository until the fuzzer observes the engine's verdicts itself): default 0 of 2,000, lag 0
+of 2,000, ghost 0 of 1,500, crash 0 of 1,500, and its check of a "not found" taken as final while the sell could still
+land never fired. `npm test`: 612 tests.
 
 **The browser suite on the last code of the day** (05c74a3 to ecbb282 as the sizes ran one after another, the later
 ones with the faster build): **0 failed checks at all seven sizes** (655 at 1280 px, 652 at each of 1024, 768, 412,
