@@ -188,6 +188,17 @@ export class Engine {
   private readonly ownLeftovers = new Set<string>();
   /** Those of them known to have landed (only their booking failed): sold, not "if it did not go through". */
   private readonly landedLeftovers = new Set<string>();
+  /** Sells of this process known not to land (they failed, or were dropped) whose row could not be deleted (the
+   *  database failing): never taken up as left behind (their position waited for a sell that had failed, holding its
+   *  rules and Sell now); the row goes on a later pass, when the database takes the delete. */
+  private readonly failedRows = new Set<string>();
+  /** Real buys of this process that landed but could not be booked (the database failing), with the moment each was
+   *  confirmed: booked from their own transactions by the next pass (every 5 s while there is one), their timed sells
+   *  counting from that moment, not from the late booking. */
+  private readonly unbookedBuys = new Map<number, number>();
+  /** Their partial sells ("same share") that could not be written down as owed (the database failing): owed here
+   *  until done, so they are still sold (only one written down as owed is sold: see sell()). */
+  private readonly owedInMemory = new Set<string>();
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? Date.now;
@@ -216,8 +227,13 @@ export class Engine {
     const jobs: Promise<unknown>[] = [];
     if (t.side === 'buy') {
       for (const copy of this.deps.store.enabledCopiesForLeader(t.leader)) {
-        const job = this.startCopyBuy(copy, t);
-        if (job) jobs.push(job);
+        // (a write of one copy that fails, the database failing, does not keep the others from copying it)
+        try {
+          const job = this.startCopyBuy(copy, t);
+          if (job) jobs.push(job);
+        } catch (err) {
+          log.warn('a copy of their buy could not be started', { copy: copy.id, error: safeErrorMessage(err) });
+        }
       }
     } else {
       for (const p of this.deps.store.activePositions()) {
@@ -229,10 +245,19 @@ export class Engine {
         const percent = p.sell.mirror.mode !== 'same' || soldOut ? 100 : share * 100;
         const order: SellOrder = { reason: 'mirror', percent, tag: t.signature };
         // Written down at once: their full exit until the position is closed, their partial sell until our share of it
-        // is sold. A restart or a crash before then (it may wait behind another sell of ours) must not forget it.
-        if (percent >= 100) this.writeExitOwed(p, order);
-        else this.oweSell(p, order);
-        if (this.stopped) { this.oweAfterRestart(p.id, order); continue; }
+        // is sold. A restart or a crash before then (it may wait behind another sell of ours) must not forget it. (A
+        // write that fails, the database failing, does not keep it, or another position's, from being sold: their
+        // partial sell is then owed in memory.)
+        if (percent >= 100) this.quietly('their exit owed', () => this.writeExitOwed(p, order));
+        else {
+          try {
+            this.oweSell(p, order);
+          } catch (err) {
+            this.owedInMemory.add(`${p.id}:${order.tag}`);
+            log.warn('their sell could not be written down: owed in memory', { position: p.id, error: safeErrorMessage(err) });
+          }
+        }
+        if (this.stopped) { this.quietly('a sell owed after the restart', () => this.oweAfterRestart(p.id, order)); continue; }
         const key = this.orderKey(p.id, order);
         this.inFlight.add(key);
         jobs.push(this.enqueue(p.id, () => this.sell(p.id, order)).finally(() => { this.inFlight.delete(key); this.closeIfEmpty(p.id); }));
@@ -411,6 +436,7 @@ export class Engine {
       } catch (err) {
         if (fill.simulated) throw err; // a test buy: nothing was bought, it failed
         log.warn('a buy that landed could not be booked yet: it is booked from its own transaction', { position: id, signature: fill.signature, error: safeErrorMessage(err) });
+        this.unbookedBuys.set(id, now);
         return;
       }
       // The exact SOL spent is read from the confirmed transaction afterwards; the position does not wait for it.
@@ -771,7 +797,7 @@ export class Engine {
   }
 
   private run(positionId: number, order: SellOrder): void {
-    if (this.stopped) { this.oweAfterRestart(positionId, order); return; }
+    if (this.stopped) { this.quietly('a sell owed after the restart', () => this.oweAfterRestart(positionId, order)); return; }
     if (this.waitsForOrphan(positionId)) { this.holdForOrphan(positionId, order); return; }
     const key = this.orderKey(positionId, order);
     if (this.inFlight.has(key)) return;
@@ -880,6 +906,7 @@ export class Engine {
     else if (order.reason === 'dead_coin') done.deadFired = true;
     // Done (sold, nothing left for it, or given up): no longer owed. (Read fresh: another may have been written down
     // since this sell began.)
+    if (order.reason === 'mirror' && order.tag) this.owedInMemory.delete(`${p.id}:${order.tag}`);
     if (owedEntry(order)) {
       const owed = this.deps.store.position(p.id)?.owedSells ?? p.owedSells;
       const left = owed.filter((o) => !sameOwed(o, order));
@@ -916,15 +943,15 @@ export class Engine {
       kept.push(order);
       this.pendingMirror.set(p.id, kept);
       // Their full exit is also written down: a restart before the buy is settled must not forget it.
-      if (order.percent >= 100) this.writeExitOwed(p, order);
-      if (kept.length === 1) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${shortMint(p.mint)} (${p.copyName}): they sold while our buy's outcome is not known yet — sold as soon as the buy is settled`, mint: p.mint });
+      if (order.percent >= 100) this.quietly('their exit owed', () => this.writeExitOwed(p, order));
+      if (kept.length === 1) this.quietly('a feed line', () => store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${shortMint(p.mint)} (${p.copyName}): they sold while our buy's outcome is not known yet — sold as soon as the buy is settled`, mint: p.mint }));
       return { ok: false, error: 'waiting for the buy to be settled' };
     }
     if (!p || p.status !== 'open' || p.tokensHeld <= 0n) return { ok: false, error: 'position is not open' };
     // Their partial sell is written down when it is heard and taken off when it is done: one no longer written down
     // was sold (perhaps booked from its own transaction after an error or a restart) or given up, and never sells
     // twice (a retry of one whose booking had failed sold another share once the safety pass had booked it).
-    if (order.reason === 'mirror' && order.percent < 100 && order.tag && !p.owedSells.some((o) => o.reason === 'mirror' && o.tag === order.tag)) {
+    if (order.reason === 'mirror' && order.percent < 100 && order.tag && !p.owedSells.some((o) => o.reason === 'mirror' && o.tag === order.tag) && !this.owedInMemory.has(`${p.id}:${order.tag}`)) {
       this.retries.delete(this.orderKey(p.id, order));
       return { ok: true };
     }
@@ -939,7 +966,7 @@ export class Engine {
     const label = `${shortMint(p.mint)} (${p.copyName})`;
     const wallet = this.deps.walletFor(p.userId);
     if (!wallet) {
-      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Cannot sell ${label}: no wallet`, mint: p.mint });
+      this.quietly('a feed line', () => store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Cannot sell ${label}: no wallet`, mint: p.mint }));
       return { ok: false, error: 'no wallet' };
     }
     const owner = wallet.publicKey.toBase58();
@@ -949,7 +976,7 @@ export class Engine {
       || (order.reason === 'dead_coin' && p.deadFired))) {
       this.retries.delete(this.orderKey(p.id, order)); // (a retry of it would otherwise be run again on every tick)
       const done = this.markDone(p, order); // (and no longer owed, if it was written down)
-      if (done.owedSells) store.updatePosition(p.id, { owedSells: done.owedSells });
+      if (done.owedSells) this.quietly('a sell no longer owed', () => store.updatePosition(p.id, { owedSells: done.owedSells! }));
       return { ok: true };
     }
     const live = p.mode === 'live';
@@ -1315,8 +1342,7 @@ export class Engine {
   private doneWithSellOut(signature: string | null, outcome: 'booked' | 'failed' | 'unknown'): void {
     if (!signature) return;
     this.sending.delete(signature);
-    // (a row that cannot be deleted now, the database failing, is settled from its own transaction later: it failed)
-    if (outcome === 'failed') this.quietly('the end of a failed sell', () => this.deps.store.deleteSellOut(signature));
+    if (outcome === 'failed') this.forgetRow(signature);
     if (outcome === 'unknown' && !this.stopped) {
       // (one of this process's own, not from before a restart: what the user is told about it says so)
       if (this.deps.store.hasSellOut(signature)) this.ownLeftovers.add(signature);
@@ -1343,12 +1369,26 @@ export class Engine {
       if (!kept.some((o) => this.orderKey(positionId, o) === this.orderKey(positionId, order))) kept.push(order);
       this.pendingMirror.set(positionId, kept);
     }
-    this.oweAfterRestart(positionId, order);
+    // (kept in memory above whatever the database does: a write that fails is logged, never thrown into the clock)
+    this.quietly('a held sell owed', () => this.oweAfterRestart(positionId, order));
+  }
+
+  /** The row of a sell known not to land goes; one that cannot be deleted now (the database failing) is never taken
+   *  for a sell on its way, and goes on a later pass (see failedRows). */
+  private forgetRow(signature: string): void {
+    try {
+      this.deps.store.deleteSellOut(signature);
+      this.failedRows.delete(signature);
+    } catch (err) {
+      this.failedRows.add(signature);
+      log.warn('the row of a sell that did not land could not be deleted yet', { signature, error: safeErrorMessage(err) });
+    }
   }
 
   /** Takes up the sells written down that no process is handling (see `orphans`). */
   private adoptOrphans(): void {
     for (const s of this.deps.store.sellsOut()) {
+      if (this.failedRows.has(s.signature)) { this.forgetRow(s.signature); continue; }
       if (this.sending.has(s.signature) || this.orphans.has(s.signature)) continue;
       this.orphans.set(s.signature, s);
       const mine = this.reserved.get(s.positionId) ?? new Map<string, bigint>();
@@ -1465,8 +1505,7 @@ export class Engine {
   private dropOrphan(o: SellOut, didNotLand = false): void {
     const { store } = this.deps;
     const own = this.ownLeftovers.has(o.signature);
-    // (a row that cannot be deleted now, the database failing, is taken up again and dropped again on a later pass)
-    this.quietly('dropping a sell left behind', () => store.deleteSellOut(o.signature));
+    this.forgetRow(o.signature);
     this.releaseOrphan(o);
     const p = store.position(o.positionId);
     if (p && didNotLand && o.order.reason === 'manual' && !o.order.rest && p.status === 'open' && !p.exitOwed) {
@@ -1506,13 +1545,17 @@ export class Engine {
   /** True while a sell left by an earlier process is not settled yet (its position waits for it): the server reads it
    *  again every few seconds (settleLeftovers), not only on the 30 s pass. */
   awaitingLeftovers(): boolean {
-    return this.orphans.size > 0;
+    return this.orphans.size > 0 || this.unbookedBuys.size > 0;
   }
 
-  /** Reads again the sells left by an earlier process that are not settled yet (see awaitingLeftovers). */
+  /** Reads again the sells left by an earlier process that are not settled yet, and books a buy of this one that landed
+   *  but could not be booked (see awaitingLeftovers). */
   async settleLeftovers(): Promise<void> {
-    if (this.stopped || !this.orphans.size) return;
-    await this.settleOrphans();
+    if (this.stopped) return;
+    // (a buy to book: the whole pass, which runs one at a time, so a buy is never booked twice by two passes at once)
+    for (const id of this.unbookedBuys.keys()) if (this.deps.store.position(id)?.status !== 'opening') this.unbookedBuys.delete(id);
+    if (this.unbookedBuys.size) { await this.restore(); return; }
+    if (this.orphans.size) await this.settleOrphans();
   }
 
   /**
@@ -1543,30 +1586,36 @@ export class Engine {
       // A buy's signature is written down before it is sent, and only when it is sent for real: one without it was
       // never sent (a test buy, or a crash before signing). It failed, and the wallet's own coins of that mint
       // (bought by hand, or by another tool) are never taken for it.
+      // (a write that fails, the database failing, is tried again on the next pass; the other buys of this one go on)
       if (!p.buySig || !wallet) {
         this.pendingMirror.delete(p.id);
-        store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
+        this.quietly('a buy that was never sent', () => store.updatePosition(p.id, { status: 'failed', closedAt: this.now() }));
         continue;
       }
       // Signed means sent for real, whatever the row said when it was written (Live switched on meanwhile).
-      if (p.mode !== 'live') store.updatePosition(p.id, { mode: 'live' });
+      if (p.mode !== 'live') this.quietly('a buy signed for real', () => store.updatePosition(p.id, { mode: 'live' }));
       if (!executor.isLive({ live: true, exit: true })) continue; // no connection to read it now: settled later
       try {
         if (executor.settleBuy) {
           // Its own transaction says what happened: exact coins and cost, or that it failed.
           const r = await executor.settleBuy(p.buySig, wallet.publicKey.toBase58(), p.mint);
           if (r.state === 'landed') {
-            const now = this.now();
+            // (one of this process whose booking failed: from its own confirmation, so its timed sells keep their times)
+            const ours = this.unbookedBuys.get(p.id);
+            const now = ours ?? this.now();
             const sig = p.buySig;
             // (in one step, as a buy booked at once: an error leaves it "opening" for the next pass)
             store.atomic(() => {
               store.updatePosition(p.id, { status: 'open', tokensBought: r.tokens, tokensHeld: r.tokens, costLamports: r.lamports, refValueLamports: r.lamports, openedAt: now, lastChangeAt: now });
               store.insertFill({ positionId: p.id, userId: p.userId, side: 'buy', reason: 'copy', tokens: r.tokens, lamports: r.lamports, signature: sig, simulated: false, error: null, feeLamports: p.buyFeeLamports ?? 0n });
             });
-            this.quietly('the feed line of a buy', () => store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'buy', message: `Bought ${fmtSol(r.lamports)} of ${label} — confirmed late (its exit starts now)`, mint: p.mint, signature: sig }));
+            this.unbookedBuys.delete(p.id);
+            const late = ours !== undefined ? 'written down a few seconds late (the server could not save it at once); its timed sells count from the buy' : 'confirmed late (its exit starts now)';
+            this.quietly('the feed line of a buy', () => store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'buy', message: `Bought ${fmtSol(r.lamports)} of ${label} — ${late}`, mint: p.mint, signature: sig }));
             this.firePending(p.id);
           } else if (r.state === 'failed' || this.now() - p.openedAt > 90_000) {
             // Failed on chain, or not found long after its blockhash ran out: it never landed.
+            this.unbookedBuys.delete(p.id);
             this.pendingMirror.delete(p.id);
             store.updatePosition(p.id, { status: 'failed', closedAt: this.now() });
             store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${label}: the buy whose outcome was unknown did not land — nothing bought`, mint: p.mint });

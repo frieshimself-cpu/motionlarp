@@ -102,7 +102,7 @@ interface WriteFail { t: number; step: number; method: string; err: string; inTx
 interface Snap {
   storeOps: number; lastFill: { op: number; pid: number; userId: number; side: string; tokens: bigint; lamports: bigint } | null; lastFillUpdate: number; closedCount: number;
   feed: number; inserted: number; notes: Record<string, number>;
-  pos: Map<number, { recovered: boolean; proceedsWriter: string; reopened: boolean | undefined; flying: Map<number, Flying>; errorLines: Map<string, number>; gaveUp: Set<string> }>;
+  pos: Map<number, { recovered: boolean; proceedsWriter: string; reopened: boolean | undefined; flying: Map<number, Flying>; errorLines: Map<string, number>; gaveUp: Set<string>; quotedRefined: boolean | undefined }>;
 }
 interface Flying {
   key: string; kind: 'bag' | 'queue'; tokens: bigint; call: SellCall;
@@ -352,7 +352,7 @@ class Run {
       this.line(`market: Live switch ${sc.live ? 'ON (real trades)' : 'OFF (test mode)'}, over-ask ${sc.overAsk}, profile ${sc.profile}, priceMs ${sc.priceMs}, retries ${sc.retry}, max per buy ${sc.maxSolPerBuy} SOL, wallets ${sc.users.map((u) => `${u.sol} SOL`).join(' / ')}`);
       if (sc.db?.p) this.line(`database: one write in ${Math.round(1 / sc.db.p)} fails at random (once each), until the quiet phase`);
       for (const w of sc.db?.full ?? []) this.line(`database: from +${(w.at / 1000).toFixed(3)}s for ${w.ms / 1000}s every write fails (${DB_ERRORS[w.err][0]}); reads work`);
-      if (market.noRecordNoSend) this.line('executor: a trade whose onSigned callback throws is NOT sent (FUZZ_NO_RECORD_NO_SEND, the coming fix)');
+      if (!market.noRecordNoSend) this.line('executor: a trade whose onSigned callback throws is sent all the same (FUZZ_NO_RECORD_NO_SEND=0, the executor before 67c9307)');
       this.startEngine();
 
       for (let i = 0; i < sc.steps.length; i++) {
@@ -593,7 +593,7 @@ class Run {
 
   private snapshot(): Snap {
     const pos: Snap['pos'] = new Map();
-    for (const [id, t] of this.pos) pos.set(id, { recovered: t.recovered, proceedsWriter: t.proceedsWriter, reopened: t.reopened, flying: new Map(t.flying), errorLines: new Map(t.errorLines), gaveUp: new Set(t.gaveUp) });
+    for (const [id, t] of this.pos) pos.set(id, { recovered: t.recovered, proceedsWriter: t.proceedsWriter, reopened: t.reopened, flying: new Map(t.flying), errorLines: new Map(t.errorLines), gaveUp: new Set(t.gaveUp), quotedRefined: t.quotedBuy?.refined });
     return { storeOps: this.storeOps, lastFill: this.lastFill, lastFillUpdate: this.lastFillUpdate, closedCount: this.closedCount, feed: this.feed.length, inserted: this.inserted.length, notes: { ...this.notes }, pos };
   }
 
@@ -621,6 +621,8 @@ class Run {
       t.flying = was.flying;
       t.errorLines = was.errorLines;
       t.gaveUp = was.gaveUp;
+      // (the engine writes a buy's exact coin count in one step with its cost and coins: undone whole, it is not in)
+      if (t.quotedBuy && was.quotedRefined !== undefined) t.quotedBuy.refined = was.quotedRefined;
       this.dirty.add(id);
     }
     this.line(`store transaction ROLLED BACK (${String((err as Error)?.message ?? err)}): none of its writes happened`);
@@ -689,7 +691,7 @@ class Run {
           const out = fn();
           // (a write in it failed and the engine went on: SQLite has already rolled the whole transaction back)
           if (tx.doomed) throw tx.doomed;
-          this.dbWrite('COMMIT', () => ({ what: 'the transaction\'s COMMIT' }), () => tx.wrote);
+          this.dbWrite('COMMIT', () => ({ pid: als.getStore()?.positionId, what: 'the transaction\'s COMMIT' }), () => tx.wrote);
           return out;
         });
       } catch (err) {
@@ -987,7 +989,12 @@ class Run {
       const failed = this.writeFails.some((w) => w.pid === tr.pid && w.t >= c.t0);
       const p = this.store.position(tr.pid);
       // A buy that was filled is never marked failed: a failed position is never sold, and its coins stay in the wallet.
-      if (p && c.ok && p.status === 'failed') this.problem('X1', `filled-buy-marked-failed${failed ? '(after-a-failed-write)' : ''}`, `p${tr.pid}: the ${c.live ? 'real' : 'test'} buy was filled (${c.quotedTokens ?? c.tokens} tokens) and the position is marked failed${failed ? ' (a write of its booking failed, and the engine took that for a failed buy)' : ''}`);
+      // (a TEST buy whose booking could not be written: nothing was bought, and the engine fails it, saying why; a real
+      // one stays "opening" and is booked from its own transaction)
+      if (p && c.ok && p.status === 'failed') {
+        if (failed && !c.live) this.note('db:test-buy-failed:its-booking-could-not-be-written');
+        else this.problem('X1', `filled-buy-marked-failed${failed ? '(after-a-failed-write)' : ''}`, `p${tr.pid}: the ${c.live ? 'real' : 'test'} buy was filled (${c.quotedTokens ?? c.tokens} tokens) and the position is marked failed${failed ? ' (a write of its booking failed, and the engine took that for a failed buy)' : ''}`);
+      }
       if (c.ok && !mine.some((e) => e.kind === 'buy')) {
         if (lost.some((e) => e.kind === 'buy')) this.note('db:feed-line-not-written:buy');
         // (its booking failed before the line: X1 above when that marked it failed; else it is still "opening" and

@@ -103,7 +103,7 @@ export interface BuyCall {
   settled?: boolean;
   /** The buy was handed back with this, the quote's coin count, while the wallet received `tokens`. */
   quotedTokens?: bigint;
-  /** Signed, then not sent: its onSigned callback threw (with FUZZ_NO_RECORD_NO_SEND, as the fixed executor does). */
+  /** Signed, then not sent: its onSigned callback threw (as the executor does since 67c9307; not with FUZZ_NO_RECORD_NO_SEND=0). */
   notSent?: boolean;
 }
 export interface SellCall {
@@ -124,7 +124,7 @@ export interface SellCall {
   refineSeen?: boolean;
   /** The engine read this sell's own transaction afterwards (settleSell) and got its exact numbers. */
   settled?: boolean;
-  /** Signed, then not sent: its onSigned callback threw (with FUZZ_NO_RECORD_NO_SEND, as the fixed executor does). */
+  /** Signed, then not sent: its onSigned callback threw (as the executor does since 67c9307; not with FUZZ_NO_RECORD_NO_SEND=0). */
   notSent?: boolean;
   /** Set by run.ts: its row in sells_out could not be written (the write failed when it was signed). */
   outFailed?: boolean;
@@ -195,12 +195,12 @@ export class Market {
   /** Until this moment every trade, quote and balance read fails (an RPC outage). */
   outageUntil = 0;
   /**
-   * The executor as it is about to be fixed: a trade whose onSigned callback throws (the engine could not write the
-   * trade down before it goes out) is not sent; it answers { ok: false } at once and never reaches the chain. Off: as
-   * the executor is today, it ignores the throw and sends the trade anyway. Default from FUZZ_NO_RECORD_NO_SEND=1; a
-   * saved scenario that says `noRecordNoSend` sets it (run.ts).
+   * As the executor does (since 67c9307): a trade whose onSigned callback throws (the engine could not write the trade
+   * down before it goes out) is not sent; it answers { ok: false } at once and never reaches the chain. Off
+   * (FUZZ_NO_RECORD_NO_SEND=0): as the executor did before, it ignores the throw and sends the trade anyway. A saved
+   * scenario that says `noRecordNoSend` sets it (run.ts).
    */
-  noRecordNoSend = process.env.FUZZ_NO_RECORD_NO_SEND === '1';
+  noRecordNoSend = process.env.FUZZ_NO_RECORD_NO_SEND !== '0';
   hooks!: Hooks;
 
   constructor(

@@ -916,6 +916,23 @@ describe('a database that cannot be written (a full disk)', () => {
     expect(s.position().status).toBe('closed');
   });
 
+  it('a buy that landed but could not be booked is booked by the 5 s pass, its timed sells counting from the buy (they waited for the 30 s pass, then counted from it)', async () => {
+    const s = server({ ...none, timed: [{ afterSec: 2, percent: 100 }] });
+    (s.chain as unknown as { settleBuy: () => Promise<unknown> }).settleBuy = async () => ({ state: 'landed', tokens: 1_000_000n, lamports: SOL });
+    const insertFill = s.store.insertFill.bind(s.store);
+    let broken = true;
+    s.store.insertFill = (f) => { if (broken && f.side === 'buy') { broken = false; throw new Error('disk I/O error'); } return insertFill(f); };
+    await s.buy(); // at +0 s
+    expect(s.position().status).toBe('opening');
+    expect(s.engine.awaitingLeftovers()).toBe(true); // the server's 5 s pass runs
+    s.at(5_000); await s.engine.settleLeftovers(); await s.engine.idle();
+    expect(s.position()).toMatchObject({ status: 'open', openedAt: 1_000_000 }); // the buy's own time
+    expect(s.engine.awaitingLeftovers()).toBe(false);
+    await s.tick(); // +5 s: the +2 s step is overdue, it goes now
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([1_000_000n]);
+    expect(s.feed().some((m) => /written down a few seconds late/.test(m))).toBe(true);
+  });
+
   it('a buy whose feed line cannot be written stays open and is sold by its rules (it was marked failed after it was booked)', async () => {
     const s = server({ ...none, timed: [{ afterSec: 2, percent: 100 }] });
     const addEvent = s.store.addEvent.bind(s.store);
@@ -1246,5 +1263,95 @@ describe('a sale settled from its own transaction is booked as one answered at o
     await s.engine.settleLeftovers();
     expect(s.store.sellsOut()).toHaveLength(0);
     expect([1, 2].map((id) => s.store.position(id)!.proceedsLamports)).toEqual([400_000_000n, 400_000_000n]);
+  });
+});
+
+describe('one write that fails does not stop the others', () => {
+  it('their buy is copied by every copy of theirs, though one copy\'s write fails (the loop used to stop at it)', async () => {
+    const s = server(none);
+    const uid2 = s.store.createUser('v', 'x');
+    s.store.setWallet(uid2, Keypair.generate().publicKey.toBase58(), 'enc');
+    s.store.createCopy(uid2, validateSettings({ leader: LEADER, buySol: 1, minLeaderBuySol: 0, oncePerCoin: false, sell: none }));
+    const insertPosition = s.store.insertPosition.bind(s.store);
+    let broken = true;
+    s.store.insertPosition = (p) => { if (broken) { broken = false; throw new Error('disk I/O error'); } return insertPosition(p); };
+    await s.engine.onLeaderTrade(trade('buy')); await s.engine.idle();
+    expect(s.store.activePositions().map((p) => p.userId)).toEqual([uid2]);
+  });
+
+  it('their sell is sold for every position holding the coin, though writing one of them down fails', async () => {
+    const s = server({ ...none, mirror: { enabled: true, mode: 'exit' } });
+    const uid2 = s.store.createUser('v', 'x');
+    s.store.setWallet(uid2, Keypair.generate().publicKey.toBase58(), 'enc');
+    s.store.createCopy(uid2, validateSettings({ leader: LEADER, buySol: 1, minLeaderBuySol: 0, oncePerCoin: false, sell: { ...none, mirror: { enabled: true, mode: 'exit' } } }));
+    await s.buy();
+    expect(s.store.activePositions()).toHaveLength(2);
+    const updatePosition = s.store.updatePosition.bind(s.store);
+    let broken = true;
+    s.store.updatePosition = (id, patch) => { if (broken && patch.exitOwed) { broken = false; throw new Error('disk I/O error'); } return updatePosition(id, patch); };
+    await s.their('sell'); await s.engine.idle();
+    expect(s.chain.sent).toHaveLength(2);
+    expect(s.store.activePositions()).toHaveLength(0);
+  });
+
+  it('their partial sell is sold though writing it down as owed fails (it is owed in memory then)', async () => {
+    const s = server({ ...none, mirror: { enabled: true, mode: 'same' } });
+    await s.buy();
+    const updatePosition = s.store.updatePosition.bind(s.store);
+    let broken = true;
+    s.store.updatePosition = (id, patch) => { if (broken && patch.owedSells) { broken = false; throw new Error('disk I/O error'); } return updatePosition(id, patch); };
+    await s.engine.onLeaderTrade({ ...trade('sell', MINT, 1_000_000n), tokenAmount: 1_000_000n }); await s.engine.idle(); // they sold half
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([500_000n]);
+    expect(s.position()).toMatchObject({ tokensHeld: 500_000n, proceedsLamports: 500_000_000n });
+    s.at(2_000); await s.tick(); await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent).toHaveLength(1); // once
+  });
+
+  it('a tick goes on, and does not fail, though writing down an order held for a position fails', async () => {
+    const s = server({ ...none, stopLoss: [{ lossPct: 20, percent: 25 }, { lossPct: 40, percent: 100 }] });
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'gone' : 'ok');
+    s.chain.price = 700n; s.at(2_000); void s.engine.tick(); await sleep(5); // −30 %: the −20 % level's sell is stuck
+    s.crash(); // the new process waits for that sell
+    const updatePosition = s.store.updatePosition.bind(s.store);
+    s.store.updatePosition = (id, patch) => { if (patch.exitOwed) throw new Error('disk I/O error'); return updatePosition(id, patch); };
+    s.chain.price = 500n; s.at(5_000);
+    await expect(s.engine.tick()).resolves.toBeUndefined(); // the −40 % level comes due while it waits: held, its write fails
+    await s.engine.idle();
+    s.store.updatePosition = updatePosition;
+    s.chain.failed.add('S1'); // that sell did not land
+    s.at(6_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([250_000n, 250_000n, 750_000n]); // held, then sold once it was settled
+  });
+
+  it('a sell that failed, whose row cannot be deleted, does not hold its position: Sell now sells everything, and the row goes on a later pass', async () => {
+    const s = server({ ...none, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 600, percent: 100 }] });
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'fail' : 'ok');
+    const deleteSellOut = s.store.deleteSellOut.bind(s.store);
+    let broken = true;
+    s.store.deleteSellOut = (sig) => { if (broken) { broken = false; throw new Error('disk I/O error'); } return deleteSellOut(sig); };
+    s.at(2_000); await s.tick(); // the +2 s sell fails; its row cannot be deleted; the step's retry sells
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 400_000n]);
+    s.chain.rpcDown = true; // nothing can be read from the chain now
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(0); // the failed sell's row went (it used to be taken for one on its way)
+    expect(await s.engine.sellNow(s.uid, 1)).toEqual({ ok: true });
+    await s.engine.idle();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 400_000n, 600_000n]); // all that was left, not what that row kept back
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n });
+  });
+
+  it('the settling pass goes on to the next buy though one buy\'s write fails', async () => {
+    const s = server(none);
+    const a = s.store.insertPosition({ userId: s.uid, copyId: 1, mint: MINT, mode: 'paper', leaderSig: 'L1', sell: validateSettings({ leader: LEADER, sell: none }).sell, copyName: 'c', leader: LEADER, now: 1_000_000 });
+    const b = s.store.insertPosition({ userId: s.uid, copyId: 1, mint: OTHER, mode: 'paper', leaderSig: 'L2', sell: validateSettings({ leader: LEADER, sell: none }).sell, copyName: 'c', leader: LEADER, now: 1_000_000 });
+    const updatePosition = s.store.updatePosition.bind(s.store);
+    let broken = true;
+    s.store.updatePosition = (id, patch) => { if (broken && id === a) { broken = false; throw new Error('disk I/O error'); } return updatePosition(id, patch); };
+    await expect(s.engine.restore()).resolves.toBeUndefined();
+    expect(s.store.position(b)!.status).toBe('failed'); // never sent: failed (it used to stop the pass at the first)
+    await s.engine.restore();
+    expect(s.store.position(a)!.status).toBe('failed');
   });
 });
