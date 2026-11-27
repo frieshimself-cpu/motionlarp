@@ -355,7 +355,8 @@ async function adminEverything(env, parts) {
       const back = await alicePage.locator('.topbar').waitFor({ timeout: 6000 }).then(() => true, () => false);
       const st = back ? await ui.state(alicePage) : null;
       const wantTrades = X.forUser(manifest, 'alice').modes.live.trades;
-      book.ok('Enable: the user gets back in and finds their positions and history', back && st.positions.length === 4 && st.pnl.live.trades === wantTrades, st && { positions: st.positions.length, trades: st.pnl.live.trades, wantTrades });
+      const wantOpen = X.forUser(manifest, 'alice').open.length;
+      book.ok('Enable: the user gets back in and finds their positions and history', back && st.positions.length === wantOpen && st.pnl.live.trades === wantTrades, st && { positions: st.positions.length, wantOpen, trades: st.pnl.live.trades, wantTrades });
     }
 
     // Two switches for one thing: a revoked key whose user is then enabled from the Users table. Refused, with how to

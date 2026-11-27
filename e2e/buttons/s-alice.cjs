@@ -9,6 +9,20 @@ const signWord = (n) => (n > 0 ? '+' : n < 0 ? '−' : '');
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '');
 const sum = (xs) => xs.reduce((a, b) => a + b, 0n);
 
+/** The elements of a card (found by its title) drawn outside it or outside the screen, measured inside the page. */
+const SPILL = `((title, sel, screenWidth) => {
+  const card = [...document.querySelectorAll('.card')].find((c) => { const h = c.querySelector('.card-head h2'); return !!h && h.childNodes.length > 0 && h.childNodes[0].textContent.trim() === title; });
+  if (!card) return null;
+  const c = card.getBoundingClientRect();
+  const out = [];
+  for (const el of card.querySelectorAll(sel)) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    if (r.right > Math.min(c.right, screenWidth) + 1 || r.left < Math.max(c.left, 0) - 1) out.push({ el: el.tagName.toLowerCase() + (typeof el.className === 'string' && el.className ? '.' + el.className.trim().split(/\\s+/).join('.') : ''), text: (el.innerText || '').replace(/\\s+/g, ' ').slice(0, 50), left: Math.round(r.left), right: Math.round(r.right) });
+  }
+  return { card: [Math.round(c.left), Math.round(c.right)], screen: screenWidth, out: out.slice(0, 6), outside: out.length };
+})`;
+
 /** One printed amount against the exact lamports: the number, its sign, and (when asked) its colour. */
 function amount(text, lamports, d, colour) {
   const exact = solNum(lamports);
@@ -98,6 +112,15 @@ async function checkDashboard(env, page, who, opts = {}) {
     } else {
       book.ok(`${P}: copy "${s.name}": no ${otherKind} part when it has no ${otherKind} position`, m.length > 0 && m[4] === undefined, row.meta[1]);
     }
+  }
+
+  // ── nothing runs out of its card or off the screen (second review) ──
+  // A copy's sell-rule tags (ten timed steps ran from x 105 to 949 in a Copies card ending at 761 on a 1280 px screen;
+  // the Scharo preset's tag made a 320 to 375 px phone's page 378 px wide), and an open position of a copy whose
+  // nickname is 40 characters without a space (514 px on a 390 px phone).
+  for (const [title, sel] of [['Copies', '.row *'], ['Open positions', '.pos *']]) {
+    const s = await page.evaluate(`${SPILL}(${JSON.stringify(title)}, ${JSON.stringify(sel)}, ${env.vp.viewport.width})`);
+    book.ok(`${P}: everything in the ${title} card stays inside the card and on the screen`, !!s && s.outside === 0, s);
   }
 
   // ── open positions ──
@@ -291,6 +314,11 @@ async function alice(env) {
       await ui.openEdit(page, c.id);
       const ed = await ui.readEditor(page);
       book.eq(`alice: copy "${c.settings.name}" in the editor shows exactly its saved values`, ui.editorVsSettings(ed, c.settings), []);
+      // The editor fits the screen, its ✕, Cancel and Save on it (second review: at 320 px, over a dashboard widened by
+      // the Scharo preset's tag, the ✕ was mostly off the screen and Cancel could not be clicked).
+      await screenCheck(page, book, `alice-editor-${c.key}`);
+      const reach = await page.evaluate((w) => ['#cancel-x', '#cancel', '#copy-form button[type=submit]'].map((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { control: s, x: [Math.round(r.left), Math.round(r.right)], onScreen: r.left >= 0 && r.right <= w }; }), env.vp.viewport.width);
+      book.ok(`alice: the editor of "${c.settings.name}": ✕, Cancel and Save are on the screen`, reach.every((x) => x.onScreen), reach);
       await ui.hideToast(page);
       await ui.submitEditor(page);
       const t = await ui.toast(page);
