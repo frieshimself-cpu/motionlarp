@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 628 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 632 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -876,6 +876,28 @@ tolerance); the default mix carries 6 % lag seeds and 4 % slow periods, so it ca
 seed counts; outage, partial, slowread, dbfault and diskfull test what their names say and read the chain from
 up-to-date nodes only. The fake executor rebuilds `confirm.ts`'s loop around the shared rule: a change to `confirm.ts`
 itself (its order of reads, its "processed" rule) is guarded by `tests/send.test.ts`, not by the fuzzer.
+
+**A buy booked twice by the settling pass, found by the fuzzer's second round** (66a5005, live since 21:50 UTC after a
+1.7 s gap). The pass took its list of opening buys first and settled each from that old row after reads that can take
+seconds: a buy of this process booked by its own step while the pass waited (a restart, then a buy within seconds and a
+slow read in the first pass) was booked again (two buy fills, its cost doubled in the books, its timed exit started
+again), or, if the list was taken before it was signed, marked failed as never sent (its checker's case: its coins never
+sold). The pass now reads each buy again at its turn, and once more after its reads. Tests in `tests/restarts.test.ts`
+fail on the code before; also pinned: the tip is read before a buy's status, and two passes at once book a buy once.
+The fuzzer's second round (merged at a344e18): the fake executor gives up at 150 s like the real one (later answers are
+"outcome unknown", the chain lands or fails the trade afterwards); forks of 1 to 11 blocks, weighting whole leader
+windows (deeper is the margin's accepted limit, as 31 blocks behind is the lag's); buys carry their short blockhash
+and are settled by the tip rules, their verdicts judged by the chain; the executor's own "expired" is decided from a
+status read of the model's nodes by the shared rule; a false flag fixed (a "same share" sell that landed after a crash
+and was booked from its own transaction is marked done). On the code that is live (a344e18): default 0 of 2,000, lag 0 of
+3,000, slow 0 of 2,000, crash, ghost, outage and partial 0 of 1,500 each; all saved cases pass (case 22 is the double
+booking); the self-test catches every planted fault. dbfault 2, diskfull 2 and slowread 3 of 1,500: the known quoted
+coin count case (two positions in one coin, coins beyond a quote counted on the wrong one: every coin sold and its SOL
+booked, the split between the two positions off; seeds 580, 1411, 1060, 15, 205, 944). Still guarded by the unit tests
+only, not by the fuzzer: a change to `src/tx/confirm.ts`, the read order (status before tip), the last block
+(LAST_BLOCK_PAST_VALID, which the model reads too) and the 30-block rule. Not modelled yet (its checker): an RPC outage
+also hides a trade from the executor's own polls; a buy's blockhash is longer on a slow chain or just after a start than
+the 40 to 59 blocks the model gives it. `npm test`: 632 tests.
 
 ## Not yet verified
 
