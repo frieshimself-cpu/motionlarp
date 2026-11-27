@@ -701,6 +701,47 @@ rule, 313 by the 30-block rule, none by the 180 s fallback (it needs the tip unr
 self-test plants two weaker rules (dropped as soon as the chain is past the sell's last block; believed from a node
 behind the tip) and catches both: 21 and 7 of 150 lag seeds, 0 without.
 
+**The fuzzer's chain, as unkind as the real one** (3b5e8f8; e2e/fuzz only, nothing in src/ changed). Two reviewers of
+the model above found it kinder than the chain: its reads answered at once, so it could not tell whether the engine
+reads the tip before a sell's status (what the drop rule rests on); its heights were its clock, so a blockhash's 151
+blocks always lasted 60.4 s and no time limit of the engine could ever be wrong; a copy of the old 120 s rule, not the
+engine, ended a sell of unknown outcome; its nodes disagreed in one way only. Now every read of the tip and of a sell's
+status takes time (mostly tens of ms, sometimes up to 8.5 s: the main link's 4 s limit, then the backup link) and is
+answered from the chain as it is when the answer arrives. The clock is the 400 ms slot and the height grows only on
+slots that have a block; slow periods (a block every 0.6 to 1.5 s for minutes, so a blockhash lives up to nearly four)
+come in a new profile, `slow` (lag on a slow chain, half the restarts), in a fifth of the `lag` seeds and in 4 % of the
+rest of the default mix, drawn on their own (with them and lag's new nodes taken out, 24,000 seeds of the default mix
+and of each profile generate byte for byte as before; a frozen tape replays byte for byte). A block is confirmed 400 ms
+after it is produced: an up-to-date status node answers from its processed bank, ahead of the tip read before it; a node
+behind on its confirmations has the sale's block unconfirmed, and the fake executor throws "seen in a block, not
+confirmed yet" as the real one does; a status node may be on a 1-3 slot minority fork (it has not seen the main fork's
+last blocks and says "not found" at a slot at least the tip's: what the 10-block margin is for), up to 31 blocks behind
+(the 30-block rule's exact tolerance; a node further behind is that rule's accepted limit; WELL_PAST_BLOCKS cut to 24 in
+a scratch copy shows in 6 of 2,000 lag seeds), or answer without a slot; a tip node may be a little behind; the nodes
+keep their ways in the quiet phase. The harness judges the engine's own verdicts by the chain: a sell left behind that it
+drops, or a sell of unknown outcome it gives up, that had landed or lands later is M3; one that could still land (the
+last block it can land in not yet produced) is NL1, new. The self-test plants four more weaker rules, each caught and
+never without the fault: the status read before the tip (handed the tip as it is 15 blocks later) 16 of 400 lag seeds;
+no margin 11 of 600 (only with every status read from a fork node, on a chain at 1.5 s a block); a slotless "not found"
+believed 23 of 300; a sell of unknown outcome given up at 120 s whatever the chain 23 of 300 ghost seeds on a slow chain;
+the two earlier ones 14 of 150 and 18 of 300. Seeds flagged on this code: default mix 0 of 2,000; crash, ghost and outage
+0 of 1,500 each; all saved cases pass; lag 9 of 3,000 and slow 71 of 2,000, every one the engine weakness below. In the
+lag run 3,786 sells were left behind (2,473 had landed, 2,470 booked; dropped 125 by the 10-block rule, 487 by the
+30-block rule, 12 by a time limit; 692 had failed on chain) and 459 sells of unknown outcome were settled (351 landed;
+107 taken as never landed by the two rules, 1 by a time limit); of 30,161 status reads 20,767 came from a node behind,
+1,175 from a fork, 304 were answered "not confirmed yet", and 2,856 reads took 4 s or more. The engine before e6575c1 on
+the same model: lag 67 of 3,000, slow 474 of 2,000, default 2 of 2,000, the first flag of all but one of those seeds a
+verdict of its fixed 120 s or 180 s (slow seed 142: a
+sell of unknown outcome given up 127 s after it was sent, the chain 44 blocks short of its last block; slow seed 5: a
+sell left behind dropped at 180 s, landed 8 s later and never booked). **Found on this code, not fixed:** when the tip
+read before a status read fails, `notLanding` (src/engine/engine.ts) falls back to the fixed time although the sell's
+last valid height is known: a sell left behind is dropped once it is 180 s old, a sell of unknown outcome given up at
+120 s, which on a slow chain can be before its last block (lag seed 512: dropped 18 blocks short of it), and with no tip
+the word of a node far behind is taken (slow seed 50: a sale that had landed, dropped 194 s after it was sent because a
+node 30 blocks behind had not seen it, never booked, its SOL missing from the books and the profit). A change to the drop
+rules needs a `--profile lag` and a `--profile slow` run: in the default mix lag is 6 % of the seeds and slow periods
+4 %, so the default mix alone catches such a change only at large seed counts.
+
 ## Not yet verified
 
 - A crash or a restart with a real sell out on the real server: the settling of sells written down before a crash is
