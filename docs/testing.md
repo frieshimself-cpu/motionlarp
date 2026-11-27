@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 582 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 587 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -615,6 +615,14 @@ the speed of the hot paths) read the fixes above. Fixed from it, each with a tes
 - The dashboard loads while the database cannot be written: renewing a session (a write, once a day) that fails waits for
   a later refresh (GET /api/state answered 500 for every session a day old, so nothing could be seen during a full
   disk; tests/db-faults-http.test.ts).
+- Speed, from the speed reviewer's measurements (the copy's path from their trade heard to ours sent is 3.1 to 3.5 ms
+  offline, most of it building and signing): the store prepares each SQL statement once (the six statements a copy runs
+  before its buy took 143 to 223 microseconds; 50 to 62 prepared once); it never checkpoints its WAL inside a write
+  (SQLite's own checkpoint ran inside whichever write crossed 1,000 pages: about one write in a thousand stalled ~10 ms,
+  worst 25 to 46 ms, so about 1 % of copy buys on a real disk waited that long); the server checkpoints from a timer
+  every 5 s, skipped while a buy or a sell is under way (at most a minute), and at shutdown; a transaction waiting for
+  its confirmation is called expired one block sooner (a failed sell is retried about 0.5 s sooner), and a last look
+  from a node behind the tip is looked at again at the next poll, not ten polls later (about 3.4 s).
 
 The fuzzer on this code, seeds flagged: default mix 0 of 3,000; crash, ghost and diskfull 0 of 2,000 each; outage and
 partial 0 of 1,500 each; dbfault 1 of 2,000 (seed 1411, the known quoted coin count case); all saved cases pass; the
