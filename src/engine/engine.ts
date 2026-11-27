@@ -214,6 +214,9 @@ export class Engine {
   private readonly owedInMemory = new Set<string>();
   /** Their sells acted on while they could not be marked seen in the database (see onLeaderTrade). */
   private readonly seenInMemory = new Set<string>();
+  /** Sells of a position's queue whose outcome nobody could tell, being read from their own transaction, by position:
+   *  the queue waits for them (see sellNow). */
+  private readonly readingOutcome = new Map<number, number>();
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? Date.now;
@@ -915,6 +918,9 @@ export class Engine {
     if (p.status === 'closed') return { ok: true, note: CLOSED_JUST_BEFORE };
     if (p.status !== 'open') return { ok: false, error: 'no open position with that id' };
     if (this.stopped) return this.notSent(p, { reason: 'manual', percent: 100 });
+    // A sell of its queue whose outcome is unknown is being read (until the chain shows whether it landed: up to ten
+    // minutes should the chain not move): the press is answered at once and owed, and goes out right after it.
+    if (this.readingOutcome.has(positionId)) return this.owedBehindUnknown(p);
     // A click deserves more than one try: when the first fails (often because one of our own timed sells landed in
     // between and the amount was stale) it is tried again at once, and once more a moment later. Only the last
     // failure is shown.
@@ -932,6 +938,19 @@ export class Engine {
       }
     }
     return result;
+  }
+
+  /** Sell now pressed while a sell of the position's queue whose outcome is unknown is being read: answered at once,
+   *  and owed (oweExit) so that it goes out right after that sell, whatever became of it (it waited behind it, and the
+   *  page showed "Selling…" until the chain moved). */
+  private owedBehindUnknown(p: Position): { ok: true; note: string } {
+    const order: SellOrder = { reason: 'manual', percent: 100 };
+    // (an exit already owed, their exit or a stop loss level that sells everything, keeps its name: it sells it all)
+    if (!this.exitOwed.has(p.id)) this.exitOwed.set(p.id, order);
+    this.quietly('a Sell now owed', () => this.writeExitOwed(p, order));
+    const note = 'a sell of ours whose outcome is being read from the chain holds this position: yours goes out right after it, once the chain shows whether it landed (normally within a minute or two)';
+    this.quietly('a feed line', () => this.deps.store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `Sell of ${shortMint(p.mint)} (${p.copyName}) (you pressed Sell now): ${note}.`, mint: p.mint }));
+    return { ok: true, note: `${note[0]!.toUpperCase()}${note.slice(1)}.` };
   }
 
   /**
@@ -1114,7 +1133,14 @@ export class Engine {
         // Nobody could tell us whether it landed: settled from its own transaction first, its coins still reserved.
         if (!fill.ok && fill.uncertain) {
           this.unknownOutcomeLine(p, order, label);
-          fill = await this.settleUnknownSell(signature, owner, p.mint, sentAt, fill.error, signed);
+          this.readingOutcome.set(p.id, (this.readingOutcome.get(p.id) ?? 0) + 1);
+          try {
+            fill = await this.settleUnknownSell(signature, owner, p.mint, sentAt, fill.error, signed);
+          } finally {
+            const n = (this.readingOutcome.get(p.id) ?? 1) - 1;
+            if (n > 0) this.readingOutcome.set(p.id, n);
+            else this.readingOutcome.delete(p.id);
+          }
         }
         if (fill.ok) {
           // Booked while its coins are still reserved: the wallet is read first and the position after it, and from

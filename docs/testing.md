@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 622 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 623 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -706,6 +706,14 @@ timing (US1, B1, FE3; no money or token check failed: in the lag run 1,582 sells
 were booked, none dropped). With the harness taking a sell as settled exactly when the engine's rule does, from the
 highest tip the engine has read: default 0 of 2,000, lag 0 of 2,000, ghost 0 of 1,500, crash 0 of 1,500. Live since
 17:54 UTC (a gap of 1.7 s). `npm test`: 622 tests.
+
+That review's six findings were all confirmed by separate verifiers: the failed tip read (two reviewers found it) and the
+node behind the trade's last block are fixed above, the tip read once per pass too; the fuzzer's old 120 s timing is the
+harness, being reworked; and Sell now behind a sell of unknown outcome: a press while a sell of the position's queue has
+an unknown outcome now answers at once and is owed, going out right after that sell once the chain shows whether it
+landed (372fc55; it waited behind it, and the page showed "Selling…" until the chain moved, up to ten minutes should the
+chain stop). With the harness taking a sell as settled when the engine's rule does: default 0 of 2,000, lag 0 of 2,000,
+ghost 0 of 1,500, crash 0 of 1,500, outage 0 of 1,000, partial 0 of 1,000; all saved cases pass. `npm test`: 623 tests.
 
 **The browser suite on the last code of the day** (05c74a3 to ecbb282 as the sizes ran one after another, the later
 ones with the faster build): **0 failed checks at all seven sizes** (655 at 1280 px, 652 at each of 1024, 768, 412,
