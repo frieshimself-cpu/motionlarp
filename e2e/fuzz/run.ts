@@ -314,7 +314,8 @@ class Run {
           const q = c.kind === 'buy' && c.quotedTokens !== undefined;
           this.line(`market ${c.kind}#${c.id} exact SOL ${c.refined === 'null' ? 'could not be read' : `is ${c.exact}`}${q && c.refined !== 'null' ? `, exact coins ${c.tokens} (the quote said ${(c as BuyCall).quotedTokens})` : ''}${c.refineSeen ? '' : ' (nobody is listening any more)'}`);
           const tr = q && c.pid !== undefined ? this.pos.get(c.pid) : undefined;
-          if (tr?.quotedBuy && c.refined === 'exact' && c.refineSeen) tr.quotedBuy.refined = true;
+          // (with database faults the engine may fail to write it: there, it is in once its write is, see setFillExact)
+          if (tr?.quotedBuy && c.refined === 'exact' && c.refineSeen && !this.sc.db) tr.quotedBuy.refined = true;
         },
         problem: (code, kind, message) => this.problem(code, kind, message),
       };
@@ -799,15 +800,26 @@ class Run {
     const st0 = store as unknown as { deleteSellOut?: (sig: string) => void };
     if (typeof st0.deleteSellOut === 'function') {
       const deleteSellOut = st0.deleteSellOut.bind(store);
-      st0.deleteSellOut = (sig) => {
-        const outPid = () => Number((store.db.prepare('SELECT position_id FROM sells_out WHERE signature = ?').get(sig) as { position_id?: number } | undefined)?.position_id ?? NaN);
-        this.dbWrite('deleteSellOut', () => ({ pid: outPid(), what: `the sells_out row of ${sig}` }), () => store.hasSellOut(sig));
-        deleteSellOut(sig);
+      const settled = (sig: string, how: string) => {
         for (const tr of this.pos.values()) {
           for (const [inv, f] of tr.flying) {
-            if (f.orphan && f.call.signature === sig) { tr.flying.delete(inv); this.dirty.add(tr.pid); this.line(`sell#${f.call.id} p${tr.pid} (sent before the restart) is settled: no longer on its way`); }
+            if (f.orphan && f.call.signature === sig) { tr.flying.delete(inv); this.dirty.add(tr.pid); this.line(`sell#${f.call.id} p${tr.pid} (sent before the restart) is settled${how}: no longer on its way`); }
           }
         }
+      };
+      st0.deleteSellOut = (sig) => {
+        const outPid = () => Number((store.db.prepare('SELECT position_id FROM sells_out WHERE signature = ?').get(sig) as { position_id?: number } | undefined)?.position_id ?? NaN);
+        try {
+          this.dbWrite('deleteSellOut', () => ({ pid: outPid(), what: `the sells_out row of ${sig}` }), () => store.hasSellOut(sig));
+        } catch (err) {
+          // Outside a booking the engine deletes the row of a sell it knows did not land (it failed, or was dropped):
+          // when that delete fails, the engine remembers the sell is done, never waits for it again, and deletes the
+          // row on a later pass (Engine.failedRows). Inside a booking the rollback puts the harness's record back.
+          if (!this.tx) settled(sig, ' (its row could not be deleted: the engine knows it did not land)');
+          throw err;
+        }
+        deleteSellOut(sig);
+        settled(sig, '');
       };
     }
     const fillPid = (fillId: number) => Number((store.db.prepare('SELECT position_id FROM fills WHERE id = ?').get(fillId) as { position_id?: number } | undefined)?.position_id ?? NaN);

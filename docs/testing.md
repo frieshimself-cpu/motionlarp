@@ -564,6 +564,22 @@ that time of day). Such an amount is now shown with as many more decimals as it 
 millionth of a SOL it is "0", with no sign and no colour (tests/review-site-pages.test.ts); that check then passes.
 `npm test`: 550 tests.
 
+**The fuzzer makes the database fail** (two new profiles, outside the default mix so every earlier seed replays as
+before: `dbfault`, single writes failing at random, 1 in 8 to 1 in 100, a quarter of them "disk I/O error"; `diskfull`,
+up to four windows of 0.5 to 20 s in which every write fails while reads work; a failure inside a transaction, or of its
+COMMIT, undoes all of it, and the harness undoes its own record with it; the new invariant: every sale that landed is
+booked exactly once, on its own position, with the coins the chain sold). On the code before today's database fixes
+(49f9fd5) it flagged 701 of 2,000 seeds in `dbfault` and 320 of 2,000 in `diskfull`; it found what the reviewers had
+found, and more, each fixed with a test that fails on the code before: one copy's write that failed stopped their buy
+for the other copies; their sell was not sold for the other positions holding the coin when writing one of them down
+failed; a held order's write could fail the clock's tick; one failing write ended the settling pass; a sell known not
+to land whose row could not be deleted held its position for minutes (its rules waited, Sell now sold only part, the
+coin could not be bought again); a buy that landed but could not be booked waited for the 30 s pass and its exit then
+counted from the late booking (now: the 5 s pass, its timed sells counting from the buy). On this code: `dbfault`
+**1** of 2,000 (seed 1411, the known quoted coin count case: a failed write delayed the buy's exact count until a new
+position of the coin had opened), `diskfull` **0** of 2,000; default mix 0 of 3,000; all 22 saved cases pass; the
+self-test (now with a booking dropped and a sale booked twice) catches every planted fault.
+
 ## Not yet verified
 
 - A crash or a restart with a real sell out on the real server: the settling of sells written down before a crash is
