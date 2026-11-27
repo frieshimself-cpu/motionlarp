@@ -1706,7 +1706,10 @@ class Run {
       if (f.copyId !== undefined && f.copyId !== null) copies.add(f.copyId);
       if (f.pid !== undefined) pids.add(f.pid);
     }
-    return { threw, dropped: threw && fails.some((f) => f.method === 'markSeen'), copies, pids };
+    // The "seen" mark failing drops their buy (the engine returns: it could not write the buy down before sending it
+    // anyway). Their sell is acted on from memory (since 26e2fa6); an engine that threw there dropped it too.
+    const seenFailed = fails.some((f) => f.method === 'markSeen');
+    return { threw, dropped: seenFailed && (threw || t.side === 'buy'), copies, pids };
   }
 
   // ── restarts ──────────────────────────────────────────────────────────
