@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { CopySettings, SellSettings } from './engine/settings.js';
-import type { SellReason } from './engine/rules.js';
+import type { SellOrder, SellReason } from './engine/rules.js';
 
 export type PositionStatus = 'opening' | 'open' | 'closed' | 'failed';
 
@@ -58,6 +58,24 @@ export interface Fill {
   /** Platform fee carried by this fill (lamports). */
   feeLamports: bigint;
   createdAt: number;
+}
+
+/**
+ * A sell of ours, written down the moment it was signed, before it went out (as a buy's signature is: buy_sig). The
+ * row goes in the same step that books the sale, or when the sell is known to have failed. One that is still here
+ * after a crash, or after a restart while its outcome was unknown, is settled by the next process from its own
+ * transaction (Engine.restore).
+ */
+export interface SellOut {
+  signature: string;
+  positionId: number;
+  userId: number;
+  mint: string;
+  /** The order it was sent for (its rule, stage and share): it is booked as that order. */
+  order: SellOrder;
+  /** What it asked for. */
+  tokens: bigint;
+  sentAt: number;
 }
 
 export type EventKind = 'buy' | 'sell' | 'skip' | 'error' | 'info';
@@ -172,6 +190,15 @@ CREATE TABLE IF NOT EXISTS seen (
   key TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sells_out (
+  signature TEXT PRIMARY KEY,
+  position_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  mint TEXT NOT NULL,
+  sell_order TEXT NOT NULL,
+  tokens INTEGER NOT NULL,
+  sent_at INTEGER NOT NULL
+);
 `;
 
 type Row = Record<string, unknown>;
@@ -246,6 +273,31 @@ export class Store {
     const posCols = this.all('PRAGMA table_info(positions)').map((r) => String(r.name));
     if (!posCols.includes('decimals')) this.db.exec('ALTER TABLE positions ADD COLUMN decimals INTEGER NOT NULL DEFAULT 6');
     if (!posCols.includes('exit_owed')) this.db.exec('ALTER TABLE positions ADD COLUMN exit_owed TEXT');
+    // (sells_out, added 27 Nov 2026, is created by SCHEMA above in a database that does not have it yet)
+  }
+
+  private txDepth = 0;
+  /**
+   * Runs `fn` as one transaction: what it writes reaches the disk together or not at all, so a crash cannot leave half
+   * of a booking (the position moved but no fill, or a sale booked while it is still written down as out). A call
+   * inside another joins it.
+   */
+  atomic<T>(fn: () => T): T {
+    if (this.txDepth > 0) return fn();
+    this.db.exec('BEGIN IMMEDIATE');
+    this.txDepth = 1;
+    let done = false;
+    try {
+      const out = fn();
+      done = true;
+      return out;
+    } finally {
+      this.txDepth = 0;
+      if (done) this.db.exec('COMMIT');
+      else {
+        try { this.db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+      }
+    }
   }
 
   private all(sql: string, ...params: unknown[]): Row[] {
@@ -540,6 +592,20 @@ export class Store {
     else if (tokens === undefined) this.run('UPDATE fills SET lamports = ?, exact_pending = 0 WHERE id = ?', lamports, fillId);
     else this.run('UPDATE fills SET lamports = ?, tokens = ?, exact_pending = 0 WHERE id = ?', lamports, tokens, fillId);
   }
+  // ── sells written down before they go out (see SellOut) ─────────────
+  insertSellOut(s: SellOut): void {
+    this.run('INSERT OR REPLACE INTO sells_out (signature, position_id, user_id, mint, sell_order, tokens, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?)', s.signature, s.positionId, s.userId, s.mint, JSON.stringify(s.order), s.tokens, s.sentAt);
+  }
+  sellsOut(): SellOut[] {
+    return this.all('SELECT * FROM sells_out ORDER BY sent_at, signature').map((r) => ({
+      signature: String(r.signature), positionId: num(r.position_id), userId: num(r.user_id), mint: String(r.mint),
+      order: JSON.parse(String(r.sell_order)) as SellOrder, tokens: big(r.tokens), sentAt: num(r.sent_at),
+    }));
+  }
+  deleteSellOut(signature: string): void {
+    this.run('DELETE FROM sells_out WHERE signature = ?', signature);
+  }
+
   /** Platform fees a user has paid: real ones, and the ones test mode only pretended to. */
   userFees(userId: number): { live: bigint; test: bigint } {
     const r = this.get('SELECT COALESCE(SUM(CASE WHEN simulated = 0 THEN fee_lamports ELSE 0 END), 0) AS live, COALESCE(SUM(CASE WHEN simulated = 1 THEN fee_lamports ELSE 0 END), 0) AS test FROM fills WHERE user_id = ?', userId);

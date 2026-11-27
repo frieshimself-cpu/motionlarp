@@ -1,6 +1,9 @@
 // Restarts, shutdowns and crashes while sells are under way (the timing fuzzer's findings of 27 Nov 2026).
 // An update restarts the server (src/server.ts shutdown: stop the engine, wait for what is under way, exit); a crash
 // (kill -9, out of memory) exits at once. Each test plays the old process, then a new Engine on the same database.
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Keypair } from '@solana/web3.js';
 import { Engine, type EngineDeps } from '../src/engine/engine.js';
@@ -246,5 +249,168 @@ describe('a stopped engine starts no sell (fuzzer cases 20 and 21)', () => {
     read.open(); await s.engine.idle();
     expect(s.chain.buys).toBe(0);
     expect(s.open()).toHaveLength(0);
+  });
+});
+
+describe('a sell is written down before it is sent; the next process settles one this one never heard of (fuzzer case 11)', () => {
+  const bag = { ...none, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 4, percent: 30 }, { afterSec: 6, percent: 100 }] };
+
+  it('a crash while a timed step\'s sell is out and it landed: the next process books it from its own transaction, once', async () => {
+    const s = server(bag);
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'lost-answer' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(5);
+    expect(s.chain.held).toBe(600_000n); // it landed; the process never heard
+    expect(s.store.sellsOut()).toHaveLength(1); // written down before it was sent
+    s.crash();
+    s.at(2_500); await s.tick(); // the step is due, its sell is still out: it does not go again
+    expect(s.chain.sent).toHaveLength(1);
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.position()).toMatchObject({ status: 'open', tokensHeld: 600_000n, proceedsLamports: 400_000_000n, firedTimed: [0] });
+    expect(s.store.sellsOut()).toHaveLength(0);
+    expect(s.store.fills(1).filter((f) => f.side === 'sell').map((f) => f.signature)).toEqual(['S1']);
+    s.at(4_000); await s.tick(); s.at(6_000); await s.tick();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 300_000n, 300_000n]);
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n, proceedsLamports: SOL });
+  });
+
+  it('one that failed on chain is dropped at once and its step goes out again', async () => {
+    const s = server({ ...none, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 600, percent: 100 }] });
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'gone' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(5);
+    s.crash();
+    s.chain.failed.add('S1'); // the chain says it failed
+    s.at(3_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(0);
+    await s.tick();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 400_000n]);
+    expect(s.position()).toMatchObject({ tokensHeld: 600_000n, firedTimed: [0] });
+  });
+
+  it('one not found is kept while it can still land (its coin is not bought again meanwhile), then dropped', async () => {
+    const s = server({ ...none, timedOf: 'bag', timed: [{ afterSec: 2, percent: 40 }, { afterSec: 4, percent: 100 }] });
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'gone' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(5); // the +2 s sell: stuck
+    s.at(4_000); await s.engine.tick(); await sleep(5); // the last step sells all the wallet holds: closed, the stuck sell still out
+    expect(s.position().status).toBe('closed');
+    s.crash();
+    s.at(5_000); await s.engine.restore(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(1); // not found yet: it may still land
+    await s.buy(); // they buy the coin again: not copied while that sell can land (it would sell the new coins)
+    expect(s.open()).toHaveLength(0);
+    expect(s.feed().some((m) => /a sell of this coin is still on its way/.test(m))).toBe(true);
+    s.at(2_000 + 181_000); await s.engine.restore(); await s.engine.idle(); // three minutes after it was sent
+    expect(s.store.sellsOut()).toHaveLength(0);
+    await s.buy();
+    expect(s.open()).toHaveLength(1);
+  });
+
+  it('a restart while a sell\'s outcome is unknown: nothing else goes out, the row stays, the next process settles it first', async () => {
+    const s = server({ ...none, timed: [{ afterSec: 2, percent: 25 }, { afterSec: 4, percent: 50 }, { afterSec: 60, percent: 100 }] });
+    await s.buy();
+    s.chain.rpcDown = true; // its outcome cannot be read
+    s.chain.plan = (n) => (n === 1 ? 'unknown-landed' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(10);
+    s.at(4_000); void s.engine.tick(); await sleep(5); // the +4 s step waits behind it
+    await s.restart();
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([250_000n]); // the stopping engine used to send the +4 s step
+    expect(s.store.sellsOut()).toHaveLength(1);
+    expect(s.feed().some((m) => /failed/.test(m))).toBe(false); // not a failure: it may well have landed
+    s.chain.rpcDown = false;
+    s.at(5_000); await s.tick(); // its step cannot go again while it is unsettled
+    expect(s.chain.sent).toHaveLength(1);
+    await s.engine.restore(); await s.engine.idle(); // it landed: booked from its own transaction
+    expect(s.position()).toMatchObject({ tokensHeld: 750_000n, proceedsLamports: 250_000_000n, firedTimed: [0] });
+    await s.tick(); // the +4 s step: half of what is left
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([250_000n, 375_000n]);
+  });
+
+  it('killed after the sell was answered, while the wallet was read: the next process books it', async () => {
+    const s = server({ ...none, mirror: { enabled: true, mode: 'exit' } });
+    await s.buy();
+    s.chain.plan = () => { s.chain.balanceHold = new Promise(() => undefined); return 'ok'; }; // the read after it never ends
+    void s.their('sell'); await sleep(5);
+    expect(s.chain.held).toBe(0n);
+    s.crash();
+    s.chain.balanceHold = null;
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n, proceedsLamports: SOL });
+    expect(s.chain.sent).toHaveLength(1);
+  });
+
+  it('Sell now while a sell from before the restart is not settled: it sells what is free, the rest is booked when that one is', async () => {
+    const s = server(bag);
+    await s.buy();
+    s.chain.plan = (n) => (n === 1 ? 'lost-answer' : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(5);
+    s.crash();
+    const r = await s.engine.sellNow(s.uid, 1); await s.engine.idle();
+    expect(r.ok).toBe(true);
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([400_000n, 600_000n]);
+    expect(s.position()).toMatchObject({ status: 'open', tokensHeld: 400_000n }); // the 400,000 of the sell from before
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.position()).toMatchObject({ status: 'closed', tokensHeld: 0n, proceedsLamports: SOL });
+  });
+
+  it('an error while a sale that landed is booked: nothing is half booked, it is not sold again, the safety pass books it', async () => {
+    const s = server(bag);
+    await s.buy();
+    const insertFill = s.store.insertFill.bind(s.store);
+    let broken = true;
+    s.store.insertFill = (f) => { if (broken && f.side === 'sell') { broken = false; throw new Error('disk I/O error'); } return insertFill(f); };
+    s.at(2_000); await s.tick(); // the +2 s sell lands; its booking fails
+    expect(s.chain.sent).toHaveLength(1);
+    expect(s.position()).toMatchObject({ tokensHeld: 1_000_000n, proceedsLamports: 0n, firedTimed: [] }); // all or nothing
+    s.at(2_500); await s.tick();
+    expect(s.chain.sent).toHaveLength(1); // not sold a second time: it landed
+    await s.engine.restore(); await s.engine.idle();
+    expect(s.position()).toMatchObject({ tokensHeld: 600_000n, proceedsLamports: 400_000_000n, firedTimed: [0] });
+    expect(s.store.sellsOut()).toHaveLength(0);
+  });
+
+  it('this process\'s own sells are not settled by the safety pass while it waits for them', async () => {
+    const s = server(bag);
+    await s.buy();
+    const step = gate();
+    s.chain.plan = (n) => (n === 1 ? step.p.then(() => 'ok' as const) : 'ok');
+    s.at(2_000); void s.engine.tick(); await sleep(5);
+    await s.engine.restore();
+    expect(s.chain.settled).toEqual([]);
+    step.open(); await s.engine.idle();
+    expect(s.store.sellsOut()).toHaveLength(0);
+    expect(s.position()).toMatchObject({ tokensHeld: 600_000n, proceedsLamports: 400_000_000n });
+  });
+
+  it('nothing stays written down after sells that were booked or failed, and test sells are never written down', async () => {
+    const s = server(bag);
+    await s.buy();
+    s.chain.plan = (n) => (n === 2 ? 'fail' : 'ok');
+    s.at(2_000); await s.tick(); s.at(4_000); await s.tick(); s.at(6_000); await s.tick();
+    expect(s.position().status).toBe('closed');
+    expect(s.store.sellsOut()).toHaveLength(0);
+    const t = server(bag);
+    t.chain.test = true;
+    await t.buy();
+    t.chain.plan = () => 'gone';
+    t.at(2_000); void t.engine.tick(); await sleep(5);
+    expect(t.chain.sent).toHaveLength(1);
+    expect(t.store.sellsOut()).toHaveLength(0);
+  });
+});
+
+describe('databases written by earlier versions', () => {
+  it('a database without the table of sells out opens and gets it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ml-store-'));
+    const path = join(dir, 'old.db');
+    const first = new Store(path);
+    first.db.exec('DROP TABLE sells_out');
+    first.close();
+    const again = new Store(path);
+    expect(again.sellsOut()).toEqual([]);
+    again.insertSellOut({ signature: 'S', positionId: 1, userId: 1, mint: MINT, order: { reason: 'timed', percent: 40, stage: 0, basis: 'bag' }, tokens: 5n, sentAt: 7 });
+    expect(again.sellsOut()).toEqual([{ signature: 'S', positionId: 1, userId: 1, mint: MINT, order: { reason: 'timed', percent: 40, stage: 0, basis: 'bag' }, tokens: 5n, sentAt: 7 }]);
+    again.close();
   });
 });

@@ -61,6 +61,10 @@ interface Flying {
   key: string; kind: 'bag' | 'queue'; tokens: bigint; call: SellCall;
   /** The engine has been told it sold. Its coins stay reserved until the sale is booked (the wallet is read first). */
   answered?: boolean;
+  /** A real sell of an earlier engine whose outcome that engine never booked (it crashed, was cut off, or stopped
+   *  while the outcome was unknown). It was written down before it was sent (sells_out): the new engine treats it as on
+   *  its way until it has settled it from its own transaction (the row is then deleted). */
+  orphan?: boolean;
 }
 interface Track {
   pid: number; userId: number; copyId: number; mint: string; leader: string; sell: SellSettings; leaderSig: string; createdAt: number;
@@ -330,7 +334,18 @@ class Run {
       ...(sc.retry === 'fast' ? { fastRetryMs: [0, 100, 100, 200, 200, 400], slowRetryMs: 2_000 } : {}),
     });
     this.instrument(this.engine, gen);
-    for (const t of this.pos.values()) { t.bagActive.clear(); t.invoked.clear(); t.queueFlying = 0; t.queueActive = 0; t.reading = 0; t.fullExitSold.clear(); t.flying.clear(); t.failed.clear(); t.overAsk.clear(); t.errorLines.clear(); }
+    for (const t of this.pos.values()) {
+      t.bagActive.clear(); t.invoked.clear(); t.queueFlying = 0; t.queueActive = 0; t.reading = 0; t.fullExitSold.clear(); t.failed.clear(); t.overAsk.clear(); t.errorLines.clear();
+      // Stop loss levels are checked again after a restart (a level whose sell the stopping engine did not send fires
+      // if the price is still past it): what is due is counted afresh from here.
+      t.stopDue.clear();
+      // The old engine's real sells it never booked stay on their way for the new one (it found them written down);
+      // anything else it had out is gone with it (a test sell cut off was never sent anywhere).
+      for (const [inv, f] of t.flying) {
+        if (f.call.live && f.call.signature) f.orphan = true;
+        else t.flying.delete(inv);
+      }
+    }
     // src/server.ts: restore() 3 s after the start, then restore() + reconcile() every 30 s.
     const epoch = ++this.safetyEpoch;
     const engine = this.engine;
@@ -468,6 +483,20 @@ class Run {
       }
       return id;
     };
+    // A sell written down before it was sent leaves the list when the engine has booked it or knows it failed: an
+    // earlier engine's sell is on its way for the new one until then.
+    const st0 = store as unknown as { deleteSellOut?: (sig: string) => void };
+    if (typeof st0.deleteSellOut === 'function') {
+      const deleteSellOut = st0.deleteSellOut.bind(store);
+      st0.deleteSellOut = (sig) => {
+        deleteSellOut(sig);
+        for (const tr of this.pos.values()) {
+          for (const [inv, f] of tr.flying) {
+            if (f.orphan && f.call.signature === sig) { tr.flying.delete(inv); this.dirty.add(tr.pid); this.line(`sell#${f.call.id} p${tr.pid} (sent before the restart) is settled: no longer on its way`); }
+          }
+        }
+      };
+    }
     store.updateFillLamports = (fillId, lam) => {
       orig.updateFillLamports(fillId, lam);
       this.storeOps++;
@@ -674,7 +703,7 @@ class Run {
       // A sell whose outcome is unknown must be settled before anything else is sold (its coins stay reserved): an
       // ask that only fits when that sell is ignored has its own name.
       let unsettled = 0n;
-      for (const [inv, f] of tr.flying) if (inv !== ctx.inv && f.call.uncertain && !f.answered) unsettled += f.tokens;
+      for (const [inv, f] of tr.flying) if (inv !== ctx.inv && (f.call.uncertain || f.orphan) && !f.answered) unsettled += f.tokens;
       if (unsettled > 0n) this.problem('US1', 'sold-on-before-a-sell-of-unknown-outcome-was-settled', `p${p.id} ${orderText(order)} asked ${c.asked} while sell(s) of ${unsettled} tokens with an unknown outcome were not settled yet (the rule leaves ${expect} to ask for)`);
       else this.problem('AM1', `ask:${kind}`, `p${p.id} ${orderText(order)} asked ${c.asked}; the rule is ${rule} = ${expect}`);
     }
@@ -724,6 +753,22 @@ class Run {
     const ctx = c.ctx;
     const tr = c.pid !== undefined ? this.pos.get(c.pid) : undefined;
     this.line(`exec sell#${c.id} p${c.pid ?? '?'} read again from its own transaction: ${c.landedAt !== undefined ? `it landed (sold ${c.sold} for ${c.exact})` : c.chainFailed ? 'it failed' : final ? 'never found: it did not land' : 'not found yet'}`);
+    // A sell of an earlier engine that the new one settles: landed, it is booked now (once: a step sold again
+    // meanwhile is DF1); it stays on its way until the engine deletes its row.
+    const orphan = tr ? [...tr.flying.values()].find((f) => f.orphan && f.call === c) : undefined;
+    if (orphan) {
+      if (c.landedAt !== undefined && !orphan.answered && tr && ctx?.order) {
+        orphan.answered = true;
+        const o = ctx.order;
+        if ((c.sold ?? 0n) > 0n && (o.reason === 'timed' || o.reason === 'stop_loss' || o.reason === 'dead_coin') && !o.everything) {
+          const k = okey(o);
+          const hit = tr.success.get(k);
+          if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
+          else { hit.n++; if (!hit.firstPartial) this.problem('DF1', `fired-twice:${orderKind(ctx, o)}`, `p${tr.pid} ${orderText(o)} sold a second time (sell#${c.id}, ${c.sold} tokens, sent before the restart)`); }
+        }
+      }
+      return;
+    }
     // (a sell the engine was already told about is read again only for its exact figures: nothing is settled)
     if (!c.uncertain) return;
     if (!tr || !ctx || c.gen !== this.gen || !final) return;
@@ -765,7 +810,9 @@ class Run {
       const sold = !!c.ok && !c.severed && mine?.call === c;
       if (sold) mine!.answered = true;
       queueMicrotask(() => {
-        if (!sold && tr.flying.get(ctx.inv)?.call === c) tr.flying.delete(ctx.inv);
+        // (a real sell whose answer the engine never got, because it was gone, is still out: written down, it is
+        // settled by the next engine)
+        if (!sold && !(c.severed && c.live && c.signature) && tr.flying.get(ctx.inv)?.call === c) tr.flying.delete(ctx.inv);
         if (ctx.kind !== 'bag') tr.queueFlying = Math.max(0, tr.queueFlying - 1);
       });
     }
@@ -870,7 +917,9 @@ class Run {
       }
       seen.set(k, p.id);
       // Stop loss levels the last price check passed (the engine works from the same stored numbers).
-      if (p.status === 'open' && p.refValueLamports !== null && p.costLamports > 0n) {
+      // (not while it waits for a sell from before a restart: its rules wait, and then see the price of that moment)
+      const waiting = [...(this.pos.get(p.id)?.flying.values() ?? [])].some((f) => f.orphan);
+      if (p.status === 'open' && p.refValueLamports !== null && p.costLamports > 0n && !waiting) {
         const loss = (1 - Number(p.refValueLamports) / Number(p.costLamports)) * 100;
         const tr = this.pos.get(p.id);
         p.sell.stopLoss.forEach((l, i) => { if (loss >= l.lossPct && !p.firedStop.includes(i)) tr?.stopDue.add(i); });
@@ -938,6 +987,9 @@ class Run {
       if (!p || !tr || p.status !== 'open' || p.firedTimed.includes(d.stage)) continue;
       const t = p.sell.timed[d.stage]!;
       const late = ((now - (p.openedAt + t.afterSec * 1000)) / 1000).toFixed(3);
+      // A position with a sell from before a restart that is not settled yet sends nothing until it is (US1): its due
+      // steps go then.
+      if ([...tr.flying.values()].some((f) => f.orphan)) { this.note('timed-step-waits-for-a-sell-sent-before-the-restart'); continue; }
       if (d.bag) {
         if ((tr.bagActive.get(d.stage) ?? 0) === 0) this.problem('TL1', 'timed-step-not-started:bag', `p${p.id} step ${d.stage} (+${t.afterSec}s) is ${late}s overdue at this tick and no attempt is running`);
       } else if (!tr.invoked.has(`timed:${d.stage}:`) && !d.busy && tr.queueActive === 0) {
@@ -1281,7 +1333,7 @@ class Run {
 
   private idleInside(): boolean {
     const e = this.engine as unknown as Record<string, { size?: number } | undefined>;
-    return ['inFlight', 'queues', 'loose'].every((n) => !e[n]?.size);
+    return ['inFlight', 'queues', 'loose', 'orphans'].every((n) => !e[n]?.size);
   }
 
   private finalChecks(): void {
@@ -1333,6 +1385,9 @@ class Run {
       for (const op of market.sells) {
         if (op.pid !== p.id || op.landedAt === undefined || (op.sold ?? 0n) <= 0n || sigs.has(op.signature!)) continue;
         if (!op.live && tr.zeroBookedPaper.has(op.id)) { this.note('test-fill-dropped-nothing-left-in-the-books'); continue; }
+        // A test sell is a quote filled inside the process: one whose answer was lost with the process sold nothing
+        // anywhere (the books still hold its coins and the rules sell them after the restart).
+        if (!op.live && op.severed) { this.note('test-sell-cut-off-by-the-process-ending:nothing-was-sold'); continue; }
         const why = op.uncertain ? 'reported "outcome unknown", it had landed' : op.severed ? 'the engine was gone when it confirmed' : 'delivered to the engine';
         this.problem('M3', `sold-but-not-booked:${op.uncertain ? 'outcome-unknown' : op.severed ? 'engine-gone' : 'delivered'}`, `p${p.id}: sell#${op.id} sold ${op.sold} for ${op.exact} lamports (${why}) and there is no fill for it`);
       }
@@ -1395,7 +1450,7 @@ class Run {
 
     // Nothing may still be marked in flight.
     const e = this.engine as unknown as Record<string, { size?: number } | undefined>;
-    for (const name of ['inFlight', 'queues', 'loose', 'reserved', 'quoting']) {
+    for (const name of ['inFlight', 'queues', 'loose', 'reserved', 'quoting', 'orphans']) {
       if (e[name]?.size) this.problem('Q', `still-marked-in-flight:${name}`, `engine.${name} holds ${e[name]!.size} entr${e[name]!.size === 1 ? 'y' : 'ies'} at the end`);
     }
     if (e.retries?.size) this.note('retry-entries-left-at-the-end');
