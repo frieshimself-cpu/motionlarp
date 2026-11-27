@@ -1,5 +1,6 @@
 // WalletMotion front end: no framework, no build step. State comes from /api/state every few seconds.
 import { $, $$, app, modal, esc, short, fmtSol, signed, pct, cls, solscanTx, solscanAcct, coinLink, ago, hue, api, toast, brandHtml, modePill, openModal, closeModal } from '/ui.js';
+import { plain, dayLabel, openPnl } from '/figures.js';
 
 let config = null;
 let state = null;
@@ -41,7 +42,8 @@ function renderAuth(error = '') {
 function render() {
   if (!state) return;
   const s = state;
-  const openPnl = s.positions.reduce((a, p) => a + p.pnlSol, 0);
+  // Real and test kept apart here too: the real positions' profit, the test ones' beside it.
+  const open = openPnl(s.positions);
   const activeCopies = s.copies.filter((c) => c.enabled).length;
   // Profit cards show real trades once there are any; until then, test trades (labelled).
   const mode = s.pnl.primary;
@@ -69,7 +71,7 @@ function render() {
         <div class="card stat"><div class="label">Wallet balance</div><div class="value">${s.wallet && s.wallet.sol !== null && s.wallet.sol !== undefined ? `${fmtSol(s.wallet.sol, 3)} <small>SOL</small>` : '—'}</div><div class="foot">${s.wallet ? esc(short(s.wallet.pubkey)) : 'no wallet yet'}</div></div>
         <div class="card stat"><div class="label">Profit today${tag}</div><div class="value ${cls(main.todaySol)}">${signed(main.todaySol, 3)} <small>SOL</small></div><div class="foot">last 7 days <span class="${cls(main.weekSol)}">${signed(main.weekSol, 3)}</span>${otherNote(other.todaySol) ? ` · ${otherNote(other.todaySol)}` : ''}</div></div>
         <div class="card stat"><div class="label">Profit all time${tag}</div><div class="value ${cls(main.allSol)}">${signed(main.allSol, 3)} <small>SOL</small></div><div class="foot">${main.trades} trades · ${winRate}${otherNote(other.allSol) ? ` · ${otherNote(other.allSol)}` : ''}</div></div>
-        <div class="card stat"><div class="label">Open positions</div><div class="value">${s.positions.length}</div><div class="foot"><span class="${cls(openPnl)}">${signed(openPnl)} SOL</span> unrealized · copying ${activeCopies} of ${s.copies.length}</div></div>
+        <div class="card stat"><div class="label">Open positions${open.test ? ' <span class="tag off">test</span>' : ''}</div><div class="value">${s.positions.length}</div><div class="foot"><span class="${cls(open.sol)}">${signed(open.sol)} SOL</span> unrealized${open.testSol !== null ? ` · test: ${signed(open.testSol)}` : ''} · copying ${activeCopies} of ${s.copies.length}</div></div>
       </section>
       ${tab === 'history' ? renderHistory() : renderDash()}
     </main>`;
@@ -117,11 +119,13 @@ function renderWallet() {
       </div>
     </div>`;
   }
+  // A balance the server could not read (sol: null) is a dash, as on the top card, never "0 SOL".
+  const known = w.sol !== null && w.sol !== undefined;
   return `<div class="card">
     <div class="card-head"><h2>Trading wallet</h2><div class="actions"><button class="btn small" id="copy-addr">Copy address</button><button class="btn small danger" id="remove-wallet">Remove</button></div></div>
     <div class="card-body wallet">
       <div>
-        <div class="sol-big">${fmtSol(w.sol ?? 0, 4)} <small>SOL</small></div>
+        <div class="sol-big">${known ? `${fmtSol(w.sol, 4)} <small>SOL</small>` : '—'}</div>${known ? '' : '<div class="hint">The balance could not be read just now.</div>'}
         <div class="addr" style="margin-top:8px"><a href="${solscanAcct(w.pubkey)}" target="_blank" rel="noopener">${esc(w.pubkey)}</a></div>
         <div class="hint">Send SOL to this address to fund your copies.</div>
         ${(w.sol ?? 0) > 5 ? '<div class="note" style="margin-top:10px">This wallet holds more than 5 SOL. Keep only what you trade with here and move the rest to a wallet this site never sees.</div>' : ''}
@@ -130,11 +134,12 @@ function renderWallet() {
   </div>`;
 }
 
+// Numbers a person typed are printed as typed: plain() never writes "5e-7".
 const feeText = (c) => {
-  const buy = `${c.priorityFeeSol}${c.tipSol ? ` + ${c.tipSol} tip` : ''}`;
+  const buy = `${plain(c.priorityFeeSol)}${c.tipSol ? ` + ${plain(c.tipSol)} tip` : ''}`;
   const sp = c.sellPriorityFeeSol ?? c.priorityFeeSol;
   const st = c.sellTipSol ?? c.tipSol;
-  const sell = `${sp}${st ? ` + ${st} tip` : ''}`;
+  const sell = `${plain(sp)}${st ? ` + ${plain(st)} tip` : ''}`;
   return buy === sell ? `fees ${buy}` : `fees buy ${buy} · sell ${sell}`;
 };
 
@@ -144,10 +149,10 @@ function sellTags(sell) {
   if (sell.timed.length) {
     const bag = sell.timedOf === 'bag';
     const last = sell.timed.length - 1;
-    t.push(`<span class="tag">${sell.timed.map((x, i) => `${bag && i === last ? 'rest' : `${x.percent}%`} @ ${x.afterSec}s`).join(' → ')}${bag ? ' · of the bag' : ''}</span>`);
+    t.push(`<span class="tag">${sell.timed.map((x, i) => `${bag && i === last ? 'rest' : `${plain(x.percent)}%`} @ ${plain(x.afterSec)}s`).join(' → ')}${bag ? ' · of the bag' : ''}</span>`);
   }
-  if (sell.stopLoss.length) t.push(`<span class="tag">Stop ${sell.stopLoss.map((l) => `−${l.lossPct}% → ${l.percent}%`).join(', ')}</span>`);
-  if (sell.deadCoin.enabled) t.push(`<span class="tag">Dead coin ${sell.deadCoin.idleSec}s</span>`);
+  if (sell.stopLoss.length) t.push(`<span class="tag">Stop ${sell.stopLoss.map((l) => `−${plain(l.lossPct)}% → ${plain(l.percent)}%`).join(', ')}</span>`);
+  if (sell.deadCoin.enabled) t.push(`<span class="tag">Dead coin ${plain(sell.deadCoin.idleSec)}s</span>`);
   return t.length ? t.join('') : '<span class="tag off">No automatic sells</span>';
 }
 
@@ -159,7 +164,7 @@ function renderCopy(c) {
     <div class="avatar" style="background:${color}">${esc(initials)}</div>
     <div class="info">
       <div class="name">${esc(c.name)} ${state.server.live ? '<span class="pill live">LIVE</span>' : '<span class="pill test">TEST</span>'}</div>
-      <div class="meta"><a href="${solscanAcct(c.leader)}" target="_blank" rel="noopener" class="mono">${esc(short(c.leader))}</a> · buy <b>${c.buySol}</b> SOL when they buy ≥ <b>${c.minLeaderBuySol}</b> SOL · ${esc(feeText(c))} SOL · slippage ${c.slippagePct}%</div>
+      <div class="meta"><a href="${solscanAcct(c.leader)}" target="_blank" rel="noopener" class="mono">${esc(short(c.leader))}</a> · buy <b>${plain(c.buySol)}</b> SOL when they buy ≥ <b>${plain(c.minLeaderBuySol)}</b> SOL · ${esc(feeText(c))} SOL · slippage ${plain(c.slippagePct)}%</div>
       <div class="meta">${c.stats.open} open · ${c.stats.closed} closed · <span class="${cls(pnl)}">${signed(pnl, 3)} SOL</span></div>
       <div class="tags">${sellTags(c.sell)}</div>
     </div>
@@ -171,7 +176,8 @@ function renderCopy(c) {
 }
 
 function renderPosition(p) {
-  const next = p.nextTimedSell ? ` · next sell ${p.nextTimedSell.percent}% in ${p.nextTimedSell.inSec}s` : '';
+  // (a buy still on its way has none: the timed sells count from the confirmed buy)
+  const next = p.status === 'open' && p.nextTimedSell ? ` · next sell ${plain(p.nextTimedSell.percent)}% in ${p.nextTimedSell.inSec}s` : '';
   return `<div class="pos">
     <div class="pos-top">
       <div>
@@ -204,19 +210,18 @@ function renderHistory() {
   const winRate = h.trades ? Math.round((h.wins / h.trades) * 100) : 0;
   const days = h.pnl.days;
   const both = days.some((d) => d.mode === 'live') && days.some((d) => d.mode === 'test');
-  const dayName = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
   return `<div class="stack">
   <div class="card">
     <div class="card-head"><h2>Profit by day<span class="sub">closed positions, fees included</span></h2></div>
     <div class="card-body flush">${days.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Day</th>${both ? '<th></th>' : ''}<th class="num">Trades</th><th class="num">Winners</th><th class="num">Profit</th></tr></thead>
       <tbody>${days.slice(0, 60).map((d) => `<tr>
-        <td>${esc(dayName(d.date))}</td>${both ? `<td>${d.mode === 'live' ? '<span class="pill live">LIVE</span>' : '<span class="tag off">test</span>'}</td>` : ''}
+        <td>${esc(dayLabel(d.date))}</td>${both ? `<td>${d.mode === 'live' ? '<span class="pill live">LIVE</span>' : '<span class="tag off">test</span>'}</td>` : ''}
         <td class="num">${d.trades}</td><td class="num">${d.trades ? Math.round((d.wins / d.trades) * 100) : 0}%</td>
         <td class="num ${cls(d.pnlSol)}">${signed(d.pnlSol)} SOL</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed trades yet</b>Each day you trade gets a row here.</div>'}</div>
   </div>
   <div class="card">
-    <div class="card-head"><h2>Closed positions<span class="sub">${h.trades} · total <span class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</span> · ${winRate}% winners${h.totalFeesSol ? ` · platform fees ${fmtSol(h.totalFeesSol)} SOL` : ''}${h.shown < h.positions.length || h.shown < h.trades ? ` · the latest ${h.shown} are listed` : ''}</span></h2></div>
+    <div class="card-head"><h2>Closed positions<span class="sub">${h.trades} · total <span class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</span> · ${winRate}% winners${h.totalFeesSol ? ` · platform fees ${fmtSol(h.totalFeesSol)} SOL` : ''}${h.shown < (h.closedAll ?? h.trades) ? ` · the latest ${h.shown} are listed` : ''}</span></h2></div>
     <div class="card-body flush">${h.positions.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Coin</th><th>Copy</th><th>Sells</th><th class="num">Cost</th><th class="num">Returned</th><th class="num">P/L</th><th>Closed</th></tr></thead>
       <tbody>${h.positions.map((p) => `<tr>
@@ -267,11 +272,14 @@ function bindDash() {
 }
 
 // ── copy editor ──────────────────────────────────────────────────────────
+/** A number box's starting text: what was saved, written out in plain digits (the editor's check takes it back). */
+const box = (v) => esc(plain(v));
+
 function stageRow(kind, a, b, of = "of what's left") {
   const first = kind === 'timed'
-    ? `<span>After</span><div class="unit"><input type="text" inputmode="decimal" min="0" step="any" value="${esc(a)}" data-a aria-label="seconds"><span>sec</span></div>`
-    : `<span>At −</span><div class="unit"><input type="text" inputmode="decimal" min="1" max="99" step="any" value="${esc(a)}" data-a aria-label="loss percent"><span>%</span></div>`;
-  return `<div class="stage" data-row="${kind}">${first}<span>sell</span><div class="unit"><input type="text" inputmode="decimal" min="0.01" max="100" step="any" value="${esc(b)}" data-b aria-label="percent to sell"><span>%</span></div><span class="rest dim">${of}</span><button type="button" class="btn small ghost" data-remove aria-label="Remove">✕</button></div>`;
+    ? `<span>After</span><div class="unit"><input type="text" inputmode="decimal" min="0" step="any" value="${box(a)}" data-a aria-label="seconds"><span>sec</span></div>`
+    : `<span>At −</span><div class="unit"><input type="text" inputmode="decimal" min="1" max="99" step="any" value="${box(a)}" data-a aria-label="loss percent"><span>%</span></div>`;
+  return `<div class="stage" data-row="${kind}">${first}<span>sell</span><div class="unit"><input type="text" inputmode="decimal" min="0.01" max="100" step="any" value="${box(b)}" data-b aria-label="percent to sell"><span>%</span></div><span class="rest dim">${of}</span><button type="button" class="btn small ghost" data-remove aria-label="Remove">✕</button></div>`;
 }
 
 function rule(id, title, desc, on, body) {
@@ -310,21 +318,21 @@ function openEditor(copy, preset) {
           <div class="field"><label for="f-name">Nickname</label><input id="f-name" type="text" value="${esc(d.name)}" maxlength="40" placeholder="Optional"></div>
         </div>
         <div class="row2">
-          <div class="field"><label for="f-buy">Your buy</label><div class="unit"><input id="f-buy" type="text" inputmode="decimal" min="0.001" step="any" value="${esc(d.buySol)}"><span>SOL</span></div><div class="hint" id="buy-hint"></div></div>
-          <div class="field"><label for="f-min">Only when they buy at least</label><div class="unit"><input id="f-min" type="text" inputmode="decimal" min="0" step="any" value="${esc(d.minLeaderBuySol)}"><span>SOL</span></div><div class="hint">Their smaller buys are skipped.</div></div>
+          <div class="field"><label for="f-buy">Your buy</label><div class="unit"><input id="f-buy" type="text" inputmode="decimal" min="0.001" step="any" value="${box(d.buySol)}"><span>SOL</span></div><div class="hint" id="buy-hint"></div></div>
+          <div class="field"><label for="f-min">Only when they buy at least</label><div class="unit"><input id="f-min" type="text" inputmode="decimal" min="0" step="any" value="${box(d.minLeaderBuySol)}"><span>SOL</span></div><div class="hint">Their smaller buys are skipped.</div></div>
         </div>
       </div>
 
       <div class="group">
         <div class="title">Trading fees</div>
         <div class="row4">
-          <div class="field"><label for="f-prio">Buy priority fee</label><div class="unit"><input id="f-prio" type="text" inputmode="decimal" min="0" max="0.1" step="any" value="${esc(d.priorityFeeSol)}"><span>SOL</span></div></div>
-          <div class="field"><label for="f-tip">Buy tip</label><div class="unit"><input id="f-tip" type="text" inputmode="decimal" min="0" max="0.5" step="any" value="${esc(d.tipSol ?? 0)}"><span>SOL</span></div></div>
-          <div class="field"><label for="f-sprio">Sell priority fee</label><div class="unit"><input id="f-sprio" type="text" inputmode="decimal" min="0" max="0.1" step="any" value="${esc(sp)}"><span>SOL</span></div></div>
-          <div class="field"><label for="f-stip">Sell tip</label><div class="unit"><input id="f-stip" type="text" inputmode="decimal" min="0" max="0.5" step="any" value="${esc(st)}"><span>SOL</span></div></div>
+          <div class="field"><label for="f-prio">Buy priority fee</label><div class="unit"><input id="f-prio" type="text" inputmode="decimal" min="0" max="0.1" step="any" value="${box(d.priorityFeeSol)}"><span>SOL</span></div></div>
+          <div class="field"><label for="f-tip">Buy tip</label><div class="unit"><input id="f-tip" type="text" inputmode="decimal" min="0" max="0.5" step="any" value="${box(d.tipSol ?? 0)}"><span>SOL</span></div></div>
+          <div class="field"><label for="f-sprio">Sell priority fee</label><div class="unit"><input id="f-sprio" type="text" inputmode="decimal" min="0" max="0.1" step="any" value="${box(sp)}"><span>SOL</span></div></div>
+          <div class="field"><label for="f-stip">Sell tip</label><div class="unit"><input id="f-stip" type="text" inputmode="decimal" min="0" max="0.5" step="any" value="${box(st)}"><span>SOL</span></div></div>
         </div>
         <div class="row2">
-          <div class="field"><label for="f-slip">Slippage</label><div class="unit"><input id="f-slip" type="text" inputmode="decimal" min="0.5" max="100" step="any" value="${esc(d.slippagePct)}"><span>%</span></div></div>
+          <div class="field"><label for="f-slip">Slippage</label><div class="unit"><input id="f-slip" type="text" inputmode="decimal" min="0.5" max="100" step="any" value="${box(d.slippagePct)}"><span>%</span></div></div>
           <div class="hint" style="align-self:center">Priority fee: paid to the network on every transaction. Tip: an extra payment to land sooner, sent through Helius Sender; 0 for none. A tip of 0.001 SOL or more uses every fast lane.</div>
         </div>
       </div>
@@ -346,7 +354,7 @@ function openEditor(copy, preset) {
           `<div id="stop-rows">${(d.sell.stopLoss.length ? d.sell.stopLoss : [{ lossPct: 30, percent: 100 }]).map((l) => stageRow('stop', l.lossPct, l.percent)).join('')}</div>
            <button type="button" class="btn small" data-add="stop">Add level</button>`)}
         ${rule('dead', 'Dead coin', 'Nobody is trading it any more: get out.', d.sell.deadCoin.enabled,
-          `<div class="stage" style="grid-template-columns:auto 120px auto"><span>No trades for</span><div class="unit"><input id="f-idle" type="text" inputmode="decimal" min="5" step="1" value="${esc(d.sell.deadCoin.idleSec)}"><span>sec</span></div><span>→ sell everything</span></div>`)}
+          `<div class="stage" style="grid-template-columns:auto 120px auto"><span>No trades for</span><div class="unit"><input id="f-idle" type="text" inputmode="decimal" min="5" step="1" value="${box(d.sell.deadCoin.idleSec)}"><span>sec</span></div><span>→ sell everything</span></div>`)}
       </div>
 
       <div class="group" style="margin-bottom:0">
@@ -387,8 +395,8 @@ function openEditor(copy, preset) {
     const el = $('#buy-hint');
     el.className = over ? 'hint down' : 'hint';
     el.textContent = over
-      ? `Above the site limit of ${max} SOL per buy: these buys are skipped until the owner raises "Max per buy" on the admin page.`
-      : `Site limit ${max} SOL per buy${state.feeBps ? ` · platform fee ${state.feeBps / 100}%` : ''}`;
+      ? `Above the site limit of ${plain(max)} SOL per buy: these buys are skipped until the owner raises "Max per buy" on the admin page.`
+      : `Site limit ${plain(max)} SOL per buy${state.feeBps ? ` · platform fee ${state.feeBps / 100}%` : ''}`;
   };
   buyHint();
   $('#f-buy').addEventListener('input', buyHint);
@@ -413,8 +421,14 @@ function openEditor(copy, preset) {
     if (!confirm(`Stop copying ${copy.name}? Open positions keep their sell rules until they close.`)) return;
     try { await api('DELETE', `/api/copies/${copy.id}`); closeModal(); toast('Copy deleted'); await loadState(); } catch (err) { toast(err.message, true); }
   });
+  // Wallets this editor has already added from a list that then failed part way, and the nickname they were numbered
+  // under: the next press adds the rest, numbered on.
+  let added = 0;
+  let addedAs = null;
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    // The answer to the last press is gone once the next one is made (it stayed on screen until the server answered).
+    $('#form-err').innerHTML = '';
     const on = (id) => $(`[data-rule="${id}"] [data-on]`, form).checked;
     // An empty box is sent as empty (the server then says which box), never as 0: "after 0 s sell 100 %" would sell
     // the whole bag the moment the buy lands.
@@ -454,14 +468,16 @@ function openEditor(copy, preset) {
     };
     if (bad.length) { $('#form-err').innerHTML = `<div class="err">${esc(bad.join(' · '))}</div>`; return; }
     // On a live site a new copy, or a changed buy size, is confirmed with the amount in words.
-    if (live && (!copy || body.buySol !== copy.buySol) && !confirm(`The site is live: this buys ${body.buySol} SOL with your real wallet every time ${leaders.length > 1 ? 'one of these wallets' : body.name || 'this wallet'} buys. Continue?`)) return;
+    if (live && (!copy || body.buySol !== copy.buySol) && !confirm(`The site is live: this buys ${plain(body.buySol)} SOL with your real wallet every time ${leaders.length > 1 ? 'one of these wallets' : body.name || 'this wallet'} buys. Continue?`)) return;
     let done = 0;
+    const from = nick === addedAs ? added : 0;
     try {
       if (copy) await api('PUT', `/api/copies/${copy.id}`, body);
       else {
         // One copy per wallet, same settings; a nickname gets a number when it is shared.
+        const numbered = !!nick && (leaders.length > 1 || from > 0);
         for (const [i, leader] of leaders.entries()) {
-          await api('POST', '/api/copies', { ...body, leader, name: nick && leaders.length > 1 ? `${nick} ${i + 1}` : nick });
+          await api('POST', '/api/copies', { ...body, leader, name: numbered ? `${nick} ${from + i + 1}` : nick });
           done++;
         }
       }
@@ -470,9 +486,17 @@ function openEditor(copy, preset) {
       await loadState();
     } catch (err) {
       const which = !copy && leaders.length > 1 ? `Wallet ${done + 1} (${short(leaders[done] ?? '')}): ` : '';
-      const partial = done ? ` ${done} of ${leaders.length} were added.` : '';
-      $('#form-err').innerHTML = `<div class="err">${esc(which + err.message + partial)}</div>`;
-      if (done) loadState();
+      let partial = '';
+      if (done) {
+        // The wallets just added leave the box: pressing Start copying again once the one that failed is corrected adds
+        // only the rest (it added the first ones a second time).
+        $('#f-leader').value = leaders.slice(done).join('\n');
+        added = from + done;
+        addedAs = nick;
+        partial = `. ${done} of ${leaders.length} were added; the box now holds the ${leaders.length - done} not added yet.`;
+        loadState();
+      }
+      $('#form-err').innerHTML = `<div class="err">${esc(which + (partial ? err.message.replace(/\.$/, '') : err.message) + partial)}</div>`;
     }
   });
   setTimeout(() => (copy || preset ? $('#f-buy') : $('#f-leader')).focus(), 30);
@@ -500,7 +524,10 @@ async function loadState() {
     if (idle) redraw();
   } catch (err) {
     if (err.status === 401) { state = null; renderAuth(); return; }
-    if (++failedPolls >= 3) toast(err.message, true);
+    // From the third failed refresh in a row: the site is down for longer than an update's restart. Said in words a
+    // person understands (it said "Failed to fetch", "request failed (502)"), and again on each failed refresh until
+    // it answers.
+    if (++failedPolls >= 3) toast(err.unreachable ? 'The site cannot be reached right now (an update restarts it for a few seconds, or the connection dropped): trying again every few seconds…' : err.message, true);
   }
 }
 /** Re-draws the page keeping where its scrolled lists were (the activity list jumped back to the top every 3 s, a

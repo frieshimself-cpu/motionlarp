@@ -1,5 +1,6 @@
 // The owner's page (/admin): license keys, users, and the settings that used to live in a file on the server.
 import { $, $$, app, esc, short, fmtSol, signed, cls, solscanAcct, ago, api, toast, brandHtml, modePill } from '/ui.js';
+import { plain } from '/figures.js';
 
 let config = null;
 let state = null;
@@ -102,11 +103,14 @@ async function checkConnections() {
     conn = { ok: false, checks: [{ id: 'rpc', name: 'Check', ok: false, detail: err.message }] };
   }
   connBusy = false;
-  if (!typingNow()) render();
+  if (!editingNow()) render();
 }
 
 /** Someone is typing in a form: do not re-draw under them. */
 const typingNow = () => !!document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName) && app.contains(document.activeElement);
+/** Or has typed something and not sent it yet, in any form of the page (a name half typed into "Who is it for" was
+ *  wiped by the next background refresh once the cursor left the box: only the Settings boxes were looked at). */
+const editingNow = () => typingNow() || $$('form input, form textarea', app).some((i) => (i.type === 'checkbox' ? i.checked !== i.defaultChecked : i.value !== i.defaultValue));
 
 function render() {
   if (tab === 'connections') return renderConnections();
@@ -153,13 +157,13 @@ function render() {
         <div class="card">
           <div class="card-head"><h2>Users<span class="sub">${s.users.length}</span></h2></div>
           <div class="card-body flush">${s.users.length ? `<div class="table-wrap"><table>
-            <thead><tr><th>User</th><th>License</th><th>Wallet</th><th class="num">Copies</th><th class="num">Open</th><th class="num">Closed</th><th class="num">Profit</th><th class="num">Fees paid</th><th></th></tr></thead>
+            <thead><tr><th>User</th><th>License</th><th>Wallet</th><th class="num">Copies</th><th class="num">Open</th><th class="num">Closed</th><th class="num" title="Real trades; what test trades would have made is shown under it">Profit</th><th class="num">Fees paid</th><th></th></tr></thead>
             <tbody>${s.users.map((u) => `<tr>
               <td><b>${esc(u.username)}</b> ${u.disabled ? '<span class="pill off">Disabled</span>' : ''}<div class="dim" style="font-size:12px">joined ${ago(u.createdAt)} · fee ${u.feePercent}%</div></td>
               <td>${u.license ? esc(u.license) : '<span class="dim">—</span>'}</td>
               <td>${u.wallet ? `<a class="mono" href="${solscanAcct(u.wallet)}" target="_blank" rel="noopener">${esc(short(u.wallet))}</a>` : '<span class="dim">none</span>'}</td>
               <td class="num">${u.copies}</td><td class="num">${u.open}</td><td class="num">${u.closed}</td>
-              <td class="num ${cls(u.pnlSol)}">${signed(u.pnlSol, 3)}</td>
+              <td class="num ${cls(u.pnlSol)}">${signed(u.pnlSol, 3)}${u.testPnlSol ? `<div class="dim" style="font-size:12px">test ${signed(u.testPnlSol, 3)}</div>` : ''}</td>
               <td class="num">${fmtSol(u.feesLiveSol, 4)}</td>
               <td class="right-align"><div class="actions" style="justify-content:flex-end">${u.license ? '' : `<button class="btn small" data-userkey="${u.id}" title="This account has no key yet: make one so they can get in">Create key</button>`}${u.disabled ? `<button class="btn small" data-enable="${u.id}">Enable</button>` : `<button class="btn small danger" data-disable="${u.id}">Disable</button>`}</div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No users yet</b>Create a key above and send it to a friend: pasting it on the site is all they need to get in.</div>'}</div>
         </div>
@@ -168,10 +172,10 @@ function render() {
           <div class="card-head"><h2>Settings</h2></div>
           <form id="settings">
             <div class="setting"><div class="what"><b>Platform fee</b><span>Your cut of every buy and sell, paid inside the same transaction. A license can have its own.</span></div>
-              <div class="row2"><div><label for="set-fee">Fee</label><div class="unit"><input id="set-fee" type="number" min="0" max="10" step="any" value="${esc(st.feePercent)}"><span>%</span></div></div>
+              <div class="row2"><div><label for="set-fee">Fee</label><div class="unit"><input id="set-fee" type="number" min="0" max="10" step="any" value="${esc(plain(st.feePercent))}"><span>%</span></div></div>
               <div><label for="set-wallet">Paid to wallet</label><input id="set-wallet" type="text" autocomplete="off" spellcheck="false" value="${esc(st.feeWallet)}" placeholder="Wallet address (must hold ≥ 0.001 SOL)"></div></div></div>
             <div class="setting"><div class="what"><b>Max per buy</b><span>No single copy buy may spend more than this.</span></div>
-              <div style="max-width:220px"><div class="unit"><input id="set-max" type="number" min="0.001" step="any" value="${esc(st.maxSolPerBuy)}"><span>SOL</span></div></div></div>
+              <div style="max-width:220px"><div class="unit"><input id="set-max" type="number" min="0.001" step="any" value="${esc(plain(st.maxSolPerBuy))}"><span>SOL</span></div></div></div>
             <div class="setting"><div class="what"><b>Live trading</b><span>On: every enabled copy on the site buys with real SOL. Off: no new real buys (copies are simulated); coins already bought with real SOL are still sold by their rules and with Sell now.</span></div>
               <div style="display:flex;align-items:center;gap:12px"><label class="switch"><input type="checkbox" id="set-live" ${st.liveTrading ? 'checked' : ''} aria-label="Live trading"><span></span></label><span id="live-text" class="${st.liveTrading ? 'up' : 'muted'}">${st.liveTrading ? 'Live trading is ON' : 'Test mode'}</span></div></div>
             <div class="card-body" style="border-top:1px solid var(--border);display:flex;gap:12px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="submit">Save settings</button><span id="settings-msg" class="muted"></span></div>
@@ -259,11 +263,10 @@ async function waitForRestart() {
 async function load(quiet = false) {
   try {
     const next = await api('GET', '/api/admin/state');
-    // Do not re-draw under someone typing in a form.
-    const typing = typingNow();
-    const dirty = $$('#settings input', app).some((i) => (i.type === 'checkbox' ? i.checked !== i.defaultChecked : i.value !== i.defaultValue));
+    // Do not re-draw under someone typing in a form, or over what they typed and have not sent yet.
+    const editing = editingNow();
     state = next;
-    if (!(quiet && (typing || dirty))) render();
+    if (!(quiet && editing)) render();
   } catch (err) {
     if (err.status === 401) return renderLogin();
     if (!quiet) toast(err.message, true);
