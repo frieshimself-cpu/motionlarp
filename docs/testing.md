@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 547 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 550 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -554,9 +554,15 @@ fails on the code before (`tests/restarts.test.ts`, `tests/db-faults.test.ts`, `
   once, and left by a crash); two sells left by a crash, one whose booking fails. Each of 18 planted regressions of these
   fixes fails at least one test.
 
-The fuzzer on this code, seeds flagged: default mix **0** of 3,000; crash, ghost, outage and partial **0** of 2,000 each;
-slow-read **5** of 2,000 (the same seeds as before, the known quoted coin count case); all 22 saved cases pass; the
-self-test catches every planted fault. `npm test`: 547 tests.
+The fuzzer on this code, seeds flagged: default mix **0** of 3,000 and of 6,000 more (seeds 10,001 on); crash and ghost
+**0** of 2,000 and of 3,000 more; outage **0** of 2,000 and of 2,000 more; partial **0** of 2,000; slow-read **5** of
+2,000 (the same seeds as before, the known quoted coin count case); all 22 saved cases pass; the self-test catches every
+planted fault. The browser suite on this code (version 67c9307, live since 13:20 UTC after a 1.5 s gap): 585 of 586
+checks at each of the four sizes; the one check that failed, the same at each size, found a real fault of the page: a
+signed amount too small for its decimals was printed "−0", in red (a test account's profit today was −0.0002 SOL at
+that time of day). Such an amount is now shown with as many more decimals as it takes ("−0.0002"), and under half a
+millionth of a SOL it is "0", with no sign and no colour (tests/review-site-pages.test.ts); that check then passes.
+`npm test`: 550 tests.
 
 ## Not yet verified
 

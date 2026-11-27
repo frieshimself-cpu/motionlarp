@@ -17,8 +17,7 @@ const toastEl = $('#toast');
 export const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const short = (a) => (a ? `${a.slice(0, 4)}…${a.slice(-4)}` : '');
 // How amounts are printed lives in figures.js (no page access there: the tests load it as it is).
-export { fmtSol, signed, pct } from './figures.js';
-export const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '');
+export { fmtSol, signed, pct, cls } from './figures.js';
 export const solscanTx = (s) => `https://solscan.io/tx/${encodeURIComponent(s)}`;
 export const solscanAcct = (a) => `https://solscan.io/account/${encodeURIComponent(a)}`;
 export const coinLink = (m) => `https://dexscreener.com/solana/${encodeURIComponent(m)}`;

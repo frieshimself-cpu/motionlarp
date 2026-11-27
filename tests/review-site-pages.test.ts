@@ -32,6 +32,32 @@ describe('B19: one minus sign', () => {
   });
 });
 
+describe('a signed amount too small for its decimals', () => {
+  it('is shown with as many more as it takes, so its sign and its colour never stand beside a bare "0" (a loss of 0.0002 SOL read "−0", in red)', () => {
+    expect(signed(-0.000197, 3)).toBe('−0.0002');
+    expect(signed(0.000197, 3)).toBe('+0.0002');
+    expect(signed(-0.0000123)).toBe('−0.00001');
+    expect(figures.cls(-0.000197)).toBe('down');
+    expect(figures.cls(0.000197)).toBe('up');
+  });
+  it('is 0, with no sign and no colour, once it is under half a millionth of a SOL', () => {
+    for (const n of [-0.0000001, 0.0000004, 0, -0]) {
+      expect(signed(n, 3)).toBe('0');
+      expect(figures.cls(n)).toBe('');
+    }
+  });
+  it('anything else is as before', () => {
+    expect(signed(-1.23456, 3)).toBe('−1.235');
+    expect(signed(0.5, 3)).toBe('+0.5');
+    expect(signed(250.123, 3)).toBe('+250.12');
+    expect(signed(-0.0091)).toBe('−0.0091');
+    expect(signed(null as unknown as number, 3)).toBe('0');
+    expect(figures.cls(2)).toBe('up');
+    expect(figures.cls(-2)).toBe('down');
+    expect(figures.cls(null as unknown as number)).toBe('');
+  });
+});
+
 describe('B16: "Profit by day" names each day as the viewer\'s calendar does', () => {
   const tz = process.env.TZ;
   afterEach(() => { process.env.TZ = tz; });

@@ -26,7 +26,25 @@ export function fmtSol(n, d = 4) {
   const r = Number(Number(n).toFixed(Math.abs(n) >= 100 ? 2 : d));
   return r < 0 ? `−${plain(-r)}` : plain(r);
 }
-export const signed = (n, d = 4) => (n > 0 ? '+' : n < 0 ? '−' : '') + fmtSol(Math.abs(n), d);
+/** Under half a millionth of a SOL an amount is 0: no sign, no colour. */
+const TINY = 5e-7;
+
+/**
+ * A signed amount, "+1.234" / "−0.567". One too small for `d` decimals is shown with as many more as it takes (up to
+ * 6), so its sign, and its colour (cls), never stand beside a bare "0": a loss of 0.0002 SOL read "−0", in red. Under
+ * half a millionth it is 0. (Not a number: 0, as before.)
+ */
+export function signed(n, d = 4) {
+  const v = Number(n) || 0;
+  const a = Math.abs(v);
+  if (a < TINY) return '0';
+  let dd = d;
+  while (dd < 6 && a < 100 && Number(a.toFixed(dd)) === 0) dd++;
+  return (v > 0 ? '+' : '−') + fmtSol(a, dd);
+}
+
+/** The colour class of an amount: up, down, or none for 0 (and for what signed() prints as 0). */
+export const cls = (n) => (n >= TINY ? 'up' : n <= -TINY ? 'down' : '');
 export const pct = (n) => (n === null || n === undefined ? '—' : `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(n).toFixed(1)}%`);
 
 /**
