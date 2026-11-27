@@ -138,6 +138,9 @@ tbody tr:hover { background: rgba(255, 255, 255, .015); }
 
 .row { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .row:last-child { border-bottom: 0; }
+/* Grid and flex children may shrink below their content (a long name or address wraps instead of widening the page). */
+.row > *, .cols > *, .stack > *, .card, .info { min-width: 0; }
+.row .info, .row .name, .row .meta { overflow-wrap: anywhere; }
 .row.paused .avatar, .row.paused .info { opacity: .5; }
 .avatar { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; font: 600 13px var(--font); color: #fff; }
 .info .name { font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

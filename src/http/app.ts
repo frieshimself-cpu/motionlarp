@@ -102,19 +102,21 @@ function cookies(req: IncomingMessage): Record<string, string> {
 
 const sol = (l: bigint) => Number(lamportsToSol(l).toFixed(9));
 
-/** Simple fixed-window limiter for login / sign-up attempts. */
+/** Fixed-window limiter for login attempts. Only FAILED attempts count: a trader who logs in from a phone, a laptop and
+ *  a desk with the right key must never be told "too many attempts". */
 class Limiter {
   private readonly hits = new Map<string, { n: number; until: number }>();
   constructor(private readonly max: number, private readonly windowMs: number) {}
-  hit(key: string): boolean {
+  blocked(key: string): boolean {
+    const h = this.hits.get(key);
+    return !!h && h.until >= Date.now() && h.n >= this.max;
+  }
+  fail(key: string): void {
     const now = Date.now();
     const h = this.hits.get(key);
-    if (!h || h.until < now) {
-      this.hits.set(key, { n: 1, until: now + this.windowMs });
-      return true;
-    }
-    h.n += 1;
-    return h.n <= this.max;
+    if (!h || h.until < now) this.hits.set(key, { n: 1, until: now + this.windowMs });
+    else h.n += 1;
+    if (this.hits.size > 10_000) this.hits.clear();
   }
 }
 
@@ -223,9 +225,10 @@ export function createApp(deps: AppDeps): Server {
   async function adminRoute(req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<void> {
     if (path === '/api/admin/login' && method === 'POST') {
       if (!deps.adminPassword) throw new HttpError(503, 'the admin area is not set up on this server (no ADMIN_PASSWORD)');
-      if (!adminLimiter.hit(`admin:${clientIp(req)}`)) throw new HttpError(429, 'too many attempts, try again in 15 minutes');
+      const who = `admin:${clientIp(req)}`;
+      if (adminLimiter.blocked(who)) throw new HttpError(429, 'too many attempts, try again in 15 minutes');
       const b = await readJson(req);
-      if (!passwordMatches(String(b.password ?? ''))) throw new HttpError(401, 'wrong password');
+      if (!passwordMatches(String(b.password ?? ''))) { adminLimiter.fail(who); throw new HttpError(401, 'wrong password'); }
       const token = newToken();
       store.createAdminSession(sha256(token), Date.now() + ADMIN_DAYS * 86_400_000);
       res.setHeader('set-cookie', `${ADMIN_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${ADMIN_DAYS * 86_400}${deps.secureCookies ? '; Secure' : ''}`);
@@ -281,6 +284,8 @@ export function createApp(deps: AppDeps): Server {
     const usr = /^\/api\/admin\/users\/(\d+)$/.exec(path);
     if (usr && method === 'PUT') {
       const b = await readJson(req);
+      // A user whose key is revoked cannot log in: enabling them would only have the server copy trades for them again.
+      if (b.disabled === false && store.userLicense(Number(usr[1]))?.revoked) throw new HttpError(409, 'their key is revoked: restore their key first (that enables them too)');
       if (typeof b.disabled === 'boolean') store.setUserDisabled(Number(usr[1]), b.disabled);
       return json(res, 200, { ok: true });
     }
@@ -361,11 +366,12 @@ export function createApp(deps: AppDeps): Server {
     // ── accounts ──
     // The license key is the login: its first use opens the account (named after the key), later uses return to it.
     if (path === '/api/enter' && method === 'POST') {
-      if (!authLimiter.hit(`enter:${clientIp(req)}`)) throw new HttpError(429, 'too many attempts, try again in a few minutes');
+      const who = `enter:${clientIp(req)}`;
+      if (authLimiter.blocked(who)) throw new HttpError(429, 'too many attempts, try again in a few minutes');
       const b = await readJson(req);
       const license = store.licenseByHash(licenseHash(String(b.license ?? '')));
-      if (!license) throw new HttpError(403, 'that license key is not valid');
-      if (license.revoked) throw new HttpError(403, 'this license key was revoked: ask the owner');
+      if (!license) { authLimiter.fail(who); throw new HttpError(403, 'that license key is not valid'); }
+      if (license.revoked) { authLimiter.fail(who); throw new HttpError(403, 'this license key was revoked: ask the owner'); }
       let uid = license.usedBy;
       if (uid === null) {
         // Unique account name from the key's label; the password slot is filled with random bytes (never used).

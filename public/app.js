@@ -66,7 +66,7 @@ function render() {
     </div></header>
     <main class="page">
       <section class="grid stats">
-        <div class="card stat"><div class="label">Wallet balance</div><div class="value">${s.wallet ? `${fmtSol(s.wallet.sol ?? 0, 3)} <small>SOL</small>` : '—'}</div><div class="foot">${s.wallet ? esc(short(s.wallet.pubkey)) : 'no wallet yet'}</div></div>
+        <div class="card stat"><div class="label">Wallet balance</div><div class="value">${s.wallet && s.wallet.sol !== null && s.wallet.sol !== undefined ? `${fmtSol(s.wallet.sol, 3)} <small>SOL</small>` : '—'}</div><div class="foot">${s.wallet ? esc(short(s.wallet.pubkey)) : 'no wallet yet'}</div></div>
         <div class="card stat"><div class="label">Profit today${tag}</div><div class="value ${cls(main.todaySol)}">${signed(main.todaySol, 3)} <small>SOL</small></div><div class="foot">last 7 days <span class="${cls(main.weekSol)}">${signed(main.weekSol, 3)}</span>${otherNote(other.todaySol) ? ` · ${otherNote(other.todaySol)}` : ''}</div></div>
         <div class="card stat"><div class="label">Profit all time${tag}</div><div class="value ${cls(main.allSol)}">${signed(main.allSol, 3)} <small>SOL</small></div><div class="foot">${main.trades} trades · ${winRate}${otherNote(other.allSol) ? ` · ${otherNote(other.allSol)}` : ''}</div></div>
         <div class="card stat"><div class="label">Open positions</div><div class="value">${s.positions.length}</div><div class="foot"><span class="${cls(openPnl)}">${signed(openPnl)} SOL</span> unrealized · copying ${activeCopies} of ${s.copies.length}</div></div>
@@ -430,6 +430,7 @@ function openEditor(copy, preset) {
     const num = (el) => parse(el, el.getAttribute('aria-label') || 'a box', null);
     const rows = (sel, a, b) => $$(sel, form).map((r) => ({ [a]: num($('[data-a]', r)), [b]: num($('[data-b]', r)) }));
     const leaders = [...new Set($('#f-leader').value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean))];
+    if (!copy && !leaders.length) bad.push('Wallet to copy: paste the address of the wallet to copy');
     const nick = $('#f-name').value.trim();
     const body = {
       leader: leaders[0] ?? '',
@@ -483,14 +484,24 @@ async function loadState() {
     state = await api('GET', `/api/state${TZ}`);
     if (tab === 'history') history = await api('GET', `/api/history${TZ}`).catch(() => history);
     // Never re-draw under someone typing (the private key box above all). A switch is not typing, and neither is
-    // the login form: after Enter in the key box the dashboard must replace it.
+    // the login form: after Enter in the key box the dashboard must replace it. Nor while text on the page is being
+    // selected (to copy an address): the re-draw would drop the selection.
     const a = document.activeElement;
     const typing = a && app.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && a.type !== 'checkbox')) && !a.closest('#auth-form');
-    if (modal.hidden && !typing && !$('#wk')?.value) render();
+    const sel = window.getSelection();
+    const selecting = !!sel && !sel.isCollapsed && app.contains(sel.anchorNode);
+    if (modal.hidden && !typing && !selecting && !$('#wk')?.value) redraw();
   } catch (err) {
     if (err.status === 401) { state = null; renderAuth(); return; }
     toast(err.message, true);
   }
+}
+/** Re-draws the page keeping where its scrolled lists were (the activity list jumped back to the top every 3 s, a
+ *  sideways-scrolled History table jumped back to its left edge). */
+function redraw() {
+  const kept = $$('.feed, .table-wrap').map((el) => [el.scrollTop, el.scrollLeft]);
+  render();
+  $$('.feed, .table-wrap').forEach((el, i) => { if (kept[i]) { el.scrollTop = kept[i][0]; el.scrollLeft = kept[i][1]; } });
 }
 function startPolling() {
   stopPolling();

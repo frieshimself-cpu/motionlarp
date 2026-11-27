@@ -1,4 +1,12 @@
 // Shared by the trading app (app.js) and the admin page (admin.js).
+// The fonts load after the page has drawn (a stylesheet in the page's head held the whole page blank until Google's font
+// server answered); the text shows in the system font until then.
+{
+  const f = document.createElement('link');
+  f.rel = 'stylesheet';
+  f.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap';
+  document.head.append(f);
+}
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 export const app = $('#app');
