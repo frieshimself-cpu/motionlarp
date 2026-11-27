@@ -6,7 +6,7 @@
 import type { Keypair } from '@solana/web3.js';
 import { lamportsToSol } from '../config.js';
 import { friendlyError, log, safeErrorMessage } from '../log.js';
-import type { CopyRow, Position, Store } from '../store.js';
+import type { CopyRow, Position, SellOut, Store } from '../store.js';
 import { soldShare, type LeaderTrade } from '../watch/parse.js';
 import type { Executor } from './executor.js';
 import { dueSells, type SellOrder, type SellReason } from './rules.js';
@@ -52,6 +52,20 @@ export function fmtTokens(amount: bigint, decimals: number): string {
   if (v >= 1e3) return `${short(v / 1e3)}K`;
   return short(v);
 }
+
+type OkFill = Extract<Awaited<ReturnType<Executor['sell']>>, { ok: true }>;
+/** What booking a sell of the queue did: whether it closed the position, whether the market paid for only part of a
+ *  full exit, and its fill. */
+interface Booking { closed: boolean; partial: boolean; fillId: number }
+
+/** A sell written down by an earlier process and not found on chain this long after it was sent can no longer land
+ *  (its blockhash lives about 60 to 90 s): it is dropped and its rule may sell again. */
+const SELL_OUT_EXPIRES_MS = 180_000;
+
+/** What a sell answers when the server is shutting down (src/server.ts stops the engine, then waits and exits). */
+const STOPPING = 'the server is restarting';
+/** What a press of Sell now is told then: it is written down and sold after the restart. */
+const STOPPING_ANSWER = 'the server is restarting: this sell goes out as soon as it is back (a few seconds)';
 
 /** An automatic sell that fails is retried after these pauses, then given up (Sell now stays available). */
 const RETRY_MS = [250, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
@@ -104,16 +118,29 @@ export class Engine {
   private readonly balanceReads = new Map<string, Promise<bigint>>();
   /** SOL each wallet's buys under way have counted on (released once the wallet has been read after them). */
   private readonly spending = new Map<string, bigint>();
-  /** Their sells that arrived while our buy's outcome was unknown: run once the buy is settled. */
+  /** Their sells that arrived while our buy's outcome was unknown, or while a sell from before a restart was not
+   *  settled yet: run once that is settled. */
   private readonly pendingMirror = new Map<number, SellOrder[]>();
   /** Full exits that went out while another of our sells was on its way: once nothing is out any more, whatever is
    *  still held is sold too (an overlapping sell the market paid only part of, or one that failed for good). */
   private readonly exitOwed = new Map<number, SellOrder>();
   /** Failures of an owed Sell now's re-runs, per order (its feed line is written on the first one only). */
   private readonly owedFails = new Map<string, { positionId: number; n: number }>();
+  /** Signatures of this process's own sells that are written down (sells_out) and still in its hands. */
+  private readonly sending = new Set<string>();
+  /**
+   * Sells written down by an earlier process (it crashed, or stopped while their outcome was unknown) and not settled
+   * yet. Until restore() has read what became of them they count as on their way: their coins stay reserved (Sell now
+   * takes only what is free, and the coin is not bought again: one landing later would sell the new coins), and the
+   * position's rules send nothing (their own step may have sold already; a rule of what is left must see it booked).
+   */
+  private readonly orphans = new Map<string, SellOut>();
+  private readonly settlingOrphans = new Set<string>();
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? Date.now;
+    // Before the first tick: a step whose sell is still out must not go out again.
+    this.adoptOrphans();
   }
 
   // ── leader trades ─────────────────────────────────────────────────────
@@ -122,6 +149,8 @@ export class Engine {
    * keep reading the next transactions meanwhile).
    */
   async onLeaderTrade(t: LeaderTrade): Promise<void> {
+    // Shutting down: no new copies (the buy is left unseen, so a new process may still take it within its 20 s).
+    if (this.stopped && t.side === 'buy') return;
     // A copy of a fast trader's buy that is this late is a loss more often than not (the poll, the backup feed,
     // brings trades 4-5 s late; a restart can bring older ones).
     const staleSec = this.deps.staleSec ?? 20;
@@ -147,9 +176,14 @@ export class Engine {
         if (p.sell.mirror.mode === 'exit' && !soldOut) continue;
         const percent = p.sell.mirror.mode !== 'same' || soldOut ? 100 : share * 100;
         const order: SellOrder = { reason: 'mirror', percent, tag: t.signature };
+        // Written down at once: their full exit until the position is closed, their partial sell until our share of it
+        // is sold. A restart or a crash before then (it may wait behind another sell of ours) must not forget it.
+        if (percent >= 100) this.writeExitOwed(p, order);
+        else this.oweSell(p, order);
+        if (this.stopped) { this.oweAfterRestart(p.id, order); continue; }
         const key = this.orderKey(p.id, order);
         this.inFlight.add(key);
-        jobs.push(this.enqueue(p.id, () => this.sell(p.id, order)).finally(() => this.inFlight.delete(key)));
+        jobs.push(this.enqueue(p.id, () => this.sell(p.id, order)).finally(() => { this.inFlight.delete(key); this.closeIfEmpty(p.id); }));
       }
     }
     void Promise.all(jobs);
@@ -286,6 +320,12 @@ export class Engine {
       // The buy's signature is written down the moment it is signed: if the outcome is lost (a crash, no answer from
       // the RPC), restore() reads that very transaction instead of guessing from the wallet.
       // (Signed means sent for real: the row says live from here on, even if Live was switched on while it was built.)
+      // The server stopped while the wallet's balance was read: the copy is not made.
+      if (this.stopped) {
+        store.updatePosition(id, { status: 'failed', closedAt: this.now() });
+        store.addEvent({ userId: copy.userId, copyId: copy.id, kind: 'skip', message: `Skipped ${label}: the server is restarting`, mint: t.mint, signature: t.signature });
+        return;
+      }
       let signedAt = 0;
       const onSigned = (sig: string) => { signedAt = Date.now(); store.updatePosition(id, { buySig: sig, mode: 'live' }); };
       const fill = await executor.buy({ wallet, mint: t.mint, lamports, slippagePct: s.slippagePct, priorityFeeSol: s.priorityFeeSol, tipSol: s.tipSol ?? 0, live: true, feeBps, onSigned, ...(t.curve ? { curve: t.curve } : {}), ...(t.heardAt ? { heardAt: t.heardAt } : {}) });
@@ -327,6 +367,7 @@ export class Engine {
 
   // ── the clock ─────────────────────────────────────────────────────────
   async tick(): Promise<void> {
+    if (this.stopped) return; // shutting down: overdue steps go out after the restart
     const now = this.now();
     for (const [key, r] of this.retries) {
       if (this.deps.store.position(r.positionId)?.status !== 'open') { this.retries.delete(key); continue; }
@@ -334,6 +375,7 @@ export class Engine {
     }
     for (const [key, f] of this.owedFails) if (this.deps.store.position(f.positionId)?.status !== 'open') this.owedFails.delete(key);
     const positions = this.deps.store.activePositions().filter((p) => p.status === 'open');
+    for (const p of positions) if (p.tokensHeld <= 0n) this.closeIfEmpty(p.id);
     await Promise.all(positions.map((p) => this.tickOne(p)));
   }
 
@@ -354,6 +396,10 @@ export class Engine {
     this.quoting.add(p.id);
     try {
       const value = await this.deps.executor.quoteSell(p.mint, p.tokensBought);
+      // A price check that comes back after the stop starts nothing (fuzzer case 20: its dead-coin sale went out from
+      // a stopped server, landed after the process had exited and was never booked). The rules are checked again
+      // after the restart.
+      if (this.stopped) return;
       this.quoteOkAt.set(p.id, this.now());
       const fresh = this.deps.store.position(p.id);
       if (!fresh || fresh.status !== 'open') return;
@@ -371,6 +417,8 @@ export class Engine {
   }
 
   private fireDue(view: Position, now: number): void {
+    // (a position waiting for a sell from before a restart: its rules go once that is settled, still due then)
+    if (this.stopped || this.waitsForOrphan(view.id)) return;
     for (const order of dueSells(view, now)) {
       if (order.reason === 'dead_coin' && now - (this.quoteOkAt.get(view.id) ?? 0) > QUOTE_FRESH_MS) continue;
       if (this.retries.has(this.orderKey(view.id, order))) continue; // waiting for its retry time
@@ -427,11 +475,13 @@ export class Engine {
   /** Sent at its own time whether or not earlier steps are confirmed; never queued behind them. */
   private runBagStep(positionId: number, order: SellOrder): void {
     const key = this.orderKey(positionId, order);
-    if (this.inFlight.has(key)) return;
+    // (stopped: the step is overdue after the restart and goes then; waiting for a sell from before a restart: once it
+    // is settled)
+    if (this.inFlight.has(key) || this.stopped || this.waitsForOrphan(positionId)) return;
     this.inFlight.add(key);
     const job: Promise<void> = this.bagStep(positionId, order, key)
       .catch((err) => log.warn('timed step failed', { position: positionId, error: safeErrorMessage(err) }))
-      .finally(() => { this.inFlight.delete(key); this.loose.delete(job); });
+      .finally(() => { this.inFlight.delete(key); this.loose.delete(job); this.closeIfEmpty(positionId); });
     this.loose.add(job);
   }
 
@@ -442,7 +492,8 @@ export class Engine {
     const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     let failures = 0;
     for (;;) {
-      if (this.stopped) return; // shutting down: the step stays owed and goes out after the restart
+      // Shutting down, or waiting for a sell from before a restart: the step stays due and goes out after.
+      if (this.stopped || this.waitsForOrphan(positionId)) return;
       const p = store.position(positionId);
       if (!p || p.status !== 'open' || p.firedTimed.includes(stage)) return;
       const label = `${shortMint(p.mint)} (${p.copyName})`;
@@ -479,6 +530,8 @@ export class Engine {
           tokens = want < free ? want : free;
           if (tokens <= 0n) { store.updatePosition(p.id, { firedTimed: [...new Set([...p.firedTimed, stage])] }); return; }
         }
+        // The server stopped while the wallet was read: nothing is sent (the step is overdue after the restart).
+        if (this.stopped) return;
         const copy = store.copyIncludingDeleted(p.copyId);
         const sentAt = this.now();
         const mine = this.reserved.get(p.id) ?? new Map<string, bigint>();
@@ -487,12 +540,14 @@ export class Engine {
         let fill: Awaited<ReturnType<Executor['sell']>>;
         let signature: string | null = null;
         let partial = false;
+        let outcome: 'booked' | 'failed' | 'unknown' = 'unknown';
+        const asked = tokens;
         try {
           fill = await executor.sell({
             wallet, mint: p.mint, tokens, slippagePct: copy?.settings.slippagePct ?? 25,
             priorityFeeSol: copy?.settings.sellPriorityFeeSol ?? copy?.settings.priorityFeeSol ?? 0.0005,
             tipSol: copy?.settings.sellTipSol ?? copy?.settings.tipSol ?? 0, live, feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0,
-            exit: live, checkFirst: failures > 0, closeIfEmpty: !!order.everything, onSigned: (sig) => { signature = sig; },
+            exit: live, checkFirst: failures > 0, closeIfEmpty: !!order.everything, onSigned: (sig) => { signature = sig; this.writeSellOut(p, order, asked, sig, sentAt); },
           });
           // Nobody could tell us whether it landed: settled from its own transaction first, its coins still reserved.
           if (!fill.ok && fill.uncertain) fill = await this.settleUnknownSell(signature, owner, p.mint, sentAt, fill.error);
@@ -504,12 +559,18 @@ export class Engine {
             // part of its share, and the last step sells what is left (at the slow pace when the market was short).
             const after = live && order.everything ? await executor.tokenBalance(owner, p.mint).catch(() => null) : null;
             partial = !!order.everything && fill.tokens < tokens;
-            this.settleSell(p.id, order, fill, sentAt, after, !!order.everything, partial, key);
-          }
+            const ok = fill;
+            store.atomic(() => this.settleSell(p.id, order, ok, sentAt, after, !!order.everything, partial, key));
+            outcome = 'booked';
+          } else if (!fill.uncertain) outcome = 'failed';
         } finally {
           mine.delete(key);
           if (!mine.size) this.reserved.delete(p.id);
+          this.doneWithSellOut(signature, outcome);
         }
+        // Still unknown when the server stopped: written down for the next process, which settles it (and books it if
+        // it landed); the step stays due until then.
+        if (!fill.ok && fill.uncertain && this.stopped) return;
         this.followUpExit(p.id);
         if (fill.ok) {
           if (!fill.simulated) this.balanceChanged(owner); // the wallet's SOL just changed: read again, in the background
@@ -546,12 +607,15 @@ export class Engine {
     }
   }
 
-  /** Books a finished sell. Synchronous from the re-read on, so overlapping sells cannot corrupt the position.
-   *  `partial`: the market paid for only part of a sell of everything; the order stays owed (not marked done). */
-  private settleSell(positionId: number, order: SellOrder, fill: Extract<Awaited<ReturnType<Executor['sell']>>, { ok: true }>, sentAt: number, walletAfter: bigint | null, keepOwed = false, marketShort = false, key = ''): void {
+  /** Books a finished sell of a timed step of the bag. Synchronous from the re-read on, so overlapping sells cannot
+   *  corrupt the position. `partial`: the market paid for only part of a sell of everything; the order stays owed
+   *  (not marked done). The same code books such a sell from before a restart (settleOrphans); its row in sells_out
+   *  goes in the same step. */
+  private settleSell(positionId: number, order: SellOrder, fill: OkFill, sentAt: number, walletAfter: bigint | null, keepOwed = false, marketShort = false, key = ''): void {
     const { store } = this.deps;
     const p = store.position(positionId);
     if (!p) return;
+    if (!fill.simulated) store.deleteSellOut(fill.signature);
     const sold = fill.tokens > p.tokensHeld ? p.tokensHeld : fill.tokens;
     // A test fill for tokens the books no longer hold is not money: count only what was really still there.
     const lamports = fill.simulated && fill.tokens > 0n && sold < fill.tokens ? (fill.lamports * sold) / fill.tokens : fill.lamports;
@@ -594,15 +658,42 @@ export class Engine {
   }
 
   private run(positionId: number, order: SellOrder): void {
+    if (this.stopped) { this.oweAfterRestart(positionId, order); return; }
+    if (this.waitsForOrphan(positionId)) { this.holdForOrphan(positionId, order); return; }
     const key = this.orderKey(positionId, order);
     if (this.inFlight.has(key)) return;
     this.inFlight.add(key);
-    void this.enqueue(positionId, () => this.sell(positionId, order)).finally(() => this.inFlight.delete(key));
+    void this.enqueue(positionId, () => this.sell(positionId, order)).finally(() => { this.inFlight.delete(key); this.closeIfEmpty(positionId); });
+  }
+
+  /** True while anything of this position is queued or running (its buy, a sell, a timed step) or a sell of it is out. */
+  private busy(positionId: number): boolean {
+    if (this.queues.has(positionId) || this.reserved.get(positionId)?.size) return true;
+    const prefix = `${positionId}:`;
+    for (const key of this.inFlight) if (key.startsWith(prefix)) return true;
+    return false;
+  }
+
+  /**
+   * An open position whose books hold nothing, with nothing of it under way, is closed. Nothing else would close it:
+   * the rules, their sells, the safety pass and Sell now all skip a position that holds nothing, so it stayed open
+   * for good and its coin could never be copied again (fuzzer case 18: the exact coin count of a buy booked with the
+   * quote's count took the books to nothing while a sell of the rest was out, and that sell then failed). A retry or
+   * an owed exit waiting for it is not "under way": they sell what the books hold, and the books hold nothing. If the
+   * buy's exact count later shows more coins, exactBuy opens it again and sells them, as for any closed position.
+   */
+  private closeIfEmpty(positionId: number): void {
+    const { store } = this.deps;
+    const p = store.position(positionId);
+    if (!p || p.status !== 'open' || p.tokensHeld > 0n || this.busy(positionId)) return;
+    store.updatePosition(p.id, { status: 'closed', tokensHeld: 0n, closedAt: this.now() });
+    store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${shortMint(p.mint)} (${p.copyName}): nothing of it is left to sell — closed`, mint: p.mint });
   }
 
   async sellNow(userId: number, positionId: number): Promise<{ ok: boolean; error?: string }> {
     const p = this.deps.store.position(positionId);
     if (!p || p.userId !== userId || p.status !== 'open') return { ok: false, error: 'no open position with that id' };
+    if (this.stopped) return this.notSent(p, { reason: 'manual', percent: 100 });
     // A click deserves more than one try: when the first fails (often because one of our own timed sells landed in
     // between and the amount was stale) it is tried again at once, and once more a moment later. Only the last
     // failure is shown.
@@ -610,9 +701,26 @@ export class Engine {
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 2) await new Promise((r) => setTimeout(r, this.deps.zeroRecheckMs ?? 300));
       result = await this.enqueue(positionId, () => this.sell(positionId, { reason: 'manual', percent: 100 }, attempt < 2, attempt > 0));
-      if (result.ok || result.error === 'position is not open') break;
+      if (result.ok || result.error === 'position is not open' || result.error === STOPPING_ANSWER) break;
     }
     return result;
+  }
+
+  /**
+   * A sell the stopped engine does not send (the server is shutting down: see stop()). What would not come back by
+   * itself is written down (oweAfterRestart); a press of Sell now gets its answer, in the feed too.
+   */
+  private notSent(p: Position, order: SellOrder, sentUnknown = false): { ok: false; error: string } {
+    this.oweAfterRestart(p.id, order);
+    if (order.reason === 'manual' && !order.rest) {
+      const label = `${shortMint(p.mint)} (${p.copyName})`;
+      const message = sentUnknown
+        ? `Sell of ${label} (you pressed Sell now): sent, but the server is restarting before its outcome is known. It is read from its own transaction as soon as the server is back, and sold then if it did not land.`
+        : `Sell of ${label} (you pressed Sell now) did not go out: the server is restarting. It is sold as soon as the server is back (a few seconds).`;
+      this.deps.store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message, mint: p.mint });
+      return { ok: false, error: STOPPING_ANSWER };
+    }
+    return { ok: false, error: STOPPING };
   }
 
   /**
@@ -629,11 +737,32 @@ export class Engine {
     return balance;
   }
 
-  private markDone(p: Position, order: SellOrder): Partial<Pick<Position, 'firedTimed' | 'firedStop' | 'deadFired'>> {
+  private markDone(p: Position, order: SellOrder): Partial<Pick<Position, 'firedTimed' | 'firedStop' | 'deadFired' | 'owedSells'>> {
     if (order.reason === 'timed' && order.stage !== undefined) return { firedTimed: [...new Set([...p.firedTimed, order.stage])] };
     if (order.reason === 'stop_loss' && order.stage !== undefined) return { firedStop: [...new Set([...p.firedStop, order.stage])] };
     if (order.reason === 'dead_coin') return { deadFired: true };
+    if (order.reason === 'mirror' && order.percent < 100 && order.tag) {
+      // Their partial sell is done (sold, nothing left for it, or given up): no longer owed. (Read fresh: another of
+      // theirs may have been written down since this sell began.)
+      const owed = this.deps.store.position(p.id)?.owedSells ?? p.owedSells;
+      const left = owed.filter((o) => !(o.reason === order.reason && o.tag === order.tag));
+      if (left.length !== owed.length) return { owedSells: left };
+    }
     return {};
+  }
+
+  /**
+   * Their partial sell ("same share") is written down the moment it is heard, and stays until it is done: a restart
+   * or a crash before then must not forget it (fuzzer case 19: one waiting for its retry was lost, its retry living in
+   * memory only). restore() runs it after a restart, once; not while a sell of it from before the restart is still
+   * unsettled (one that went out and landed is done when it is booked).
+   */
+  private oweSell(p: Position, order: SellOrder): void {
+    if (order.reason !== 'mirror' || order.percent >= 100 || !order.tag) return;
+    if (p.owedSells.some((o) => o.reason === order.reason && o.tag === order.tag)) return;
+    const owed = [...p.owedSells, { reason: order.reason, percent: order.percent, tag: order.tag }];
+    this.deps.store.updatePosition(p.id, { owedSells: owed });
+    p.owedSells = owed;
   }
 
   private async sell(positionId: number, order: SellOrder, quiet = false, retry = false): Promise<{ ok: boolean; error?: string }> {
@@ -646,11 +775,19 @@ export class Engine {
       kept.push(order);
       this.pendingMirror.set(p.id, kept);
       // Their full exit is also written down: a restart before the buy is settled must not forget it.
-      if (order.percent >= 100 && !p.exitOwed) store.updatePosition(p.id, { exitOwed: { reason: order.reason, ...(order.tag ? { tag: order.tag } : {}) } });
+      if (order.percent >= 100) this.writeExitOwed(p, order);
       if (kept.length === 1) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'info', message: `${shortMint(p.mint)} (${p.copyName}): they sold while our buy's outcome is not known yet — sold as soon as the buy is settled`, mint: p.mint });
       return { ok: false, error: 'waiting for the buy to be settled' };
     }
     if (!p || p.status !== 'open' || p.tokensHeld <= 0n) return { ok: false, error: 'position is not open' };
+    // Queued before the server began to shut down: not sent now (what does not come back by itself is owed).
+    if (this.stopped) return this.notSent(p, order);
+    // A sell of this position from before a restart is not settled yet: a rule waits for it (Sell now, the user's own
+    // press, goes: it takes only what is free).
+    if (order.reason !== 'manual' && this.waitsForOrphan(p.id)) {
+      this.holdForOrphan(p.id, order);
+      return { ok: false, error: 'waiting for a sell sent before the restart to be settled' };
+    }
     const label = `${shortMint(p.mint)} (${p.copyName})`;
     const wallet = this.deps.walletFor(p.userId);
     if (!wallet) {
@@ -700,6 +837,8 @@ export class Engine {
         store.updatePosition(p.id, this.markDone(books, order));
         return { ok: true };
       }
+      // The server stopped while the wallet was read: nothing is sent.
+      if (this.stopped) return this.notSent(books, order);
       const copy = store.copyIncludingDeleted(p.copyId);
       const slippagePct = copy?.settings.slippagePct ?? 25;
       // (copies saved before sell fees existed fall back to their buy fees)
@@ -716,11 +855,10 @@ export class Engine {
       this.reserved.set(p.id, mine);
       let fill: Awaited<ReturnType<Executor['sell']>>;
       let signature: string | null = null;
-      let closed = false;
-      let partial = false;
-      let fillId = 0;
+      let booking: Booking | null = null;
+      let outcome: 'booked' | 'failed' | 'unknown' = 'unknown';
       try {
-        fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0, exit: live, checkFirst, closeIfEmpty: order.percent >= 100 && inFlight === 0n, onSigned: (sig) => { signature = sig; } });
+        fill = await executor.sell({ wallet, mint: p.mint, tokens, slippagePct, priorityFeeSol, tipSol, live: p.mode === 'live', feeBps: this.deps.feeBpsFor?.(p.userId) ?? 0, exit: live, checkFirst, closeIfEmpty: order.percent >= 100 && inFlight === 0n, onSigned: (sig) => { signature = sig; this.writeSellOut(p, order, tokens, sig, sentAt); } });
         // Nobody could tell us whether it landed: settled from its own transaction first, its coins still reserved.
         if (!fill.ok && fill.uncertain) fill = await this.settleUnknownSell(signature, owner, p.mint, sentAt, fill.error);
         if (fill.ok) {
@@ -729,53 +867,81 @@ export class Engine {
           // overwritten (its SOL used to vanish from the profit), and this sell's coins, gone from the wallet but not
           // booked yet, are not taken off the books by another sell's booking in between.
           const after = live ? await executor.tokenBalance(owner, p.mint).catch(() => null) : null;
-          const cur = store.position(p.id) ?? p;
-          let left = cur.tokensHeld - fill.tokens;
-          if (after !== null) {
-            // If the wallet holds less than our books say (sold elsewhere), believe the wallet, counting what our
-            // other sells still have on their way (landed or not, they are booked when they confirm). A failed read
-            // keeps our own figure: an RPC hiccup must not close a position.
-            const cap = after + this.reservedExcept(p.id, key);
-            if (cap < left) left = cap;
-          }
-          if (left < 0n) left = 0n;
-          closed = left === 0n;
-          // A sell of everything that the market could pay only part of (a curve short of SOL): the rest is sold on
-          // a later try at the slow pace (the curve needs buyers to fill up again); the order is not done until then.
-          // Sell now says so instead: the user decides when to press it again.
-          partial = order.percent >= 100 && fill.tokens < tokens && !closed;
-          store.updatePosition(p.id, {
-            tokensHeld: left,
-            proceedsLamports: cur.proceedsLamports + fill.lamports,
-            ...(closed && cur.status === 'open' ? { status: 'closed' as const, closedAt: this.now() } : {}),
-            ...(partial ? {} : this.markDone(cur, order)),
-          });
-          this.retries.delete(key);
-          if (partial && order.reason !== 'manual') this.retries.set(key, { positionId: p.id, order, tries: 1, nextAt: this.now() + (this.deps.slowRetryMs ?? SLOW_RETRY_MS) });
-          // A full exit that left coins (to our other sells on their way, or to one between its retries that may yet
-          // fail for good): once nothing else is out, whatever is still held is sold too.
-          if (!closed && !partial && order.percent >= 100) this.oweExit(p.id, order);
-          fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n, exactPending: !!fill.refine && !fill.simulated });
-        }
+          const ok = fill;
+          booking = store.atomic(() => this.bookSell(p, order, key, tokens, ok, after));
+          outcome = 'booked';
+        } else if (!fill.uncertain) outcome = 'failed';
       } finally {
         mine.delete(key);
         if (!mine.size) this.reserved.delete(p.id);
+        this.doneWithSellOut(signature, outcome);
       }
       if (!fill.ok) {
+        // Still unknown when the server stopped: it is written down (sells_out) and the next process settles it from
+        // its own transaction, and books it if it landed. Not a failure (it may well have landed): no retry, no
+        // failure line; whatever would not come back by itself stays owed (oweAfterRestart).
+        if (fill.uncertain && this.stopped) return this.notSent(books, order, true);
         const failed = this.sellFailed(p, order, label, fill.error, quiet);
         this.followUpExit(p.id);
         return failed;
       }
-      if (!fill.simulated) this.balanceChanged(owner); // the wallet's SOL just changed: read again, in the background
-      const booked = fill.lamports;
-      this.refineLater(fillId, fill.refine, (exact) => this.exactSell(p.id, fillId, booked, exact.lamports));
-      this.soldSome(p.id);
-      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, fill.lamports, sentAt, fill.simulated, closed, partial), mint: p.mint, signature: fill.simulated ? null : fill.signature });
-      this.followUpExit(p.id);
+      if (booking) this.afterSell(p, order, fill, booking, sentAt, owner);
       return { ok: true };
     } catch (err) {
       return this.sellFailed(p, order, label, safeErrorMessage(err), quiet);
     }
+  }
+
+  /**
+   * Books a sell of the position's queue (their sell, a rule of what is left, a stop loss, dead coin, Sell now, the rest
+   * of a full exit). Synchronous, while its coins are still reserved under `key`, after the wallet was read
+   * (`walletAfter`, null when it could not be read). The same code books a sell from before a restart that is settled
+   * from its own transaction (settleOrphans), so the two can never drift apart. The sell's row in sells_out goes in
+   * the same step.
+   */
+  private bookSell(p0: Position, order: SellOrder, key: string, asked: bigint, fill: OkFill, walletAfter: bigint | null): Booking {
+    const { store } = this.deps;
+    const cur = store.position(p0.id) ?? p0;
+    let left = cur.tokensHeld - fill.tokens;
+    if (walletAfter !== null) {
+      // If the wallet holds less than our books say (sold elsewhere), believe the wallet, counting what our other
+      // sells still have on their way (landed or not, they are booked when they confirm). A failed read keeps our
+      // own figure: an RPC hiccup must not close a position.
+      const cap = walletAfter + this.reservedExcept(cur.id, key);
+      if (cap < left) left = cap;
+    }
+    if (left < 0n) left = 0n;
+    const closed = left === 0n;
+    // A sell of everything that the market could pay only part of (a curve short of SOL): the rest is sold on a later
+    // try at the slow pace (the curve needs buyers to fill up again); the order is not done until then. Sell now says
+    // so instead: the user decides when to press it again.
+    const partial = order.percent >= 100 && fill.tokens < asked && !closed;
+    store.updatePosition(cur.id, {
+      tokensHeld: left,
+      proceedsLamports: cur.proceedsLamports + fill.lamports,
+      ...(closed && cur.status === 'open' ? { status: 'closed' as const, closedAt: this.now() } : {}),
+      ...(partial ? {} : this.markDone(cur, order)),
+    });
+    const retryKey = this.orderKey(cur.id, order);
+    this.retries.delete(retryKey);
+    if (partial && order.reason !== 'manual') this.retries.set(retryKey, { positionId: cur.id, order, tries: 1, nextAt: this.now() + (this.deps.slowRetryMs ?? SLOW_RETRY_MS) });
+    // A full exit that left coins (to our other sells on their way, or to one between its retries that may yet fail
+    // for good): once nothing else is out, whatever is still held is sold too.
+    if (!closed && !partial && order.percent >= 100) this.oweExit(cur.id, order);
+    const fillId = store.insertFill({ positionId: cur.id, userId: cur.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n, exactPending: !!fill.refine && !fill.simulated });
+    if (!fill.simulated) store.deleteSellOut(fill.signature);
+    return { closed, partial, fillId };
+  }
+
+  /** After a sell of the queue was booked and its coins released: the wallet's SOL, its exact SOL, its line in the
+   *  feed, and the rest of a full exit that is owed. */
+  private afterSell(p: Position, order: SellOrder, fill: OkFill, b: Booking, sentAt: number, owner: string): void {
+    if (!fill.simulated) this.balanceChanged(owner); // the wallet's SOL just changed: read again, in the background
+    const booked = fill.lamports;
+    this.refineLater(b.fillId, fill.refine, (exact) => this.exactSell(p.id, b.fillId, booked, exact.lamports));
+    this.soldSome(p.id);
+    this.deps.store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, fill.lamports, sentAt, fill.simulated, b.closed, b.partial), mint: p.mint, signature: fill.simulated ? null : fill.signature });
+    this.followUpExit(p.id);
   }
 
   /** Something of this position sold: a sell of it that fails from now on says so again. */
@@ -815,7 +981,7 @@ export class Engine {
       const wait = RETRY_MS[tries - 1] ?? slow;
       this.retries.set(key, { positionId: p.id, order, tries, nextAt: this.now() + wait });
       // A full exit that keeps failing is also written down: a restart must not forget it (its retry is in memory).
-      if (fullExit && !p.exitOwed) store.updatePosition(p.id, { exitOwed: { reason: order.reason, ...(order.tag ? { tag: order.tag } : {}) } });
+      if (fullExit) this.writeExitOwed(p, order);
       // One feed line per failing sell, not one per retry; one more when it turns into the slow, endless kind.
       if (tries === 1) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${error} — retrying`, mint: p.mint });
       if (tries === MAX_SELL_TRIES) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `The sell of ${label} (${why}) has failed ${tries} times (${error}): still trying every ${Math.max(1, Math.round(slow / 1000))} s until it sells. Sell now works too.`, mint: p.mint });
@@ -854,8 +1020,9 @@ export class Engine {
     const sold = store.sellsOf(positionId);
     const held = exact.tokens > sold.tokens ? exact.tokens - sold.tokens : 0n;
     if (p.status === 'open') {
-      const empty = held === 0n && this.reservedExcept(positionId, '') === 0n;
-      store.updatePosition(positionId, { tokensBought: exact.tokens, tokensHeld: held, ...(empty ? { status: 'closed' as const, closedAt: this.now() } : {}) });
+      store.updatePosition(positionId, { tokensBought: exact.tokens, tokensHeld: held });
+      // Nothing left: closed now, or by whatever of it is still under way once that is over.
+      this.closeIfEmpty(positionId);
       return;
     }
     store.updatePosition(positionId, { tokensBought: exact.tokens });
@@ -898,6 +1065,141 @@ export class Engine {
     }
   }
 
+  // ── sells written down before they go out ────────────────────────────
+  /**
+   * A sell of a position bought for real is written down the moment it is signed, before it goes out (sells_out), as a
+   * buy's signature is (buy_sig): if this process never learns what became of it (a crash, a restart while its outcome
+   * is unknown), the next one reads it from its own transaction (settleOrphans) instead of forgetting it: its SOL was
+   * never booked, its step was asked again with an empty wallet, and it could land later on the next position's coins.
+   */
+  private writeSellOut(p: Position, order: SellOrder, tokens: bigint, signature: string, sentAt: number): void {
+    if (p.mode !== 'live') return; // a test sell is never sent
+    this.sending.add(signature);
+    this.deps.store.insertSellOut({ signature, positionId: p.id, userId: p.userId, mint: p.mint, order, tokens, sentAt });
+  }
+
+  /** This process is done with one of its sells. Booked: its row went with the booking. Failed: it goes now. Outcome
+   *  still unknown (the server stopped), or an error in between: it stays, and is settled like any other left behind
+   *  (while the engine runs, at once: the position waits for it, it may have sold). */
+  private doneWithSellOut(signature: string | null, outcome: 'booked' | 'failed' | 'unknown'): void {
+    if (!signature) return;
+    if (outcome === 'failed') this.deps.store.deleteSellOut(signature);
+    this.sending.delete(signature);
+    if (outcome === 'unknown' && !this.stopped) this.adoptOrphans();
+  }
+
+  /** True while a sell of this position written down by an earlier process is not settled yet (see `orphans`). */
+  private waitsForOrphan(positionId: number): boolean {
+    for (const o of this.orphans.values()) if (o.positionId === positionId) return true;
+    return false;
+  }
+
+  /**
+   * An order of a rule that comes while the position waits for a sell from before a restart: not sent now. A timed
+   * step, a stop loss level or the dead-coin rule is still due afterwards (the clock fires it); their sell is kept
+   * and runs once the position is settled (as while our buy's outcome is unknown), and a full exit is written down.
+   */
+  private holdForOrphan(positionId: number, order: SellOrder): void {
+    if (order.reason === 'mirror' && !order.rest) {
+      const kept = this.pendingMirror.get(positionId) ?? [];
+      if (!kept.some((o) => this.orderKey(positionId, o) === this.orderKey(positionId, order))) kept.push(order);
+      this.pendingMirror.set(positionId, kept);
+    }
+    this.oweAfterRestart(positionId, order);
+  }
+
+  /** Takes up the sells written down that no process is handling (see `orphans`). */
+  private adoptOrphans(): void {
+    for (const s of this.deps.store.sellsOut()) {
+      if (this.sending.has(s.signature) || this.orphans.has(s.signature)) continue;
+      this.orphans.set(s.signature, s);
+      const mine = this.reserved.get(s.positionId) ?? new Map<string, bigint>();
+      mine.set(`out:${s.signature}`, s.tokens);
+      this.reserved.set(s.positionId, mine);
+    }
+  }
+
+  /** A sell from before a restart is settled: its coins are released, and once the position waits for none of them
+   *  any more, what was held back goes (their sells kept meanwhile, the rest of a full exit; the clock does the rest). */
+  private releaseOrphan(s: SellOut): void {
+    if (!this.orphans.delete(s.signature)) return;
+    const mine = this.reserved.get(s.positionId);
+    mine?.delete(`out:${s.signature}`);
+    if (mine && !mine.size) this.reserved.delete(s.positionId);
+    if (this.waitsForOrphan(s.positionId)) return;
+    this.firePending(s.positionId);
+    this.followUpExit(s.positionId);
+  }
+
+  /**
+   * Sells written down by an earlier process, settled from their own transactions: landed → booked by the same code
+   * that books this process's own sells (the step is done, the books and the proceeds move, the position closes if it
+   * is empty, the rest of a full exit stays owed); failed → dropped, and whatever its rule still calls for sells
+   * again; not found → kept while it can still land, then dropped; no answer → asked again on the next pass.
+   */
+  private async settleOrphans(): Promise<void> {
+    const { store, executor } = this.deps;
+    for (const o of [...this.orphans.values()]) {
+      if (this.stopped) return;
+      if (this.settlingOrphans.has(o.signature) || !this.orphans.has(o.signature)) continue;
+      const p = store.position(o.positionId);
+      const wallet = p ? this.deps.walletFor(p.userId) : null;
+      if (!p || !wallet || !executor.settleSell) { this.dropOrphan(o); continue; } // nothing can be learnt about it
+      if (!executor.isLive({ live: true, exit: true })) continue; // no connection to read it now: a later pass
+      const owner = wallet.publicKey.toBase58();
+      this.settlingOrphans.add(o.signature);
+      try {
+        let r: Awaited<ReturnType<NonNullable<Executor['settleSell']>>>;
+        try {
+          r = await executor.settleSell(o.signature, owner, o.mint);
+        } catch {
+          continue; // the RPC did not answer: the next pass
+        }
+        if (this.stopped || !this.orphans.has(o.signature)) continue;
+        if (r.state === 'landed') await this.bookOrphan(o, owner, r);
+        else if (r.state === 'failed' || this.now() - o.sentAt > SELL_OUT_EXPIRES_MS) this.dropOrphan(o, true);
+      } finally {
+        this.settlingOrphans.delete(o.signature);
+      }
+    }
+  }
+
+  /** A sell from before a restart that landed: booked as this process books its own, its coins reserved until then. */
+  private async bookOrphan(o: SellOut, owner: string, r: { tokens: bigint; lamports: bigint }): Promise<void> {
+    const { store, executor } = this.deps;
+    const key = `out:${o.signature}`;
+    const fill: OkFill = { ok: true, signature: o.signature, tokens: r.tokens, lamports: r.lamports, simulated: false, confirmedAt: this.now(), note: 'settled from its own transaction after a restart' };
+    const bag = o.order.basis === 'bag';
+    // The wallet after it, read where the normal path reads it (a sell of the queue, the last step of a ladder).
+    const after = !bag || o.order.everything ? await executor.tokenBalance(owner, o.mint).catch(() => null) : null;
+    if (this.stopped || !this.orphans.has(o.signature)) return;
+    const p = store.position(o.positionId);
+    if (!p) { this.dropOrphan(o); return; }
+    if (bag) {
+      const partial = !!o.order.everything && r.tokens < o.tokens;
+      store.atomic(() => this.settleSell(p.id, o.order, fill, o.sentAt, after, !!o.order.everything, partial, key));
+      this.balanceChanged(owner);
+    } else {
+      const booking = store.atomic(() => this.bookSell(p, o.order, key, o.tokens, fill, after));
+      this.afterSell(p, o.order, fill, booking, o.sentAt, owner);
+    }
+    // (released after its feed line: what was held back for it goes now)
+    this.releaseOrphan(o);
+    this.closeIfEmpty(p.id);
+  }
+
+  /** A sell from before a restart that did not land (or can no longer land): forgotten; its rule may sell again. */
+  private dropOrphan(o: SellOut, didNotLand = false): void {
+    const { store } = this.deps;
+    store.deleteSellOut(o.signature);
+    this.releaseOrphan(o);
+    const p = store.position(o.positionId);
+    if (p && didNotLand && o.order.reason === 'manual' && !o.order.rest && p.status === 'open' && !p.exitOwed) {
+      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${shortMint(p.mint)} (${p.copyName}) (you pressed Sell now) did not go through: it was sent just before the server restarted and did not land. Press Sell now again.`, mint: p.mint });
+    }
+    this.closeIfEmpty(o.positionId);
+  }
+
   // ── after a restart, and as a safety net ─────────────────────────────
   /**
    * Buys that were in flight when the server stopped. Test fills are dropped; a live one is settled by the wallet:
@@ -905,14 +1207,22 @@ export class Engine {
    */
   async restore(): Promise<void> {
     const { store } = this.deps;
+    if (this.stopped) return;
+    // Sells written down that no process is handling (an earlier process crashed, or stopped while their outcome was
+    // unknown): settled first, so what follows sees them booked or gone.
+    this.adoptOrphans();
+    await this.settleOrphans();
     await this.settleOpening();
     await this.settleEstimates().catch(() => undefined);
-    // Full exits owed (written down when they failed, left coins, or came while the buy was unsettled): after a restart
-    // nothing in memory remembers them. One that this process is already retrying or waiting on is left to that.
+    // Full exits owed (written down when they were heard, failed, left coins, or came while the buy was unsettled) and
+    // their partial sells not sold yet: after a restart nothing in memory remembers them. One that this process is
+    // already retrying or waiting on is left to that. A partial sell runs with its own tag, so it is the same order
+    // (done once it is booked); a full exit owed sells everything, theirs included.
     for (const p of store.activePositions()) {
-      if (p.status !== 'open' || !p.exitOwed || this.queues.has(p.id) || this.exitOwed.has(p.id) || this.pendingMirror.has(p.id)) continue;
-      if ([...this.retries.values()].some((r) => r.positionId === p.id)) continue;
-      this.run(p.id, { reason: p.exitOwed.reason, percent: 100, tag: `${p.exitOwed.tag ?? ''}:owed`, rest: true });
+      if (p.status !== 'open' || (!p.exitOwed && !p.owedSells.length) || this.queues.has(p.id) || this.exitOwed.has(p.id) || this.pendingMirror.has(p.id)) continue;
+      if ([...this.retries.values()].some((r) => r.positionId === p.id) || this.waitsForOrphan(p.id)) continue;
+      if (p.exitOwed) this.run(p.id, { reason: p.exitOwed.reason, percent: 100, tag: `${p.exitOwed.tag ?? ''}:owed`, rest: true });
+      else for (const o of p.owedSells) this.run(p.id, { reason: o.reason, percent: o.percent, ...(o.tag ? { tag: o.tag } : {}) });
     }
   }
 
@@ -975,6 +1285,7 @@ export class Engine {
    */
   async reconcile(): Promise<void> {
     const { store, executor } = this.deps;
+    if (this.stopped) return;
     const open = store.activePositions().filter((p) => p.status === 'open' && p.sell.mirror.enabled);
     const byCoin = new Map<string, Position[]>();
     for (const p of open) byCoin.set(`${p.leader}:${p.mint}`, [...(byCoin.get(`${p.leader}:${p.mint}`) ?? []), p]);
@@ -989,6 +1300,7 @@ export class Engine {
       if (leaderHolds > 0n) continue;
       for (const p of group) {
         if (this.now() - p.openedAt < 30_000) continue; // their balance may lag our own buy's view
+        if (this.waitsForOrphan(p.id)) continue; // a sell of it from before a restart is settled first
         this.run(p.id, { reason: 'mirror', percent: 100, tag: 'reconcile' });
       }
     }
@@ -999,11 +1311,35 @@ export class Engine {
   private oweExit(positionId: number, order: SellOrder): void {
     this.exitOwed.set(positionId, order);
     const p = this.deps.store.position(positionId);
-    if (p && !p.exitOwed) this.deps.store.updatePosition(positionId, { exitOwed: { reason: order.reason, ...(order.tag ? { tag: order.tag } : {}) } });
+    if (p) this.writeExitOwed(p, order);
+  }
+
+  /** Writes a full exit down on the position (positions.exit_owed) unless one is already owed: restore() sells it after
+   *  a restart, whatever was held in memory. It stays until the position is closed. */
+  private writeExitOwed(p: Position, order: SellOrder): void {
+    if (p.exitOwed || (p.status !== 'open' && p.status !== 'opening')) return;
+    const owed = { reason: order.reason, ...(order.tag ? { tag: order.tag } : {}) };
+    this.deps.store.updatePosition(p.id, { exitOwed: owed });
+    p.exitOwed = owed;
+  }
+
+  /**
+   * The stopped engine sends nothing: the server is shutting down (src/server.ts), and a sale sent now could land after
+   * the process has exited, never to be booked (fuzzer cases 20 and 21). What would not come back by itself after the
+   * restart is written down instead: a full exit that is not a rule of the clock (their exit, Sell now, the rest of a
+   * full exit) is owed and restore() sells it after the start. A timed step is overdue then and the clock fires it; a
+   * stop loss level and the dead-coin rule are checked again. (The same for an order held back while the position
+   * waits for a sell from before a restart: see holdForOrphan.)
+   */
+  private oweAfterRestart(positionId: number, order: SellOrder): void {
+    if (order.percent < 100 || (!order.rest && (order.reason === 'timed' || order.reason === 'stop_loss' || order.reason === 'dead_coin'))) return;
+    const p = this.deps.store.position(positionId);
+    if (p) this.writeExitOwed(p, order);
   }
 
   /** A full exit owed to this position (see exitOwed): sold now if nothing else of ours is on its way. */
   private followUpExit(positionId: number): void {
+    if (this.stopped) return; // (it is written down: sold after the restart)
     const order = this.exitOwed.get(positionId);
     if (!order) return;
     const p = this.deps.store.position(positionId);
@@ -1013,10 +1349,11 @@ export class Engine {
     this.run(positionId, { reason: order.reason, percent: 100, tag: `${order.tag ?? order.stage ?? ''}:rest`, rest: true });
   }
 
-  /** Runs their sells that were kept while this position's buy was unsettled (it has just opened). */
+  /** Runs their sells that were kept while this position's buy was unsettled (it has just opened), or while a sell of it
+   *  from before a restart was not settled yet. */
   private firePending(positionId: number): void {
     const orders = this.pendingMirror.get(positionId);
-    if (!orders) return;
+    if (!orders || this.waitsForOrphan(positionId)) return;
     this.pendingMirror.delete(positionId);
     for (const order of orders) this.run(positionId, order);
   }
@@ -1028,7 +1365,9 @@ export class Engine {
     const tail = next.catch(() => undefined);
     this.queues.set(positionId, tail);
     void tail.then(() => {
-      if (this.queues.get(positionId) === tail) this.queues.delete(positionId);
+      if (this.queues.get(positionId) !== tail) return;
+      this.queues.delete(positionId);
+      this.closeIfEmpty(positionId);
     });
     return next;
   }
@@ -1050,14 +1389,18 @@ export class Engine {
    * 'calm' when positions are open with nothing due that soon; 'idle' when nothing is open.
    */
   quietness(withinMs = 30_000): 'idle' | 'calm' | 'due' | 'trading' {
-    if (this.queues.size > 0 || this.loose.size > 0) return 'trading';
+    if (this.queues.size > 0 || this.loose.size > 0 || this.orphans.size > 0) return 'trading';
     const now = this.now();
     if (this.exitsDueWithin(withinMs) || [...this.retries.values()].some((r) => r.nextAt - now <= withinMs)) return 'due';
     return this.deps.store.activePositions().length ? 'calm' : 'idle';
   }
 
   private stopped = false;
-  /** Shutdown: retry loops end (their steps stay owed and are picked up after the restart). */
+  /**
+   * Shutdown: nothing new is sent from here on, whatever starts it (the clock, a price check coming back, a retry,
+   * their trade, Sell now, the exact count of a buy). Retry loops end; sells already out are waited for by the server.
+   * Timed steps stay owed and are picked up after the restart; full exits are written down (oweAfterRestart).
+   */
   stop(): void {
     this.stopped = true;
   }

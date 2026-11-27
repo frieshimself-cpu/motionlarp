@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { CopySettings, SellSettings } from './engine/settings.js';
-import type { SellReason } from './engine/rules.js';
+import type { SellOrder, SellReason } from './engine/rules.js';
 
 export type PositionStatus = 'opening' | 'open' | 'closed' | 'failed';
 
@@ -31,6 +31,9 @@ export interface Position {
   /** A full exit (their exit, a 100 % stop, dead coin, Sell now's rest) that is owed and not done yet: kept in the
    *  database so a restart cannot forget it (its retry was held in memory only). */
   exitOwed: { reason: SellReason; tag?: string } | null;
+  /** Their partial sells ("same share") whose share of ours is not sold yet: written down until it is (sold, nothing
+   *  left for it, or given up), so a restart cannot forget one waiting for its retry. */
+  owedSells: OwedSell[];
   firedTimed: number[];
   firedStop: number[];
   deadFired: boolean;
@@ -43,6 +46,9 @@ export interface Position {
   /** The coin's decimals (for showing token amounts); 6 on pump.fun. */
   decimals: number;
 }
+
+/** A sell of theirs we owe our share of: its rule, the percent of what we hold, and their transaction (the tag). */
+export interface OwedSell { reason: SellReason; percent: number; tag?: string }
 
 export interface Fill {
   id: number;
@@ -58,6 +64,24 @@ export interface Fill {
   /** Platform fee carried by this fill (lamports). */
   feeLamports: bigint;
   createdAt: number;
+}
+
+/**
+ * A sell of ours, written down the moment it was signed, before it went out (as a buy's signature is: buy_sig). The
+ * row goes in the same step that books the sale, or when the sell is known to have failed. One that is still here
+ * after a crash, or after a restart while its outcome was unknown, is settled by the next process from its own
+ * transaction (Engine.restore).
+ */
+export interface SellOut {
+  signature: string;
+  positionId: number;
+  userId: number;
+  mint: string;
+  /** The order it was sent for (its rule, stage and share): it is booked as that order. */
+  order: SellOrder;
+  /** What it asked for. */
+  tokens: bigint;
+  sentAt: number;
 }
 
 export type EventKind = 'buy' | 'sell' | 'skip' | 'error' | 'info';
@@ -116,7 +140,8 @@ CREATE TABLE IF NOT EXISTS positions (
   copy_name TEXT NOT NULL,
   leader TEXT NOT NULL,
   decimals INTEGER NOT NULL DEFAULT 6,
-  exit_owed TEXT
+  exit_owed TEXT,
+  owed_sells TEXT
 );
 CREATE INDEX IF NOT EXISTS positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS positions_copy_mint ON positions(copy_id, mint);
@@ -172,6 +197,15 @@ CREATE TABLE IF NOT EXISTS seen (
   key TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sells_out (
+  signature TEXT PRIMARY KEY,
+  position_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  mint TEXT NOT NULL,
+  sell_order TEXT NOT NULL,
+  tokens INTEGER NOT NULL,
+  sent_at INTEGER NOT NULL
+);
 `;
 
 type Row = Record<string, unknown>;
@@ -196,6 +230,7 @@ function toPosition(r: Row): Position {
     leaderSig: String(r.leader_sig),
     buySig: r.buy_sig === null ? null : String(r.buy_sig),
     exitOwed: r.exit_owed === null || r.exit_owed === undefined ? null : (JSON.parse(String(r.exit_owed)) as { reason: SellReason; tag?: string }),
+    owedSells: r.owed_sells === null || r.owed_sells === undefined ? [] : (JSON.parse(String(r.owed_sells)) as OwedSell[]),
     firedTimed: JSON.parse(String(r.fired_timed)) as number[],
     firedStop: JSON.parse(String(r.fired_stop)) as number[],
     deadFired: num(r.dead_fired) === 1,
@@ -216,12 +251,12 @@ function toFill(r: Row): Fill {
   };
 }
 
-export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed'>>;
+export type PositionPatch = Partial<Pick<Position, 'mode' | 'status' | 'tokensBought' | 'tokensHeld' | 'costLamports' | 'proceedsLamports' | 'openedAt' | 'closedAt' | 'buySig' | 'firedTimed' | 'firedStop' | 'deadFired' | 'refValueLamports' | 'lastChangeAt' | 'exitOwed' | 'owedSells'>>;
 
 const COLUMN: Record<keyof PositionPatch, string> = {
   mode: 'mode', status: 'status', tokensBought: 'tokens_bought', tokensHeld: 'tokens_held', costLamports: 'cost_lamports', proceedsLamports: 'proceeds_lamports',
   openedAt: 'opened_at', closedAt: 'closed_at', buySig: 'buy_sig', firedTimed: 'fired_timed', firedStop: 'fired_stop', deadFired: 'dead_fired',
-  refValueLamports: 'ref_value', lastChangeAt: 'last_change_at', exitOwed: 'exit_owed',
+  refValueLamports: 'ref_value', lastChangeAt: 'last_change_at', exitOwed: 'exit_owed', owedSells: 'owed_sells',
 };
 
 export class Store {
@@ -246,6 +281,32 @@ export class Store {
     const posCols = this.all('PRAGMA table_info(positions)').map((r) => String(r.name));
     if (!posCols.includes('decimals')) this.db.exec('ALTER TABLE positions ADD COLUMN decimals INTEGER NOT NULL DEFAULT 6');
     if (!posCols.includes('exit_owed')) this.db.exec('ALTER TABLE positions ADD COLUMN exit_owed TEXT');
+    if (!posCols.includes('owed_sells')) this.db.exec('ALTER TABLE positions ADD COLUMN owed_sells TEXT');
+    // (sells_out, added 27 Nov 2026, is created by SCHEMA above in a database that does not have it yet)
+  }
+
+  private txDepth = 0;
+  /**
+   * Runs `fn` as one transaction: what it writes reaches the disk together or not at all, so a crash cannot leave half
+   * of a booking (the position moved but no fill, or a sale booked while it is still written down as out). A call
+   * inside another joins it.
+   */
+  atomic<T>(fn: () => T): T {
+    if (this.txDepth > 0) return fn();
+    this.db.exec('BEGIN IMMEDIATE');
+    this.txDepth = 1;
+    let done = false;
+    try {
+      const out = fn();
+      done = true;
+      return out;
+    } finally {
+      this.txDepth = 0;
+      if (done) this.db.exec('COMMIT');
+      else {
+        try { this.db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+      }
+    }
   }
 
   private all(sql: string, ...params: unknown[]): Row[] {
@@ -540,6 +601,20 @@ export class Store {
     else if (tokens === undefined) this.run('UPDATE fills SET lamports = ?, exact_pending = 0 WHERE id = ?', lamports, fillId);
     else this.run('UPDATE fills SET lamports = ?, tokens = ?, exact_pending = 0 WHERE id = ?', lamports, tokens, fillId);
   }
+  // ── sells written down before they go out (see SellOut) ─────────────
+  insertSellOut(s: SellOut): void {
+    this.run('INSERT OR REPLACE INTO sells_out (signature, position_id, user_id, mint, sell_order, tokens, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?)', s.signature, s.positionId, s.userId, s.mint, JSON.stringify(s.order), s.tokens, s.sentAt);
+  }
+  sellsOut(): SellOut[] {
+    return this.all('SELECT * FROM sells_out ORDER BY sent_at, signature').map((r) => ({
+      signature: String(r.signature), positionId: num(r.position_id), userId: num(r.user_id), mint: String(r.mint),
+      order: JSON.parse(String(r.sell_order)) as SellOrder, tokens: big(r.tokens), sentAt: num(r.sent_at),
+    }));
+  }
+  deleteSellOut(signature: string): void {
+    this.run('DELETE FROM sells_out WHERE signature = ?', signature);
+  }
+
   /** Platform fees a user has paid: real ones, and the ones test mode only pretended to. */
   userFees(userId: number): { live: bigint; test: bigint } {
     const r = this.get('SELECT COALESCE(SUM(CASE WHEN simulated = 0 THEN fee_lamports ELSE 0 END), 0) AS live, COALESCE(SUM(CASE WHEN simulated = 1 THEN fee_lamports ELSE 0 END), 0) AS test FROM fills WHERE user_id = ?', userId);

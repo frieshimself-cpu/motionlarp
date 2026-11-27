@@ -164,6 +164,62 @@ describe("a buy booked with the quote's coin count, the exact count a moment lat
     expect(s.wallet()).toBe(0n);
   });
 
+  it('the exact count takes the books to nothing while a sell of the rest is out, and that sell fails: the position is closed, not left open for good (fuzzer case 18)', async () => {
+    // A "% of the original bag" ladder whose first step is the whole bag. The buy is booked with the quote's count
+    // (1,000,000); the wallet received 970,000. The first step sells the 970,000 there are and the books keep 30,000;
+    // the +2 s step asks for them and fails (the wallet is empty). The exact count arrives while one of its tries is
+    // out: the books go to 0, and the position stayed OPEN holding nothing with nothing under way. No rule, button or
+    // safety pass handles such a position: it stayed open for good and the coin could never be copied again.
+    const store = new Store(':memory:');
+    const uid = store.createUser('u', 'x');
+    const wallet = Keypair.generate();
+    store.setWallet(uid, wallet.publicKey.toBase58(), 'enc');
+    store.createCopy(uid, validateSettings({ leader: LEADER, buySol: 1, minLeaderBuySol: 0, oncePerCoin: false, sell: { mirror: { enabled: false, mode: 'exit' }, timedOf: 'bag', timed: [{ afterSec: 0, percent: 100 }, { afterSec: 2, percent: 40 }, { afterSec: 6, percent: 100 }], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } } }));
+    let clock = 1_000_000;
+    let held = 0n;
+    let exactCount: (v: { lamports: bigint; tokens: bigint }) => void = () => undefined;
+    let hold: Promise<void> | null = null;
+    const sold: bigint[] = [];
+    const executor = {
+      buy: async (r: { onSigned?: (s: string) => void }) => {
+        r.onSigned?.('BUY');
+        held += 970_000n;
+        return { ok: true as const, signature: 'BUY', tokens: 1_000_000n, lamports: SOL, simulated: false, refine: new Promise<{ lamports: bigint; tokens: bigint } | null>((res) => { exactCount = res; }) };
+      },
+      // As the real executor: never more than the wallet holds, and nothing to sell is a failure.
+      sell: async (r: { tokens: bigint }) => {
+        if (hold) await hold;
+        const n = r.tokens < held ? r.tokens : held;
+        if (n <= 0n) return { ok: false as const, error: 'the wallet holds none of this coin' };
+        held -= n;
+        sold.push(n);
+        return { ok: true as const, signature: `S${sold.length}`, tokens: n, lamports: n * 1_000n, simulated: false };
+      },
+      quoteSell: async (_m: string, t: bigint) => t * 1_000n, solBalance: async () => 10n * SOL, tokenBalance: async () => held, isLive: () => true,
+    };
+    const engine = new Engine({ store, executor, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, zeroRecheckMs: 1, fastRetryMs: [0, 1, 1], slowRetryMs: 1 });
+    const trade = (slot: number): LeaderTrade => ({ signature: `s${Math.random()}`, leader: LEADER, mint: MINT, side: 'buy', solLamports: 2n * SOL, tokenAmount: 5n, tokensBefore: 0n, tokensAfter: 5n, venue: 'pumpfun', slot, blockTime: null });
+    await engine.onLeaderTrade(trade(1));
+    await engine.idle();
+    await engine.tick(); await engine.idle(); // +0 s: the first step sells the 970,000 the wallet holds
+    expect(sold).toEqual([970_000n]);
+    expect(store.position(1)).toMatchObject({ status: 'open', tokensHeld: 30_000n });
+    let release!: () => void;
+    hold = new Promise<void>((r) => { release = r; });
+    clock += 2_000; await engine.tick(); await new Promise((r) => setTimeout(r, 5)); // +2 s: its try is out
+    exactCount({ lamports: SOL, tokens: 970_000n }); await new Promise((r) => setTimeout(r, 5));
+    expect(store.position(1)).toMatchObject({ status: 'open', tokensHeld: 0n }); // the try is still out: not yet
+    hold = null; release();
+    await engine.idle();
+    expect(store.position(1)).toMatchObject({ status: 'closed', tokensHeld: 0n });
+    clock += 10_000; await engine.tick(); await engine.idle();
+    expect(store.activePositions(uid)).toHaveLength(0);
+    // and the coin can be copied again
+    await engine.onLeaderTrade(trade(9));
+    await engine.idle();
+    expect(store.activePositions(uid)).toHaveLength(1);
+  });
+
   it('more coins than the quote, sold out on the quote\'s count: the rest is sold when the exact count arrives', async () => {
     const s = quoted(1_100_000n, { mirror: { enabled: true, mode: 'exit' }, timed: [], stopLoss: [], deadCoin: { enabled: false, idleSec: 120 } });
     await s.engine.onLeaderTrade(s.trade('buy'));
