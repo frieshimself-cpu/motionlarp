@@ -230,24 +230,24 @@ function renderHistory() {
   return `<div class="stack">
   <div class="card">
     <div class="card-head"><h2>Profit by day<span class="sub">closed positions, fees included</span></h2></div>
-    <div class="card-body flush">${days.length ? `<div class="table-wrap"><table>
+    <div class="card-body flush">${days.length ? `<div class="table-wrap"><table class="t-days">
       <thead><tr><th>Day</th>${both ? '<th></th>' : ''}<th class="num">Trades</th><th class="num">Winners</th><th class="num">Profit</th></tr></thead>
       <tbody>${days.slice(0, 60).map((d) => `<tr>
         <td>${esc(dayLabel(d.date))}</td>${both ? `<td>${d.mode === 'live' ? '<span class="pill live">LIVE</span>' : '<span class="tag off">test</span>'}</td>` : ''}
-        <td class="num">${d.trades}</td><td class="num">${d.trades ? Math.round((d.wins / d.trades) * 100) : 0}%</td>
+        <td class="num" data-label="Trades">${d.trades}</td><td class="num" data-label="Winners">${d.trades ? Math.round((d.wins / d.trades) * 100) : 0}%</td>
         <td class="num ${cls(d.pnlSol)}">${signed(d.pnlSol)} SOL</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed trades yet</b>Each day you trade gets a row here.</div>'}</div>
   </div>
   <div class="card">
     <div class="card-head"><h2>Closed positions<span class="sub">${esc(head.count)} · total <span class="${cls(h.totalPnlSol)}">${signed(h.totalPnlSol, 4)} SOL</span> · ${winRate}% winners${h.totalFeesSol ? ` · platform fees ${fmtSol(h.totalFeesSol)} SOL` : ''}${head.listed ? ` · ${esc(head.listed)}` : ''}</span></h2></div>
-    <div class="card-body flush">${h.positions.length ? `<div class="table-wrap"><table>
+    <div class="card-body flush">${h.positions.length ? `<div class="table-wrap"><table class="t-closed">
       <thead><tr><th>Coin</th><th>Copy</th><th>Sells</th><th class="num">Cost</th><th class="num">Returned</th><th class="num">P/L</th><th>Closed</th></tr></thead>
       <tbody>${h.positions.map((p) => `<tr>
         <td><a class="mono" href="${coinLink(p.mint)}" target="_blank" rel="noopener">${esc(short(p.mint))}</a> ${p.mode === 'live' ? '' : '<span class="tag off">test</span>'}</td>
-        <td>${esc(p.copyName)}</td>
+        <td data-label="via">${esc(p.copyName)}</td>
         <td>${p.fills.filter((f) => f.side === 'sell').map((f) => `<span class="tag">${afterBuy(p, f)}${esc(f.reason.replace('_', ' '))} ${fmtSol(f.sol)}${f.signature ? ` <a href="${solscanTx(f.signature)}" target="_blank" rel="noopener">↗</a>` : ''}</span>`).join('')}</td>
-        <td class="num">${fmtSol(p.costSol)}</td><td class="num">${fmtSol(p.proceedsSol)}</td>
+        <td class="num" data-label="Cost">${fmtSol(p.costSol)}</td><td class="num" data-label="Returned">${fmtSol(p.proceedsSol)}</td>
         <td class="num ${cls(p.pnlSol)}">${signed(p.pnlSol)}<div style="font-size:11.5px">${pct(p.pnlPct)}</div></td>
-        <td class="dim">${p.closedAt ? ago(p.closedAt) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed positions yet</b>They show up here with every sell and the profit.</div>'}</div>
+        <td class="dim" data-label="closed">${p.closedAt ? ago(p.closedAt) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><b>No closed positions yet</b>They show up here with every sell and the profit.</div>'}</div>
   </div></div>`;
 }
 

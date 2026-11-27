@@ -23,6 +23,36 @@ const SPILL = `((title, sel, screenWidth) => {
   return { card: [Math.round(c.left), Math.round(c.right)], screen: screenWidth, out: out.slice(0, 6), outside: out.length };
 })`;
 
+/** History's two tables, measured as they stand with nothing scrolled sideways: days that take more than one line,
+ *  and money cells (a day's Profit, a position's P/L) that are not on the screen. */
+const FIT = `((screenWidth) => {
+  const cards = [...document.querySelectorAll('.page > .stack > .card')];
+  const dayLines = [];
+  const hidden = [];
+  for (const [i, card] of cards.slice(0, 2).entries()) {
+    const wrap = card.querySelector('.table-wrap');
+    if (!wrap) continue;
+    const kept = wrap.scrollLeft;
+    wrap.scrollLeft = 0;
+    const w = wrap.getBoundingClientRect();
+    const right = Math.min(w.right, screenWidth);
+    for (const tr of wrap.querySelectorAll('tbody tr')) {
+      const tds = tr.querySelectorAll('td');
+      if (i === 0) {
+        const range = document.createRange();
+        range.selectNodeContents(tds[0]);
+        const lines = new Set([...range.getClientRects()].map((x) => Math.round(x.top))).size;
+        if (lines !== 1) dayLines.push({ day: tds[0].innerText.replace(/\\s+/g, ' '), lines });
+      }
+      const money = i === 0 ? tds[tds.length - 1] : tds[5];
+      const r = money.getBoundingClientRect();
+      if (r.left < Math.max(w.left, 0) - 1 || r.right > right + 1) hidden.push({ table: i === 0 ? 'Profit by day' : 'Closed positions', text: money.innerText.replace(/\\s+/g, ' '), x: [Math.round(r.left), Math.round(r.right)], visibleUpTo: Math.round(right) });
+    }
+    wrap.scrollLeft = kept;
+  }
+  return { dayLines: dayLines.slice(0, 4), daysOnMoreLines: dayLines.length, hidden: hidden.slice(0, 4), moneyCellsOffScreen: hidden.length };
+})`;
+
 /** One printed amount against the exact lamports: the number, its sign, and (when asked) its colour. */
 function amount(text, lamports, d, colour) {
   const exact = solNum(lamports);
@@ -190,6 +220,13 @@ async function checkHistory(env, page, who, opts = {}) {
     if (!cell || !amount(cell.text, d.pnl, 4, cell.cls.replace('num', '').trim()) || !/ SOL$/.test(cell.text)) badDay.push({ day: d.iso, mode: d.mode, shown: cell && cell.text, colour: cell && cell.cls, exact: solStr(d.pnl) });
   }
   book.ok(`${P}: each day's profit = SOL returned − SOL spent of the positions closed that day, signed and coloured`, badDay.length === 0, badDay.slice(0, 5));
+
+  // ── on any screen, a phone's included (second review) ──
+  // At 390 px each day took three lines ("Fri, / Nov / 27") and the money columns started off the screen, behind a
+  // sideways scroll: each day on one line, and every day's Profit and every position's P/L on the screen as it opens.
+  const fit = await page.evaluate(`${FIT}(${env.vp.viewport.width})`);
+  book.ok(`${P}: each day of "Profit by day" on one line`, fit.daysOnMoreLines === 0, fit.dayLines);
+  book.ok(`${P}: every day's Profit and every position's P/L on the screen without scrolling sideways`, fit.moneyCellsOffScreen === 0, fit.hidden);
 
   // ── the heading of the closed positions ──
   // It counts EVERY closed position of the kind the profit cards show (real ones once there are any, test ones until
