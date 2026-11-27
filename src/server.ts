@@ -189,16 +189,26 @@ app.listen(config.port, config.host, () => {
   setInterval(() => void runChecks().catch(() => undefined), 300_000).unref();
 });
 
+let shuttingDown = false;
 async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   log.info('shutting down', { signal });
-  clearInterval(clock);
   clearInterval(safety);
+  // No new copies from here on.
   watcher?.stop();
   stream?.stop();
-  stopBlockhashRefresher();
+  // A short timed exit that is in progress (or a buy in flight, whose exit starts right after) finishes first:
+  // the clock keeps ticking so its steps still go out on time. An update never restarts the server under it.
+  const until = Date.now() + 40_000;
+  while (Date.now() < until && engine.exitsDueWithin(15_000)) await new Promise((r) => setTimeout(r, 200));
+  clearInterval(clock);
+  engine.stop();
   app.close();
-  // Live buys can take a while to confirm: give them up to 2 minutes (restore() settles anything cut off).
-  await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 120_000))]);
+  // Sells and buys still in flight get up to 100 s to confirm (restore() settles anything cut off). Docker allows
+  // 150 s in all (stop_grace_period).
+  await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 100_000))]);
+  stopBlockhashRefresher();
   store.close();
   process.exit(0);
 }

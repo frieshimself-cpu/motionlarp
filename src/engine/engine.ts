@@ -28,10 +28,14 @@ export interface EngineDeps {
   staleSec?: number;
   /** Pauses between tries of a bag-based timed step (the first retry is immediate). */
   fastRetryMs?: number[];
+  /** After those, the pause between further tries of the LAST step, which never gives up. */
+  slowRetryMs?: number;
 }
 
 /** A step of a bag-based timed exit that fails is retried at once, then with these short pauses (about a minute in all). */
 const FAST_RETRY_MS = [0, 250, 250, 500, 500, 1_000, 1_000, 2_000, 2_000, 4_000, 4_000, 8_000, 8_000, 15_000, 15_000];
+/** The last step of such an exit never gives up (the coins are still in the wallet): after the quick tries, one every 15 s. */
+const SLOW_RETRY_MS = 15_000;
 
 /** 1234567 base units at 6 decimals → "1.23" ; large amounts as K / M / B. */
 export function fmtTokens(amount: bigint, decimals: number): string {
@@ -287,6 +291,7 @@ export class Engine {
     const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     let failures = 0;
     for (;;) {
+      if (this.stopped) return; // shutting down: the step stays owed and goes out after the restart
       const p = store.position(positionId);
       if (!p || p.status !== 'open' || p.firedTimed.includes(stage)) return;
       const label = `${shortMint(p.mint)} (${p.copyName})`;
@@ -344,10 +349,19 @@ export class Engine {
       const why = order.everything ? 'final timed sell' : `timed sell of ${fmtPct(order.percent)} of the bag`;
       if (failures === 0) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Sell of ${label} (${why}) failed: ${friendlyError(error)} — retrying`, mint: p.mint });
       if (failures >= pauses.length) {
-        const fresh = store.position(p.id);
-        if (fresh) store.updatePosition(p.id, { firedTimed: [...new Set([...fresh.firedTimed, stage])] });
-        store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Gave up on the ${why} of ${label} after ${failures + 1} failed tries: ${friendlyError(error)}.${order.everything ? ' Use Sell now.' : ' The last step sells what is left.'}`, mint: p.mint });
-        return;
+        if (!order.everything) {
+          const fresh = store.position(p.id);
+          if (fresh) store.updatePosition(p.id, { firedTimed: [...new Set([...fresh.firedTimed, stage])] });
+          store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `Gave up on the ${why} of ${label} after ${failures + 1} failed tries: ${friendlyError(error)}. The last step sells what is left.`, mint: p.mint });
+          return;
+        }
+        // The last step never gives up: the coins are still in the wallet and nobody may be watching. It keeps
+        // trying at a slower pace until it sells, the position is closed another way (Sell now), or the server stops.
+        const slow = this.deps.slowRetryMs ?? SLOW_RETRY_MS;
+        if (failures === pauses.length) store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'error', message: `The ${why} of ${label} has failed ${failures + 1} times (${friendlyError(error)}): still trying every ${Math.max(1, Math.round(slow / 1000))} s until it sells. Sell now works too.`, mint: p.mint });
+        await pause(slow);
+        failures++;
+        continue;
       }
       await pause(pauses[failures]!);
       failures++;
@@ -582,6 +596,22 @@ export class Engine {
   }
 
   /** Resolves when every queued buy and sell has finished (tests, shutdown). */
+  /**
+   * True while a buy is in flight or an open position owes a timed step within `withinMs`: a short exit is in
+   * progress. The server finishes it before it restarts for an update.
+   */
+  exitsDueWithin(withinMs: number): boolean {
+    const now = this.now();
+    return this.deps.store.activePositions().some((p) =>
+      p.status === 'opening' || (p.status === 'open' && p.sell.timed.some((t, i) => !p.firedTimed.includes(i) && p.openedAt + t.afterSec * 1000 - now <= withinMs)));
+  }
+
+  private stopped = false;
+  /** Shutdown: retry loops end (their steps stay owed and are picked up after the restart). */
+  stop(): void {
+    this.stopped = true;
+  }
+
   async idle(): Promise<void> {
     while (this.queues.size > 0 || this.loose.size > 0) await Promise.all([...this.queues.values(), ...this.loose]);
   }

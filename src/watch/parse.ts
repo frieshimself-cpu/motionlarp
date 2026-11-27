@@ -54,6 +54,35 @@ export function soldShare(t: LeaderTrade): number {
   return Math.min(1, Number((t.tokenAmount * 1_000_000n) / t.tokensBefore) / 1_000_000);
 }
 
+/**
+ * What one transaction changed for a wallet, signed and exact, for booking OUR OWN trades: its SOL position (its
+ * own lamports plus those of the token accounts it owns, so wrapped SOL and a new token account's rent stay "its"),
+ * with everything it paid in that transaction already inside (network fee, priority fee, tip, platform fee); and
+ * its balance of one coin. Unlike parseLeaderTrades there is no dust threshold and no guessing what was a trade:
+ * a sell that did not cover its own fees is a small loss here, not "nothing happened". Null when the transaction
+ * failed or the wallet is not in it.
+ */
+export function walletChange(tx: RawTransaction, owner: string, mint: string): { lamports: bigint; tokens: bigint } | null {
+  const meta = tx.meta;
+  if (!meta || meta.err) return null;
+  const keys = accountKeys(tx);
+  const ownerIdx = keys.indexOf(owner);
+  if (ownerIdx < 0) return null;
+  const delta = (i: number) => BigInt((meta.postBalances[i] ?? 0) - (meta.preBalances[i] ?? 0));
+  let lamports = delta(ownerIdx);
+  let tokens = 0n;
+  const owned = new Set<number>();
+  for (const [list, sign] of [[meta.preTokenBalances ?? [], -1n], [meta.postTokenBalances ?? [], 1n]] as const) {
+    for (const b of list) {
+      if (b.owner !== owner) continue;
+      owned.add(b.accountIndex);
+      if (b.mint === mint) tokens += sign * BigInt(b.uiTokenAmount.amount);
+    }
+  }
+  for (const i of owned) if (i !== ownerIdx) lamports += delta(i);
+  return { lamports, tokens };
+}
+
 export function parseLeaderTrades(tx: RawTransaction, leader: string): LeaderTrade[] {
   const meta = tx.meta;
   if (!meta || meta.err) return [];

@@ -64,7 +64,7 @@ beforeEach(() => {
   ex = new Market(() => clock);
   uid = store.createUser('kol', 'x');
   store.setWallet(uid, wallet.publicKey.toBase58(), 'enc');
-  engine = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1] });
+  engine = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1, 1, 1, 1, 1], slowRetryMs: 1 });
 });
 
 const scharo = (patch: Record<string, unknown> = {}) => store.createCopy(uid, validateSettings({ ...SCHARO, buySol: 1, ...patch }));
@@ -140,6 +140,67 @@ describe('the timed exit of the original bag', () => {
     await at(2); await at(4); await at(6);
     expect(ex.sells.map((s) => s.tokens)).toEqual([BAG]);
     expect(open()).toHaveLength(0);
+  });
+
+  it('the last step never gives up: a long outage only delays it, and the feed says it is still trying', async () => {
+    // Seen live (27 Nov 2026): the RPC dropped for 90 s in the middle of an exit. The coins are still in the wallet,
+    // so "gave up, use Sell now" is not an answer for someone who is not watching.
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    await at(2); await at(4);
+    let outage = 40; // far more failures than the quick retries allow
+    ex.plan = () => (outage-- > 0 ? 'fail' : 'ok');
+    await at(6);
+    expect(ex.sells.map((s) => s.tokens)).toEqual([400_000n, 300_000n, 300_000n]);
+    expect(open()).toHaveLength(0);
+    expect(feed().filter((f) => /still trying/.test(f))).toHaveLength(1);
+    expect(feed().some((f) => /Gave up/.test(f))).toBe(false);
+  });
+
+  it('an earlier step does give up after its quick retries: the last step sells what is left', async () => {
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.plan = (_n, req) => (req.tokens === 400_000n ? 'fail' : 'ok'); // the 40 % sell never works
+    await at(2);
+    expect(feed().filter((f) => /Gave up on the timed sell of 40% of the bag/.test(f))).toHaveLength(1);
+    await at(4); await at(6);
+    expect(ex.sells.map((s) => s.tokens)).toEqual([300_000n, 700_000n]);
+    expect(open()).toHaveLength(0);
+  });
+
+  it('stopping the server ends the retries; after a restart the last step is still owed and goes out', async () => {
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    await at(2); await at(4);
+    ex.plan = () => 'fail';
+    clock = 1_000_000 + 6000;
+    await engine.tick();
+    await sleep(30);
+    engine.stop();
+    await engine.idle();
+    expect(open()).toHaveLength(1); // still holding the last 30 %
+    // The new process: same database, sells work again.
+    ex.plan = () => 'ok';
+    const restarted = new Engine({ store, executor: ex, walletFor: () => wallet, now: () => clock, priceMs: 1e9, maxSolPerBuy: 10, feeReserveSol: 0.01, fastRetryMs: [0, 1], slowRetryMs: 1 });
+    await restarted.tick(); await restarted.idle();
+    expect(ex.sells.map((s) => s.tokens)).toEqual([400_000n, 300_000n, 300_000n]);
+    expect(open()).toHaveLength(0);
+  });
+
+  it('the server knows when a short exit is in progress, so an update does not restart under it', async () => {
+    scharo();
+    expect(engine.exitsDueWithin(15_000)).toBe(false);
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    expect(engine.exitsDueWithin(15_000)).toBe(true); // steps at +2 s, +4 s and +6 s are owed
+    await at(2); await at(4);
+    expect(engine.exitsDueWithin(15_000)).toBe(true);
+    await at(6);
+    expect(engine.exitsDueWithin(15_000)).toBe(false);
+    // A step that is far away does not hold a restart back.
+    scharo({ name: 'slow', leader: 'GsJuHUtw6ni41HNgiycuAn4xeFw5GupsZUBPHgzW6PJR', sell: { ...(SCHARO.sell as object), timed: [{ afterSec: 600, percent: 100 }] } });
+    await engine.onLeaderTrade(buyTrade({ leader: 'GsJuHUtw6ni41HNgiycuAn4xeFw5GupsZUBPHgzW6PJR', mint: 'So11111111111111111111111111111111111111112' })); await engine.idle();
+    expect(open()).toHaveLength(1);
+    expect(engine.exitsDueWithin(15_000)).toBe(false);
   });
 
   it('live: the last step sells the wallet\'s real balance; if an earlier sell lands first it retries with what is left', async () => {

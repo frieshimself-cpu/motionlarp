@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import type { RawTransaction } from '../src/chain/rpc.js';
-import { parseLeaderTrades, soldShare } from '../src/watch/parse.js';
+import { parseLeaderTrades, soldShare, walletChange } from '../src/watch/parse.js';
 
 const fx = (name: string) => JSON.parse(readFileSync(`tests/fixtures/tx/${name}.json`, 'utf8')) as RawTransaction;
 
@@ -118,5 +118,41 @@ describe('coins paired with anything', () => {
     const trades = parseLeaderTrades(paidWith(OTHER, 5_000_000), leader);
     expect(trades.find((x) => x.side === 'buy')).toMatchObject({ mint: 'FXVj1cT44nNDZiHQfQTBpsmp7TM1fgQxzLm71CGysnow', counter: { mint: OTHER } });
     expect(trades.find((x) => x.side === 'sell')).toMatchObject({ mint: OTHER, tokenAmount: 5_000_000n });
+  });
+});
+
+describe('walletChange: what one of OUR transactions did to the wallet, exactly', () => {
+  const OWNER = 'Owner1111111111111111111111111111111111111';
+  const COIN = 'Coin11111111111111111111111111111111111pump';
+  const sell = (ownAfter: number): RawTransaction => ({
+    slot: 1, blockTime: null,
+    meta: {
+      err: null, fee: 205_000,
+      preBalances: [1_000_000_000, 2_039_280, 7], postBalances: [ownAfter, 2_039_280, 7],
+      preTokenBalances: [{ accountIndex: 1, mint: COIN, owner: OWNER, uiTokenAmount: { amount: '1000', decimals: 6 } }],
+      postTokenBalances: [{ accountIndex: 1, mint: COIN, owner: OWNER, uiTokenAmount: { amount: '600', decimals: 6 } }],
+    },
+    transaction: { signatures: ['s'], message: { accountKeys: [OWNER, 'Ata111111111111111111111111111111111111111', 'Pool11111111111111111111111111111111111111'] } },
+  });
+
+  it('a real buy: SOL out with the network fee, tokens in', () => {
+    expect(walletChange(fx('curve_buy'), '2526KSACRprzAPEGYFvrDLP1EFQddZ5m6j4kDPwaNXYB', 'EYS1CfL4EM8UXfAeuffB1mKKBJJHr1MnPeMvSzuopump')).toEqual({ lamports: -350528613n, tokens: 23810684081348n });
+  });
+
+  it('a sell: what the wallet really gained, fees and tip already taken off', () => {
+    expect(walletChange(sell(1_000_190_000), OWNER, COIN)).toEqual({ lamports: 190_000n, tokens: -400n });
+  });
+
+  it('a small sell whose proceeds do not cover its own fee and tip is a (small) loss, not zero, and not "no trade"', () => {
+    // parseLeaderTrades ignores SOL movements under its dust threshold; our own books must not.
+    expect(walletChange(sell(1_000_020_000), OWNER, COIN)).toEqual({ lamports: 20_000n, tokens: -400n });
+    expect(walletChange(sell(999_994_000), OWNER, COIN)).toEqual({ lamports: -6_000n, tokens: -400n });
+  });
+
+  it('a transaction that failed, or does not involve the wallet, changed nothing we can book', () => {
+    const failed = sell(1_000_190_000);
+    failed.meta!.err = { InstructionError: [0, 'Custom'] };
+    expect(walletChange(failed, OWNER, COIN)).toBeNull();
+    expect(walletChange(sell(1_000_190_000), 'Somebody1111111111111111111111111111111111', COIN)).toBeNull();
   });
 });

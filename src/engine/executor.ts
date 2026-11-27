@@ -25,10 +25,10 @@ import { tipAccount, tipInstruction, tipLamports, tipRoute } from '../tx/tip.js'
 import { appendInstruction, Jupiter } from '../venues/jupiter.js';
 import { PfDispatcher } from '../venues/pf.js';
 import { VenueError, type ResolvedPool } from '../venues/types.js';
-import { parseLeaderTrades, WSOL_MINT } from '../watch/parse.js';
+import { walletChange, WSOL_MINT } from '../watch/parse.js';
 
 export type FillResult =
-  /** lamports: buy = SOL spent, platform fee included; sell = SOL received, platform fee taken off. */
+  /** lamports: buy = SOL spent, every fee included; sell = SOL received net of every fee (negative when a small sell did not cover its own costs). */
   | {
       ok: true; signature: string; tokens: bigint; lamports: bigint; simulated: boolean; note?: string; feeLamports?: bigint;
       /** When the transaction was seen confirmed (the clock for timed sells starts here). */
@@ -223,7 +223,7 @@ export class ChainExecutor implements Executor {
     // The fee transfer rides in the same transaction, after the swap: no trade, no fee.
     const ixs = withFee(built.instructions, req.wallet.publicKey, req.lamports, req.feeBps, config.feeWallet);
     const tx = await this.nativeTx(req, ixs.instructions);
-    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'buy', built.expectedOut, req.lamports + ixs.fee, before, ixs.fee);
+    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'buy', built.expectedOut, req.lamports + ixs.fee + this.txCost(req), before, ixs.fee);
   }
 
   /** A Jupiter swap with our fee transfer appended, signed by the user; smaller routes are tried if it does not fit. */
@@ -268,7 +268,7 @@ export class ChainExecutor implements Executor {
       return { ok: true, signature: sim.signature, tokens: BigInt(built.quote.outAmount), lamports: req.lamports + built.fee + cost, feeLamports: built.fee, simulated: true, note: 'Jupiter route simulated on-chain, not sent (test mode)' };
     }
     const [built, before] = await Promise.all([this.jupiterTx(req, WSOL_MINT, req.mint, req.lamports, feeOnBuy), this.tokenBalance(owner, req.mint).catch(() => null)]);
-    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'buy', BigInt(built.quote.outAmount), req.lamports + built.fee, before, built.fee);
+    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'buy', BigInt(built.quote.outAmount), req.lamports + built.fee + this.txCost(req), before, built.fee);
   }
 
   // ── sell ───────────────────────────────────────────────────────────────
@@ -286,7 +286,7 @@ export class ChainExecutor implements Executor {
       const gross = await venue.quoteSell(pool, req.tokens);
       const fee = config.feeWallet ? feeLamports(gross, req.feeBps) : 0n;
       const net = gross - fee - this.txCost(req);
-      return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports: net > 0n ? net : 0n, feeLamports: fee, simulated: true, note: 'test fill from the live quote' };
+      return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports: net, feeLamports: fee, simulated: true, note: 'test fill from the live quote' };
     }
     // A sell draws from the standard (associated) token account: never ask for more than it holds.
     const held = await this.ataBalance(req.mint, req.wallet.publicKey, pool.tokenProgram);
@@ -295,7 +295,7 @@ export class ChainExecutor implements Executor {
     const built = await venue.buildSell({ pool, user: req.wallet.publicKey, tokensIn: tokens, slippagePct: req.slippagePct });
     const ixs = withFee(built.instructions, req.wallet.publicKey, built.expectedOut, req.feeBps, config.feeWallet);
     const tx = await this.nativeTx(req, ixs.instructions);
-    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'sell', tokens, built.expectedOut - ixs.fee, held, ixs.fee);
+    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'sell', tokens, built.expectedOut - ixs.fee - this.txCost(req), held, ixs.fee);
   }
 
   private async jupiterSell(req: TradeRequest & { tokens: bigint }): Promise<FillResult> {
@@ -305,13 +305,13 @@ export class ChainExecutor implements Executor {
       const gross = BigInt(q.outAmount);
       const fee = config.feeWallet ? feeOnSell(gross) : 0n;
       const net = gross - fee - this.txCost(req);
-      return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports: net > 0n ? net : 0n, feeLamports: fee, simulated: true, note: 'test fill from the Jupiter quote' };
+      return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens: req.tokens, lamports: net, feeLamports: fee, simulated: true, note: 'test fill from the Jupiter quote' };
     }
     const held = await this.ataBalance(req.mint, req.wallet.publicKey);
     const tokens = req.tokens > held ? held : req.tokens;
     if (tokens <= 0n) return { ok: false, error: 'the wallet holds none of this coin' };
     const built = await this.jupiterTx(req, req.mint, WSOL_MINT, tokens, feeOnSell);
-    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'sell', tokens, BigInt(built.quote.outAmount) - built.fee, held, built.fee);
+    return this.sendAndRead(req, built.tx, built.lastValidBlockHeight, 'sell', tokens, BigInt(built.quote.outAmount) - built.fee - this.txCost(req), held, built.fee);
   }
 
   /**
@@ -364,13 +364,11 @@ export class ChainExecutor implements Executor {
     for (let i = 0; i < FETCH_FILL_TRIES; i++) {
       try {
         const got = await getTransaction(signature);
-        const mine = got ? parseLeaderTrades(got, owner).find((t) => t.mint === mint && t.side === side) : undefined;
-        if (mine && got?.meta) {
-          // Our own profit counts the network + priority fee we paid (the parser leaves the payer's fee out). The
-          // platform fee transfer is already in the wallet's SOL change.
-          const fee = BigInt(got.meta.fee);
-          const lamports = side === 'buy' ? mine.solLamports + fee : mine.solLamports > fee ? mine.solLamports - fee : 0n;
-          return { tokens: mine.tokenAmount, lamports };
+        // Exactly what this transaction did to the wallet: everything it paid (network and priority fee, tip,
+        // platform fee) is inside. A sell that did not cover its own costs is a small loss, never rounded to zero.
+        const change = got ? walletChange(got, owner, mint) : null;
+        if (change && (side === 'buy' ? change.tokens > 0n : change.tokens < 0n)) {
+          return side === 'buy' ? { tokens: change.tokens, lamports: -change.lamports } : { tokens: -change.tokens, lamports: change.lamports };
         }
       } catch (err) {
         log.warn('could not read the fill yet', { signature, error: safeErrorMessage(err) });

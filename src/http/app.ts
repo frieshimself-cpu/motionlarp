@@ -426,7 +426,8 @@ export function createApp(deps: AppDeps): Server {
       const cap = deps.maxCopiesPerUser ?? 20;
       if (store.countCopies(uid) >= cap) throw new HttpError(409, `at most ${cap} copies per account`);
       const id = store.createCopy(uid, s);
-      store.addEvent({ userId: uid, copyId: id, kind: 'info', message: `Now copying ${s.name} (${s.leader.slice(0, 4)}…${s.leader.slice(-4)})${s.mode === 'paper' ? ' in test mode' : ''}` });
+      // Real or test is the site's switch, not the copy's: say what a buy of this copy will be right now.
+      store.addEvent({ userId: uid, copyId: id, kind: 'info', message: `Now copying ${s.name} (${s.leader.slice(0, 4)}…${s.leader.slice(-4)})${deps.serverInfo().live ? ' with real SOL' : ' in test mode'}` });
       return json(res, 200, { ok: true, id });
     }
     const copyMatch = /^\/api\/copies\/(\d+)$/.exec(path);
