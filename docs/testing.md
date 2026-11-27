@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 587 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 589 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -623,10 +623,20 @@ the speed of the hot paths) read the fixes above. Fixed from it, each with a tes
   every 5 s, skipped while a buy or a sell is under way (at most a minute), and at shutdown; a transaction waiting for
   its confirmation is called expired one block sooner (a failed sell is retried about 0.5 s sooner), and a last look
   from a node behind the tip is looked at again at the next poll, not ten polls later (about 3.4 s).
+- Their sell heard while the database cannot be written is acted on, once, from memory: marking it seen is the first
+  write, and on a full disk it failed and the sell was lost for good (the watcher never hands a transaction over twice),
+  so a partial sell of theirs in "same" or "all" mode was never mirrored. Their partial sell is owed in memory and sold
+  when the disk is back (within its minute of retries, like any partial sell that keeps failing); their buy is still not
+  copied (it could not be written down before it is sent). Left as it is: a restart while such a sell exists only in
+  memory and the disk is still full loses it (their full exit is still caught by the 30 s safety pass).
 
 The fuzzer on this code, seeds flagged: default mix 0 of 3,000; crash, ghost and diskfull 0 of 2,000 each; outage and
 partial 0 of 1,500 each; dbfault 1 of 2,000 (seed 1411, the known quoted coin count case); all saved cases pass; the
-self-test catches every planted fault. `npm test`: 567 tests.
+self-test catches every planted fault. `npm test`: 567 tests. On the last code of the day (26e2fa6, the speed changes and
+the sell heard while nothing can be written): default mix 0 of 2,000, crash 0 of 1,500, ghost 0 of 1,500, diskfull 0 of
+2,000, dbfault 1 of 2,000 (seed 1411 again), all saved cases pass, the self-test catches every planted fault. (The fuzzer had to learn that their buy, not their sell, is dropped when it
+cannot be marked seen; before that it flagged 560 seeds of 2,000 in dbfault for buys and skip lines the engine rightly
+never made.) `npm test`: 589 tests.
 
 ## Not yet verified
 
