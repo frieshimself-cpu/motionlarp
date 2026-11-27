@@ -203,6 +203,8 @@ export class Engine {
   /** Their partial sells ("same share") that could not be written down as owed (the database failing): owed here
    *  until done, so they are still sold (only one written down as owed is sold: see sell()). */
   private readonly owedInMemory = new Set<string>();
+  /** Their sells acted on while they could not be marked seen in the database (see onLeaderTrade). */
+  private readonly seenInMemory = new Set<string>();
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? Date.now;
@@ -223,7 +225,23 @@ export class Engine {
     const staleSec = this.deps.staleSec ?? 20;
     // Old buys are not copied (caught up after downtime). Old sells still are: we may be holding that coin.
     if (t.side === 'buy' && t.blockTime && this.now() / 1000 - t.blockTime > staleSec) return;
-    if (!this.deps.store.markSeen(`${t.signature}:${t.mint}`)) return;
+    const seenKey = `${t.signature}:${t.mint}`;
+    if (this.seenInMemory.has(seenKey)) return;
+    let first: boolean;
+    try {
+      first = this.deps.store.markSeen(seenKey);
+    } catch (err) {
+      // The database cannot be written (a full disk): marking it seen is the first write, and a sell of theirs heard
+      // now was lost for good (the watcher never hands a transaction over twice). A buy could not be written down
+      // before it is sent, so it is not copied; their sell is acted on, once, from memory (their partial sell is then
+      // owed in memory, and sold when the disk is back).
+      if (t.side === 'buy') return;
+      if (this.seenInMemory.size >= 10_000) this.seenInMemory.clear();
+      this.seenInMemory.add(seenKey);
+      log.warn('their sell could not be marked seen in the database: acted on from memory', { error: safeErrorMessage(err) });
+      first = true;
+    }
+    if (!first) return;
     const coinKey = `${t.leader}:${t.mint}`;
     if (t.side === 'sell') this.lastSellSlot.set(coinKey, Math.max(t.slot, this.lastSellSlot.get(coinKey) ?? 0));
     else if ((this.lastSellSlot.get(coinKey) ?? -1) > t.slot) return; // they already sold after this buy

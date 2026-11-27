@@ -1425,6 +1425,31 @@ describe('what the third round of reviewers found', () => {
     expect(s.position().status).toBe('closed');
   });
 
+  it('their partial sell heard while nothing can be written is sold once the disk is back, once (marking it seen, the first write, failed and the sell was lost for good)', async () => {
+    const s = server({ ...none, mirror: { enabled: true, mode: 'same' } });
+    await s.buy();
+    const disk = diskFull(s.store);
+    disk.on();
+    const half = { ...trade('sell', MINT, 1_000_000n), tokenAmount: 1_000_000n }; // they sold half
+    await s.engine.onLeaderTrade(half); await s.engine.idle();
+    await s.engine.onLeaderTrade(half); await s.engine.idle(); // heard twice (the stream and the poll)
+    expect(s.chain.sent).toHaveLength(0); // nothing can be written down before it is sent: nothing is sent
+    disk.off();
+    for (let t = 1_000; t <= 30_000; t += 500) { s.at(t); await s.tick(); }
+    expect(s.chain.sent.map((x) => x.tokens)).toEqual([500_000n]);
+    expect(s.position()).toMatchObject({ status: 'open', tokensHeld: 500_000n, proceedsLamports: 500_000_000n });
+  });
+
+  it('their buy heard while nothing can be written is not copied, and the engine does not fail', async () => {
+    const s = server(none);
+    const disk = diskFull(s.store);
+    disk.on();
+    await expect(s.engine.onLeaderTrade(trade('buy'))).resolves.toBeUndefined();
+    await s.engine.idle();
+    expect(s.chain.buys).toBe(0);
+    expect(s.store.activePositions()).toHaveLength(0);
+  });
+
   it('Sell now whose own sale landed, could not be booked at once, and was paid for only in part says so', async () => {
     const s = server(none);
     await s.buy();
