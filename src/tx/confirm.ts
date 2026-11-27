@@ -49,8 +49,12 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
     try {
       const res = await connection.getSignatureStatuses([signature], { searchTransactionHistory: false });
       const status = res.value[0];
-      if (status?.err) return { landed: false, reason: `transaction errored: ${JSON.stringify(status.err)}`, certain: true };
-      if (status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) return { landed: true, slot: status.slot };
+      // (A status without a confirmation level is an old, rooted one: settled.)
+      const settled = !!status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized' || !status.confirmationStatus);
+      // An error is final only once confirmed: one seen at 'processed' may be in a block that is then dropped, and
+      // the same transaction can still land (and fill) in the real chain.
+      if (settled && status!.err) return { landed: false, reason: `transaction errored: ${JSON.stringify(status!.err)}`, certain: true };
+      if (settled) return { landed: true, slot: status!.slot };
       if (lastValidBlockHeight !== undefined && polls % 10 === 9) {
         const height = await connection.getBlockHeight('confirmed');
         if (height > lastValidBlockHeight) {
@@ -60,7 +64,8 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
           return { landed: false, reason: 'expired before landing', certain: true };
         }
       }
-      if (status) seen = true; // processed: in a block already, no more pushing
+      // In a block: no more pushing for now. If that block is dropped the status goes away and pushing resumes.
+      seen = !!status;
     } catch {
       // RPC hiccup: keep polling.
     }

@@ -161,3 +161,29 @@ describe('a coin Jupiter will not trade', () => {
     expect(friendlyError('jupiter: No routes found')).toMatch(/no market for this coin yet/);
   });
 });
+
+describe('a transaction first seen in a block that is then dropped (from the Velo session review)', () => {
+  function chain(statuses: (Record<string, unknown> | null)[]) {
+    let i = 0;
+    setConnectionForTests({
+      getSignatureStatuses: async () => ({ value: [statuses[Math.min(i++, statuses.length - 1)]] }),
+      getBlockHeight: async () => 0,
+    } as unknown as Connection);
+  }
+  it('an error seen only at "processed" is not final: the same transaction can still land in the real chain', async () => {
+    chain([{ err: { InstructionError: [2, { Custom: 6003 }] }, confirmationStatus: 'processed', slot: 1 }, null, null, { err: null, confirmationStatus: 'confirmed', slot: 7 }]);
+    expect(await confirmSignature('sig', 1_000, { pollMs: 5 })).toEqual({ landed: true, slot: 7 });
+  });
+  it('an error at "confirmed" is final', async () => {
+    chain([{ err: { InstructionError: [2, { Custom: 6003 }] }, confirmationStatus: 'confirmed', slot: 1 }]);
+    expect(await confirmSignature('sig', 1_000, { pollMs: 5 })).toMatchObject({ landed: false, certain: true });
+  });
+  it('re-sending starts again when the block it was seen in is dropped (it used to stop for good)', async () => {
+    const statuses = [{ err: null, confirmationStatus: 'processed', slot: 1 }, ...Array.from({ length: 12 }, () => null), { err: null, confirmationStatus: 'confirmed', slot: 9 }];
+    chain(statuses);
+    let resent = 0;
+    const r = await confirmSignature('sig', 1_000, { resend: () => { resent++; }, pollMs: 10, resendEveryMs: 15 });
+    expect(r).toEqual({ landed: true, slot: 9 });
+    expect(resent).toBeGreaterThanOrEqual(3);
+  });
+});
