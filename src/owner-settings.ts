@@ -48,6 +48,8 @@ export class OwnerSettingsError extends Error {
 
 /** The most a single buy may spend when the owner has set no limit of their own. */
 export const DEFAULT_MAX_SOL_PER_BUY = 30;
+/** The highest "Max per buy" the admin page takes. */
+export const HIGHEST_MAX_PER_BUY = 1000;
 const OLD_DEFAULT_MAX_SOL_PER_BUY = 0.05;
 const JUPITER_FREE = /lite-api\.jup\.ag/;
 const JUPITER_KEYED = 'https://api.jup.ag';
@@ -161,7 +163,10 @@ export async function saveOwnerSettings(store: Store, config: MutableConfig, pat
 
   if (patch.maxSolPerBuy !== undefined) {
     const max = Number(patch.maxSolPerBuy);
-    if (!(max > 0 && max <= 1000)) throw new OwnerSettingsError('the max per buy must be above 0 SOL');
+    // Each end of the range has its own sentence (2000 was refused with "must be above 0"). 1000 SOL is a guard against
+    // a slip of the finger; a copy's own buy is capped lower still (LIMITS.maxBuySol, 100 SOL).
+    if (!(max > 0)) throw new OwnerSettingsError('the max per buy must be above 0 SOL');
+    if (max > HIGHEST_MAX_PER_BUY) throw new OwnerSettingsError(`the max per buy can be at most ${HIGHEST_MAX_PER_BUY} SOL`);
     toStore.max_sol_per_buy = String(max);
     apply.push(() => { config.maxSolPerBuy = max; });
   }

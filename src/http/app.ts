@@ -125,7 +125,9 @@ export function positionView(p: Position) {
   const costOfHeld = p.tokensBought > 0n ? (p.costLamports * p.tokensHeld) / p.tokensBought : 0n;
   const pnlLamports = p.proceedsLamports + (valueLamports ?? costOfHeld) - p.costLamports;
   const now = Date.now();
-  const nextTimed = p.sell.timed.map((t, i) => ({ ...t, i })).filter((t) => !p.firedTimed.includes(t.i)).sort((a, b) => a.afterSec - b.afterSec)[0];
+  // The timed sells count from our confirmed buy: while the buy is still on its way ('opening', its time is when the
+  // row was written) nothing counts down yet (the page said "buying… · next sell 40% in 0s").
+  const nextTimed = p.status !== 'open' ? undefined : p.sell.timed.map((t, i) => ({ ...t, i })).filter((t) => !p.firedTimed.includes(t.i)).sort((a, b) => a.afterSec - b.afterSec)[0];
   return {
     id: p.id,
     copyId: p.copyId,
@@ -204,7 +206,11 @@ export function createApp(deps: AppDeps): Server {
     const users = store.users();
     const active = store.activePositions();
     const rows = users.map((u) => {
-      const closed = store.closedPositions(u.id, 5000);
+      // Database totals over every closed position (it was a sum of the newest 5,000 rows, real and test added
+      // together: a user who only ever tested showed a profit). "Profit" is real money; test profit is apart, as the
+      // fees are.
+      const real = store.closedTotals(u.id, 'live');
+      const test = store.closedTotals(u.id, 'paper');
       const fills = store.userFees(u.id);
       return {
         id: u.id, username: u.username, createdAt: u.createdAt, disabled: u.disabled,
@@ -213,8 +219,9 @@ export function createApp(deps: AppDeps): Server {
         wallet: store.wallet(u.id)?.pubkey ?? null,
         copies: store.copies(u.id).filter((c) => c.settings.enabled).length,
         open: active.filter((p) => p.userId === u.id).length,
-        closed: closed.length,
-        pnlSol: sol(closed.reduce((a, p) => a + (p.proceedsLamports - p.costLamports), 0n)),
+        closed: real.trades + test.trades,
+        pnlSol: sol(real.pnlLamports),
+        testPnlSol: sol(test.pnlLamports),
         feesLiveSol: sol(fills.live), feesTestSol: sol(fills.test),
       };
     });
@@ -451,6 +458,7 @@ export function createApp(deps: AppDeps): Server {
     // ── copies ──
     if (path === '/api/copies' && method === 'POST') {
       const s = validated(await readJson(req));
+      refuseSecondCopy(uid, s.leader);
       const cap = deps.maxCopiesPerUser ?? 20;
       if (store.countCopies(uid) >= cap) throw new HttpError(409, `at most ${cap} copies per account`);
       const id = store.createCopy(uid, s);
@@ -468,6 +476,7 @@ export function createApp(deps: AppDeps): Server {
         return json(res, 200, { ok: true });
       }
       const s = validated(await readJson(req));
+      refuseSecondCopy(uid, s.leader, id);
       store.updateCopy(uid, id, s);
       return json(res, 200, { ok: true, id });
     }
@@ -505,11 +514,24 @@ export function createApp(deps: AppDeps): Server {
         return { ...positionView(p), feesSol: sol(fees), fills: fills.map((f) => ({ side: f.side, reason: f.reason, sol: sol(f.lamports), feeSol: sol(f.feeLamports), signature: f.simulated ? null : f.signature, simulated: f.simulated, at: f.createdAt })) };
       });
       // The heading counts every closed position of the shown kind (real once there are any), not the 200 listed.
-      const t = store.closedTotals(uid, shownMode(uid));
-      return json(res, 200, { positions: views, shown: views.length, totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0)) });
+      // The list holds both kinds: closedAll lets the page say it is cut even when neither kind alone passes 200.
+      const mode = shownMode(uid);
+      const t = store.closedTotals(uid, mode);
+      const closedAll = t.trades + store.closedTotals(uid, mode === 'live' ? 'paper' : 'live').trades;
+      return json(res, 200, { positions: views, shown: views.length, closedAll, totalPnlSol: sol(t.pnlLamports), totalFeesSol: sol(t.feesLamports), trades: t.trades, wins: t.wins, pnl: pnlSummary(store, uid, Number(url.searchParams.get('tz') ?? 0)) });
     }
 
     throw new HttpError(404, 'not found');
+  }
+
+  /**
+   * One copy per wallet per account. A second one adds nothing (an account holds one position per coin, whichever of
+   * its copies bought it), and the editor used to add the same wallet twice without a word (the Scharo preset saved
+   * twice; a list of addresses sent again after one of them was corrected). A deleted copy does not count.
+   */
+  function refuseSecondCopy(uid: number, leader: string, except?: number): void {
+    const other = store.copies(uid).find((c) => c.id !== except && c.settings.leader === leader);
+    if (other) throw new HttpError(409, `you already copy this wallet as "${other.settings.name}"${other.settings.enabled ? '' : ' (paused)'}: edit that copy instead`);
   }
 
   function validated(body: Record<string, unknown>) {

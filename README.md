@@ -7,7 +7,8 @@ pump.fun trades around the clock: your buy size, your minimum, your exits.
   amount: pump.fun and PumpSwap through the fast native route; every other launchpad and exchange (Raydium
   LaunchLab / Bonk, Meteora DBC, Raydium, Meteora, Orca, …) and coins paired with USDC, USD1 or anything else
   through Jupiter. You always pay and receive SOL. A wallet paying with USDC or another coin counts as a buy too,
-  valued in SOL for your minimum.
+  valued in SOL for your minimum. One copy per wallet: an account holds one position per coin, so a second copy of
+  a wallet it already copies is refused, naming the copy that follows it (edit that one instead).
 - **Four sell options, mixed however you like.**
   - **Sell when they sell**: the same share of your bag they sold of theirs; or everything on any sell of theirs;
     or everything only when they sell their whole bag in one go (their partial sells are then ignored).
@@ -112,7 +113,8 @@ Log in with the admin password. Only you have it; a user account is never an adm
 - **License keys.** One key = one account. Create a key for each friend (and one for yourself), copy it when it
   is shown (once), send it to them; pasting it on the site is all they need. "New key" replaces a lost one. A key can carry its own fee (0 % for you, say).
   Revoke a key and its user is locked out and gets no new copies; open positions still sell by their rules.
-- **Users.** Wallet, copies, open and closed positions, profit, fees paid; disable or enable anyone.
+- **Users.** Wallet, copies, open and closed positions, profit, fees paid; disable or enable anyone. Profit and fees
+  are real money; what a user's test trades would have made is shown under it, never added to it.
 
 ## Fees
 
