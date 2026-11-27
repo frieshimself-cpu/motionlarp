@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 172 tests
+## Automated (every change): `npm test`, 217 tests
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -96,6 +96,39 @@ Mainnet: a PumpSwap buy with platform fee and tip simulated cleanly.
 - Stricter browser policy: pages load, an injected inline script does not run (checked in a browser).
 - **On the real server (walletmotion.app):** automatic updates picked up three pushes, each within about 1–2
   minutes, and the site came back each time, including with the locked-down container settings.
+
+## 27 Nov 2026: timed exit of the original bag, the Scharo preset, Connections
+
+- **Automated, 217 tests.** `tests/exit.test.ts`: steps at +2 s / +4 s / +6 s are shares of the coins the buy
+  received and each fires on its own clock; a step that is still unconfirmed does not hold the next one back; a
+  failed sell is retried at once and later steps keep their times; the last step sells whatever the wallet holds;
+  the timer starts at our confirmed buy; one position per coin per user; the copied wallet selling its whole bag
+  sells ours, its partial sell does nothing; every sell is logged with seconds after the buy, tokens and SOL.
+  `tests/connections.test.ts`: each connection check, a hanging one cut off, no key ever in the answer. A Jupiter
+  key is tried with a real quote before it is saved.
+- **In a real browser** (local server, test mode): the owner's Connections tab showed RPC, Sender and a real
+  Jupiter quote green; a pasted non-link and a made-up Jupiter key were refused with a plain message; an opened
+  "replace" form stayed open across background refreshes. A user pasted a key, imported a wallet, clicked
+  **Scharo preset**: wallet `wtb3G6oV…8ksih`, 0.001 / 0.005 fees on buys and sells, 100 % slippage, "only their
+  full exit", "% of the original bag" with 2 s 40 %, 4 s 30 %, 6 s the rest, stop loss and dead coin off; saved
+  and re-opened with the same values.
+- **Test mode against mainnet, following the real wallet** (public RPC, nothing sent, 0.02 SOL buys). Two of its
+  buys were copied and exited:
+  `9Zoy…pump`: sells at +2.2 s, +4.2 s, +6.0 s after the buy. `4N1P…pump`: +2.0 s, +4.0 s, +6.0 s. Both closed.
+- **What that run also showed: the fees decide the result at small sizes.** Every transaction of this preset
+  costs 0.006 SOL (0.001 priority + 0.005 tip) and a round trip is four transactions: 0.024 SOL, whatever the buy
+  size. The 0.02 SOL test buys cost 0.026 and returned 0.0018. At 0.5 SOL the same fees are about 5 % of the buy,
+  at 1 SOL about 2.4 %.
+- **How that wallet trades** (its last 60 transactions): 31 failed (it sends several and one lands; failed ones
+  are never copied). Buys of 1–5 SOL, sometimes two in the same second or a second one 8–13 s later; it holds
+  14 s to several minutes and then almost always sells 100 % in one go. So this preset is out (at +6 s) before
+  the wallet itself sells; the "their full exit" rule only matters if it dumps within the first six seconds.
+- **A pump.fun buy now spends exactly the amount set** (`scripts/check-exact-buy.ts`, simulated on mainnet for
+  the wallets that had just bought each coin): 4 of 4 coins passed at 100 % slippage, spending 0.010005 SOL of
+  0.01 asked (0.0129 where a new token account's rent was due). pump.fun's older buy, which the site used until
+  now, asks for a fixed number of tokens and may take up to the amount plus slippage: on one of the four coins
+  it would have paid 0.0108 for the same buy, and at 100 % slippage it could take double.
+- **On the real server:** the push was live after about two minutes; `/api/config` serves the Scharo preset.
 
 ## Not yet verified
 

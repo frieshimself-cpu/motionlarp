@@ -99,6 +99,9 @@ Log in with the admin password. Only you have it; a user account is never an adm
 
 ## Fees
 
+- **Slippage never raises what a buy spends.** A buy spends the amount set; a price that moved gets you fewer
+  coins, and the buy fails only when it would get fewer than the quote less your slippage (at 100 % it always
+  fills). The same on pump.fun, PumpSwap and Jupiter.
 - **Trading fees, set per copy by each user:** priority fee and tip, separately for buys and sells, plus slippage.
   The priority fee goes to the network; a tipped trade is also sent through
   Helius Sender (Jito and staked connections at once): a tip of 0.001 SOL or more uses every fast lane, a smaller
@@ -148,6 +151,7 @@ cp .env.example .env        # MASTER_KEY (npm run genkey) and ADMIN_PASSWORD; th
 npm run dev                 # http://127.0.0.1:3000
 npm test                    # 172 tests
 npm run check:mainnet       # builds real buys/sells for real wallets on mainnet and simulates them (sends nothing)
+npm run check:exactbuy      # a pump.fun buy at 100 % slippage spends what was asked and no more (simulated)
 npm run measure             # how many slots behind a copy would be, and how long building it takes
 ```
 

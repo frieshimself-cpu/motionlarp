@@ -14,6 +14,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "check:mainnet": "tsx --disable-warning=ExperimentalWarning scripts/check-mainnet.ts",
+    "check:exactbuy": "tsx --disable-warning=ExperimentalWarning scripts/check-exact-buy.ts",
     "measure": "tsx --disable-warning=ExperimentalWarning scripts/measure-latency.ts",
     "fixture": "tsx --disable-warning=ExperimentalWarning scripts/fetch-fixture.ts",
     "genkey": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""

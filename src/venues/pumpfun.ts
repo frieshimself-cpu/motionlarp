@@ -91,6 +91,29 @@ export class PumpFunVenue implements Venue {
       quoteMint: state.quoteMint,
     });
     if (amount.isZero()) throw new VenueError('quote returned zero tokens for this amount', 'zero_quote');
+    const expectedOut = big(amount);
+    // Spend exactly `lamportsIn` (fees included) and take whatever tokens that buys, at least the quote less
+    // slippage: the price moving against us means fewer tokens, never more SOL. (pump.fun's older buy asks for a
+    // fixed number of tokens and lets the program take up to lamportsIn + slippage: at 100 % slippage a buy could
+    // cost twice what the user set.) Simulated on mainnet with scripts/check-exact-buy.ts.
+    if (process.env.PUMP_EXACT_BUY !== 'off') {
+      try {
+        const instructions = await PUMP_SDK.buyExactQuoteInV3Instructions({
+          bondingCurve: state.bondingCurve,
+          associatedUserAccountInfo: state.associatedUserAccountInfo,
+          mint: pool.mint,
+          user,
+          amount,
+          quoteAmount: solAmount,
+          slippage: slippagePct,
+          tokenProgram: pool.tokenProgram,
+        });
+        const minOut = expectedOut - (expectedOut * BigInt(Math.round(Math.min(100, Math.max(0, slippagePct)) * 10))) / 1000n;
+        return { instructions, expectedOut, minOut };
+      } catch {
+        // The SDK refuses this instruction for some coins (cashback coins): they use the older buy below.
+      }
+    }
     // The SDK applies `slippage` (percent) to solAmount as the max SOL the program may take.
     const instructions = await PUMP_SDK.buyInstructions({
       global,
@@ -104,7 +127,6 @@ export class PumpFunVenue implements Venue {
       slippage: slippagePct,
       tokenProgram: pool.tokenProgram,
     });
-    const expectedOut = big(amount);
     return { instructions, expectedOut, minOut: expectedOut };
   }
 
