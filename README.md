@@ -116,7 +116,13 @@ Log in with the admin password. Only you have it; a user account is never an adm
 
 - **Slippage never raises what a buy spends.** A buy spends the amount set; a price that moved gets you fewer
   coins, and the buy fails only when it would get fewer than the quote less your slippage (at 100 % it always
-  fills). The same on pump.fun, PumpSwap and Jupiter.
+  fills). The same on pump.fun, PumpSwap and Jupiter (each uses its exact-spend instruction; checked on mainnet by
+  `npm run check:exactbuy`).
+- **Where a coin is traded.** pump.fun's curve and the pool a pump.fun coin graduated into are traded directly;
+  every other coin goes through Jupiter's best route (never a side pool somebody opened for it).
+- **How a trade is sent.** On every lane at once (the RPC and, with a tip, Helius Sender in the nearest region),
+  re-sent about once a second until it lands; both Helius lanes ask for MEV Protect (routing around validators
+  linked to sandwich attacks; `MEV_PROTECT=off` switches it off). The last sell of a timed exit never gives up.
 - **Trading fees, set per copy by each user:** priority fee and tip, separately for buys and sells, plus slippage.
   The priority fee goes to the network; a tipped trade is also sent through
   Helius Sender (Jito and staked connections at once): a tip of 0.001 SOL or more uses every fast lane, a smaller
@@ -166,7 +172,9 @@ cp .env.example .env        # MASTER_KEY (npm run genkey) and ADMIN_PASSWORD; th
 npm run dev                 # http://127.0.0.1:3000
 npm test                    # 172 tests
 npm run check:mainnet       # builds real buys/sells for real wallets on mainnet and simulates them (sends nothing)
-npm run check:exactbuy      # a pump.fun buy at 100 % slippage spends what was asked and no more (simulated)
+npm run check:exactbuy      # a buy at 100 % slippage spends what was asked and no more, curve and PumpSwap (simulated)
+# Live-test tooling (REAL transactions, small amounts; read the header of each before running):
+#   scripts/live-leader.ts, scripts/live-executor-check.ts; read-only: scripts/check-side-pool.ts
 npm run measure             # how many slots behind a copy would be, and how long building it takes
 ```
 

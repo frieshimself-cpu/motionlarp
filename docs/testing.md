@@ -161,12 +161,78 @@ The owner's decision: the two keys are set on the server, permanently, and nowhe
   The editor warns when a buy is above the site's "Max per buy" (such buys are skipped by the server).
 - 233 automated tests pass.
 
+## 27 Nov 2026 (night): real-money tests
+
+Funds: the owner sent 0.5 SOL to a throwaway test wallet. About 0.064 SOL was used over roughly 80 real
+transactions (network fees, tips, and small losses on tiny trades); about 0.007 of that is rent that sits in token
+accounts. The owner's "Live trading" switch on walletmotion.app stayed OFF through all of this, so the real trades
+below were made by the same code running on a private copy of the server (public RPC, Helius Sender without a key)
+and by a script calling the site's executor directly; on the real server the same scenarios ran in test mode.
+
+**Tooling** (in `scripts/`, they send real transactions, run on purpose only): `live-leader.ts` (a wallet of our
+own that buys and sells so the site has something to copy on demand), `live-executor-check.ts` (one round trip
+through `ChainExecutor`, every reported number compared with the wallet's balance change), `check-side-pool.ts`,
+`check-exact-buy.ts` (both read-only).
+
+**On the real server, test mode** (Helius stream, real quotes, on-chain simulation with the funded wallet). The
+leader wallet really bought and sold; the site's copy was simulated:
+- pump.fun curve coin, PumpSwap coin and BONK through Jupiter: the copy was booked 0.25–0.9 s after the leader's
+  transaction was SENT (before the sender had its own confirmation), sells at +2.0/2.2 s, +4.0/4.2 s, +6.0 s.
+- "Only their full exit": the leader sold half, nothing happened; the leader sold everything, the site sold
+  everything 0.17–0.19 s after that sell was sent.
+
+**Real money, the site's executor called directly** (curve coin, PumpSwap coin, BONK via Jupiter; buy, sell 40 %,
+sell everything; Sender with a 0.001 SOL tip, Sender's small-tip lane, the plain RPC lane alone, Sender alone):
+every transaction landed, confirmed 0.7–2.2 s after the call; tokens and SOL reported matched the wallet's balance
+change exactly on every fill, including a small sell that did not cover its own fees (booked as −0.000006 SOL).
+
+**Real money, the whole server (private copy), copying a leader:**
+- Buy copied for real, then real sells at +2.0/2.1 s, +4.0/4.1 s and +6.1 s after our buy was confirmed; on chain
+  they landed about 2.8 s, 4.6 s and 6.4 s after the buy's slot (slots are about 0.2 s now). Position closed;
+  the profit shown equals the wallet's balance change to the lamport. Run three times.
+- The public RPC dropped out for about 90 s in the middle of one exit: the last step kept retrying and sold
+  everything the moment it came back (+99 s). Nothing was left in the wallet.
+- "Only their full exit" with real sells (twice): half-sell ignored, full exit sold our whole bag.
+- Sell now: sold for real 1.4 s after the click.
+- A buy the wallet could not afford (0.0194 SOL held, 0.02 needed): skipped with a clear line, nothing sent.
+
+**Bugs these runs and the code review found, all fixed with tests and re-proven with real trades:**
+1. Coins not launched on pump.fun were bought in a tiny side PumpSwap pool instead of the real market: for BONK,
+   WIF and JUP that pool gave 25–55 % of the market's coins for 0.01 SOL and 0.04–0.17 % for 7 SOL. Now only
+   pump.fun's curve and the pool a pump.fun coin graduated into are traded directly; everything else goes through
+   Jupiter (`tests/pf.test.ts`).
+2. PumpSwap buys were not exact-spend: at 100 % slippage a 7 SOL buy wrapped 14 SOL (the wallet needed 14, and
+   up to 14 could be spent). Now `buy_exact_quote_in_v2` (`scripts/check-exact-buy.ts`: 3 of 3 PumpSwap coins and
+   3 of 3 curve coins spent 0.010005 of 0.01 asked at 100 % slippage; one real PumpSwap buy).
+3. A transaction was sent once and never again: one that was dropped waited about 30 s for its blockhash to
+   expire. Now the same signed transaction is re-sent about once a second until it lands.
+4. The send waited for its slowest lane, and when no lane answered the trade was taken as "not sent" although it
+   may have gone out (a buy could land with no position; a sell could be signed twice). Now the first lane that
+   takes it is enough, and an unclear result is settled by watching the chain (`tests/send.test.ts`).
+5. Live trading switched off while a sell was being built: the simulated result was booked as a real sell. Fixed.
+6. The last timed sell gave up after about a minute of failures ("use Sell now"). It now keeps trying every 15 s
+   until it sells; earlier steps still give up, because the last step sells what they left.
+7. An update restarted the server in the middle of a short exit. The server now finishes an exit in progress
+   (up to 40 s) before it restarts.
+8. Sell amounts hid losses: a sell that did not cover its fees was booked as 0, and the first estimate left the
+   fees out until the exact number arrived. Fills are now the wallet's exact change from the first moment.
+9. A Jupiter transaction just over the size limit passed our check and was refused by the network. Fixed.
+10. A live buy could leave the wallet without enough SOL to pay for its own sells. The check now counts the fees
+    of the buy and one sell and the token-account rent.
+11. Smaller: the "now copying" line said "test mode" on a live site; both Helius lanes now ask for MEV Protect
+    (routing around sandwiching validators; a buy at 100 % slippage has no price limit of its own); compute limit
+    200k instead of 300k (the same fee bids 1.5x more per unit), doubled automatically for a coin that runs out;
+    the Sender region is re-measured every five minutes and dropped after three failed sends.
+
+Automated tests: 262.
+
 ## Not yet verified
 
-- Sending a tipped trade through Helius Sender (needs a live trade).
+- **Real trades on the real server** (Helius RPC with the key, the regional Sender, the Helius stream in live
+  mode). Everything above ran this code for real elsewhere; on walletmotion.app it ran in test mode. It needs the
+  owner's "Live trading" switch. The status line in `/api/config` shows per-lane counters (`sends`) once it has.
+- The Helius RPC lane with `mev-protect=true` (no Helius key outside the server). Sender with it was proven.
+- A 7 SOL trade. The largest real buy so far is 0.01 SOL.
 - That the firewall / fail2ban step ran on the server (it logs to /var/log/motionlarp-update.log).
-- A **live** buy and sell with real SOL (needs a funded wallet, a paid RPC and the owner's go-ahead):
-  `LIVE_TRADING=true`, one copy set to Live, 0.01 SOL. Check on Solscan that the buy lands, the fill in the
-  history matches the transaction, and the sells fire.
 - The Docker image was not built here (no Docker engine in the build container); `npm run build` and the built
-  server were checked.
+  server were checked, and the real server has rebuilt itself after every push.
