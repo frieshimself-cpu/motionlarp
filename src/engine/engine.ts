@@ -365,9 +365,16 @@ export class Engine {
         if (fill.ok) {
           // The wallet's balance after the last step tells whether the bag is really empty (a failed read keeps our books).
           const after = live && order.everything ? await executor.tokenBalance(owner, p.mint).catch(() => null) : null;
-          this.settleSell(p.id, order, fill, sentAt, after);
+          // The last step sold only part (the market could not pay for all of it): it stays owed and sells the rest
+          // as soon as it can, at the slow pace (the market needs buyers to fill up again).
+          const partial = !!order.everything && fill.tokens < tokens;
+          this.settleSell(p.id, order, fill, sentAt, after, partial);
           this.solCache.delete(owner); // the wallet's SOL just changed
-          return;
+          const now = partial ? store.position(p.id) : null;
+          if (!now || now.status !== 'open' || now.tokensHeld <= 0n) return;
+          await pause(this.deps.slowRetryMs ?? SLOW_RETRY_MS);
+          failures = 0;
+          continue;
         }
         error = fill.error;
       } catch (err) {
@@ -396,8 +403,9 @@ export class Engine {
     }
   }
 
-  /** Books a finished sell. Synchronous from the re-read on, so overlapping sells cannot corrupt the position. */
-  private settleSell(positionId: number, order: SellOrder, fill: Extract<Awaited<ReturnType<Executor['sell']>>, { ok: true }>, sentAt: number, walletAfter: bigint | null): void {
+  /** Books a finished sell. Synchronous from the re-read on, so overlapping sells cannot corrupt the position.
+   *  `partial`: the market paid for only part of a sell of everything; the order stays owed (not marked done). */
+  private settleSell(positionId: number, order: SellOrder, fill: Extract<Awaited<ReturnType<Executor['sell']>>, { ok: true }>, sentAt: number, walletAfter: bigint | null, partial = false): void {
     const { store } = this.deps;
     const p = store.position(positionId);
     if (!p) return;
@@ -411,7 +419,7 @@ export class Engine {
       tokensHeld: left,
       proceedsLamports: p.proceedsLamports + lamports,
       ...(closed && p.status === 'open' ? { status: 'closed' as const, closedAt: this.now() } : {}),
-      ...this.markDone(p, order),
+      ...(partial && !closed ? {} : this.markDone(p, order)),
     });
     if (sold === 0n && fill.simulated) return; // nothing was left for this step in test mode: no fill, no feed line
     const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
@@ -421,16 +429,19 @@ export class Engine {
       store.updateFillLamports(fillId, exact.lamports);
       if (now) store.updatePosition(p.id, { proceedsLamports: now.proceedsLamports + (exact.lamports - lamports) });
     }).catch(() => undefined);
-    store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, lamports, sentAt, fill.simulated, closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
+    store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, lamports, sentAt, fill.simulated, closed, partial && !closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
   }
 
   /** "Sold 40% of the bag of X (copy) for 0.4 SOL — +2.0s after buy · 412K tokens (test). Position closed." */
-  private sellMessage(p: Position, order: SellOrder, tokens: bigint, lamports: bigint, sentAt: number, simulated: boolean, closed: boolean): string {
+  private sellMessage(p: Position, order: SellOrder, tokens: bigint, lamports: bigint, sentAt: number, simulated: boolean, closed: boolean, partial = false): string {
     const label = `${shortMint(p.mint)} (${p.copyName})`;
     const what = order.everything ? 'the rest' : order.basis === 'bag' ? `${fmtPct(order.percent)} of the bag` : order.percent >= 100 ? 'all' : fmtPct(order.percent);
     const after = `+${((sentAt - p.openedAt) / 1000).toFixed(1)}s after buy`;
     const why = order.basis === 'bag' ? after : `${REASON_TEXT[order.reason](order, p)} · ${after}`;
-    return `Sold ${what} of ${label} for ${fmtSol(lamports)} — ${why} · ${fmtTokens(tokens, p.decimals)} tokens${simulated ? ' (test)' : ''}${closed ? '. Position closed.' : ''}`;
+    const rest = !partial ? '' : order.reason === 'manual'
+      ? '. The market could pay for only part of it (the curve is short of SOL): Sell now again once it has filled up.'
+      : '. The market could pay for only part of it (the curve is short of SOL): the rest is sold as soon as it can be.';
+    return `Sold ${what} of ${label} for ${fmtSol(lamports)} — ${why} · ${fmtTokens(tokens, p.decimals)} tokens${simulated ? ' (test)' : ''}${closed ? '. Position closed.' : ''}${rest}`;
   }
 
   // ── selling ───────────────────────────────────────────────────────────
@@ -556,12 +567,17 @@ export class Engine {
       }
       if (left < 0n) left = 0n;
       const closed = left === 0n;
+      // A sell of everything that the market could pay only part of (a curve short of SOL): the rest is sold on a
+      // later try at the slow pace (the curve needs buyers to fill up again); the order is not done until then.
+      // Sell now says so instead: the user decides when to press it again.
+      const partial = order.percent >= 100 && fill.tokens < tokens && !closed;
       store.updatePosition(p.id, {
         tokensHeld: left,
         proceedsLamports: cur.proceedsLamports + fill.lamports,
         ...(closed && cur.status === 'open' ? { status: 'closed' as const, closedAt: this.now() } : {}),
-        ...this.markDone(cur, order),
+        ...(partial ? {} : this.markDone(cur, order)),
       });
+      if (partial && order.reason !== 'manual') this.retries.set(key, { positionId: p.id, order, tries: 1, nextAt: this.now() + (this.deps.slowRetryMs ?? SLOW_RETRY_MS) });
       const fillId = store.insertFill({ positionId: p.id, userId: p.userId, side: 'sell', reason: order.reason, tokens: fill.tokens, lamports: fill.lamports, signature: fill.signature, simulated: fill.simulated, error: null, feeLamports: fill.feeLamports ?? 0n });
       const booked = fill.lamports;
       void fill.refine?.then((exact) => {
@@ -570,7 +586,7 @@ export class Engine {
         store.updateFillLamports(fillId, exact.lamports);
         if (cur) store.updatePosition(p.id, { proceedsLamports: cur.proceedsLamports + (exact.lamports - booked) });
       }).catch(() => undefined);
-      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, fill.lamports, sentAt, fill.simulated, closed), mint: p.mint, signature: fill.simulated ? null : fill.signature });
+      store.addEvent({ userId: p.userId, copyId: p.copyId, kind: 'sell', message: this.sellMessage(p, order, fill.tokens, fill.lamports, sentAt, fill.simulated, closed, partial), mint: p.mint, signature: fill.simulated ? null : fill.signature });
       return { ok: true };
     } catch (err) {
       return this.sellFailed(p, order, label, safeErrorMessage(err), quiet);

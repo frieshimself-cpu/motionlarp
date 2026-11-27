@@ -36,6 +36,17 @@ function poolArgs(s: SwapSolanaState) {
   };
 }
 
+/**
+ * The state handed to the SDK's builders. The wallet's wrapped-SOL account always reads as missing, so the SDK puts
+ * an idempotent create of it in the transaction (a no-op when it exists): every PumpSwap trade wraps SOL in that
+ * account and closes it at the end (any wrapped SOL kept there comes back as plain SOL), so a second trade signed
+ * meanwhile would otherwise find it closed and fail once. A buy's coin account likewise (one of our own sells may
+ * have just closed it); a sell's coin account exists, we hold the coin.
+ */
+export function tradeState(s: SwapSolanaState, side: 'buy' | 'sell'): SwapSolanaState {
+  return { ...s, userQuoteAccountInfo: null, ...(side === 'buy' ? { userBaseAccountInfo: null } : {}) };
+}
+
 export class PumpSwapVenue implements Venue {
   readonly kind = 'pumpswap' as const;
   private online: OnlinePumpAmmSdk | null = null;
@@ -77,14 +88,14 @@ export class PumpSwapVenue implements Venue {
     const expectedOut = big(q.base);
     let minOut = expectedOut - (expectedOut * BigInt(Math.round(Math.min(100, Math.max(0, slippagePct)) * 10))) / 1000n;
     if (minOut < 1n) minOut = 1n; // the program refuses a minimum of zero
-    const instructions = await PUMP_AMM_SDK.buyExactQuoteInV2Instructions(s, bn(lamportsIn), bn(minOut));
+    const instructions = await PUMP_AMM_SDK.buyExactQuoteInV2Instructions(tradeState(s, 'buy'), bn(lamportsIn), bn(minOut));
     return { instructions, expectedOut, minOut };
   }
 
   async buildSell({ pool, user, tokensIn, slippagePct }: { pool: ResolvedPool; user: PublicKey; tokensIn: bigint; slippagePct: number }): Promise<BuildResult> {
     const s = await this.state(pool, user);
     const q = sellBaseInput({ ...poolArgs(s), base: bn(tokensIn), slippage: slippagePct });
-    const instructions = await PUMP_AMM_SDK.sellBaseInput(s, bn(tokensIn), slippagePct, { v2: true });
+    const instructions = await PUMP_AMM_SDK.sellBaseInput(tradeState(s, 'sell'), bn(tokensIn), slippagePct, { v2: true });
     return { instructions, expectedOut: big(q.uiQuote), minOut: big(q.minQuote) };
   }
 }

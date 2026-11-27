@@ -26,6 +26,8 @@ class Market implements Executor {
   attempts = 0;
   /** Decides each sell attempt: 'ok', 'fail', or a promise the test resolves later (an unconfirmed sell). */
   plan: (n: number, req: Sell) => 'ok' | 'fail' | Promise<'ok' | 'fail'> = () => 'ok';
+  /** At most this many tokens sell on attempt n (a curve that cannot pay for more); null = all asked for. */
+  sellCap: (n: number, req: Sell) => bigint | null = () => null;
   constructor(private readonly clock: () => number) {}
   async buy(req: TradeRequest & { lamports: bigint }): Promise<FillResult> {
     const tokens = (req.lamports * BAG) / SOL;
@@ -39,7 +41,8 @@ class Market implements Executor {
     const outcome = await this.plan(n, req);
     if (outcome === 'fail') return { ok: false, error: 'boom' };
     if (this.live && req.tokens > this.held) return { ok: false, error: 'insufficient tokens' };
-    const tokens = req.tokens;
+    const cap = this.sellCap(n, req);
+    const tokens = cap !== null && cap < req.tokens ? cap : req.tokens;
     this.held -= this.live ? tokens : 0n;
     this.sells.push({ tokens, at: this.clock() });
     return { ok: true, signature: `S${n}`, tokens, lamports: (tokens * SOL) / BAG, simulated: !this.live };
@@ -506,5 +509,34 @@ describe('the sell that empties the bag closes the coin\'s token account (its re
     ex.plan = (n) => (n === 3 ? 'fail' : 'ok'); // the last step fails once, then is retried
     await at(2); await at(4); await at(6);
     expect(ex.requests.map((r) => [!!r.closeIfEmpty, !!r.checkFirst])).toEqual([[false, false], [false, false], [true, false], [true, true]]);
+  });
+});
+
+describe('a sell of everything that the market could pay only part of (a mayhem curve short of SOL)', () => {
+  it('the last timed step books what was sold and keeps going until the rest is sold too', async () => {
+    ex.live = true;
+    scharo();
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    await at(2); await at(4);
+    ex.sellCap = (n) => (n === 3 ? 200_000n : null); // the last step: only 200k of the 300k left could be paid for
+    await at(6);
+    expect(ex.sells.map((s) => s.tokens)).toEqual([400_000n, 300_000n, 200_000n, 100_000n]);
+    expect(open()).toHaveLength(0);
+    expect(store.closedPositions(uid)[0]).toMatchObject({ tokensHeld: 0n, proceedsLamports: SOL });
+    expect(feed().filter((l) => /could pay for only part/.test(l))).toHaveLength(1);
+  });
+
+  it('their full exit sold only in part: the rest is sold on a later try, not left behind', async () => {
+    ex.live = true;
+    scharo({ sell: { ...SCHARO.sell, timed: [{ afterSec: 600, percent: 100 }] } });
+    await engine.onLeaderTrade(buyTrade()); await engine.idle();
+    ex.sellCap = (n) => (n === 1 ? 600_000n : null);
+    await engine.onLeaderTrade({ ...sellTrade(0n), signature: 'full' }); await engine.idle();
+    expect(ex.sells.map((s) => s.tokens)).toEqual([600_000n]);
+    expect(open()[0]).toMatchObject({ status: 'open', tokensHeld: 400_000n });
+    expect(feed().some((l) => /could pay for only part/.test(l))).toBe(true);
+    clock += 60_000; await engine.tick(); await engine.idle();
+    expect(ex.sells.map((s) => s.tokens)).toEqual([600_000n, 400_000n]);
+    expect(open()).toHaveLength(0);
   });
 });

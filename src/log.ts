@@ -99,6 +99,8 @@ export function friendlyError(text: string): string {
   if (/not tradable|not_tradable/i.test(text)) return 'Jupiter will not trade this coin (almost no liquidity, flagged, or not listed yet)';
   if (/no routes found|could_not_find_any_route/i.test(text)) return 'no market for this coin yet (Jupiter found no route)';
   if (/NotEnoughTokensToBuy/i.test(text)) return 'not enough coins left on the curve for this buy';
+  if (/curve holds no SOL|curve holds too little SOL|\bOverflow\b/.test(text)) return 'the curve holds too little SOL to pay for this sell right now (it fills up again when someone buys): the rest is sold as soon as it can be';
+  if (/PumpSwap pool was not found yet/i.test(text)) return 'the coin is moving to PumpSwap right now: nothing can trade it for a few seconds';
   if (/ComputationalBudgetExceeded|exceeded CUs/i.test(text)) return 'the trade needed more compute than it asked for: retried with more';
   if (/fetch failed|ECONNRESET|ETIMEDOUT|aborted|timeout/i.test(text)) return 'could not reach the Solana RPC';
   return text.length > 160 ? `${text.slice(0, 157)}…` : text;

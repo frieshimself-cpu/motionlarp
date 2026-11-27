@@ -81,8 +81,13 @@ export interface Executor {
 }
 
 const FETCH_FILL_TRIES = 6;
-/** Native-route refusals that mean "not a coin this route can trade": use Jupiter instead. */
-const USE_JUPITER = new Set(['unresolved', 'unsupported_pool', 'unsupported_quote', 'unsupported_program', 'migrating']);
+/**
+ * Native-route refusals that mean "not a coin this route can trade": use Jupiter instead. Not 'migrating' (a curve
+ * complete, its PumpSwap pool not there yet): nothing can trade such a coin for those seconds, Jupiter included, and
+ * the moment the pool exists only the native route trades it at once. A sell then fails fast and its own retries
+ * (0.25 s, 1 s, ...) sell on PumpSwap; a copy buy in that moment is skipped.
+ */
+const USE_JUPITER = new Set(['unresolved', 'unsupported_pool', 'unsupported_quote', 'unsupported_program']);
 /** Smaller routes leave room for our fee instruction; tried in order when a route does not fit. */
 /** Smaller routes to fall back to when a transaction does not fit with our own transfers inside. */
 const SMALLER_ROUTE_SIZES = [32, 20];
@@ -170,9 +175,8 @@ export class ChainExecutor implements Executor {
       return await this.withPool(mint, native);
     } catch (err) {
       if (err instanceof VenueError && USE_JUPITER.has(err.code)) {
-        // What a coin IS does not change (not a pump.fun coin, priced in another token): Jupiter for an hour. A coin
-        // that is only in between (its curve complete, its pool not there yet) is looked at again after 20 s.
-        this.viaJupiter.set(mint, Date.now() + (err.code === 'migrating' ? 20_000 : 3_600_000));
+        // What a coin IS does not change (not a pump.fun coin, priced in another token): Jupiter for an hour.
+        this.viaJupiter.set(mint, Date.now() + 3_600_000);
         return jupiter();
       }
       throw err;
@@ -262,20 +266,24 @@ export class ChainExecutor implements Executor {
         return { ok: true, signature: `PAPER_${Date.now().toString(36)}`, tokens, lamports: req.lamports + fee + cost, feeLamports: fee, simulated: true, note: 'test fill from the live quote (wallet too empty to simulate)' };
       }
       const built = await venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct });
-      const ixs = withFee(built.instructions, req.wallet.publicKey, req.lamports, req.feeBps, config.feeWallet);
+      const spend = built.lamportsIn ?? req.lamports;
+      const ixs = withFee(built.instructions, req.wallet.publicKey, spend, req.feeBps, config.feeWallet);
       const tx = await this.nativeTx(req, ixs.instructions);
       const sim = await sendTransaction(tx.tx, false);
       if (!sim.ok) return { ok: false, error: sim.error };
-      return { ok: true, signature: sim.signature, tokens, lamports: req.lamports + ixs.fee + cost, feeLamports: ixs.fee, simulated: true, note: 'simulated on-chain, not sent (test mode)' };
+      return { ok: true, signature: sim.signature, tokens: built.lamportsIn !== undefined ? built.expectedOut : tokens, lamports: spend + ixs.fee + cost, feeLamports: ixs.fee, simulated: true, note: 'simulated on-chain, not sent (test mode)' };
     }
     const [built, before] = await Promise.all([
       venue.buildBuy({ pool, user: req.wallet.publicKey, lamportsIn: req.lamports, slippagePct: req.slippagePct }),
       this.tokenBalance(owner, req.mint).catch(() => null),
     ]);
+    // A curve with less left than the budget buys spends only the price of what is left: the fee and the cost are
+    // counted on that, not on the full amount.
+    const spend = built.lamportsIn ?? req.lamports;
     // The fee transfer rides in the same transaction, after the swap: no trade, no fee.
-    const ixs = withFee(built.instructions, req.wallet.publicKey, req.lamports, req.feeBps, config.feeWallet);
+    const ixs = withFee(built.instructions, req.wallet.publicKey, spend, req.feeBps, config.feeWallet);
     const tx = await this.nativeTx(req, ixs.instructions, true);
-    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'buy', built.expectedOut, req.lamports + ixs.fee + this.txCost(req), before, ixs.fee);
+    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'buy', built.expectedOut, spend + ixs.fee + this.txCost(req), before, ixs.fee);
   }
 
   /**
@@ -368,15 +376,22 @@ export class ChainExecutor implements Executor {
     const tokens = req.tokens > held ? held : req.tokens;
     if (tokens <= 0n) return { ok: false, error: 'the wallet holds none of this coin' };
     const built = await venue.buildSell({ pool, user: req.wallet.publicKey, tokensIn: tokens, slippagePct: req.slippagePct });
+    // A market that cannot pay for all of it (a mayhem curve short of SOL) sells what it can pay for: that part is
+    // sent and booked, the rest stays in the wallet for a later sell.
+    const selling = built.tokensIn !== undefined && built.tokensIn < tokens ? built.tokensIn : tokens;
     const ixs = withFee(built.instructions, req.wallet.publicKey, built.expectedOut, req.feeBps, config.feeWallet);
+    if (selling < tokens && built.expectedOut - ixs.fee <= this.txCost(req)) {
+      // What it could pay for would not even cover this transaction: nothing is sent, the sell waits for SOL.
+      return { ok: false, error: 'the curve holds too little SOL to pay for this sell right now (it fills up again when someone buys)' };
+    }
     // The whole balance goes: close the emptied token account after the swap (its rent returns to the wallet). Not
     // on a retry, so a close that cannot work (an account with withheld fees) can never block the sell itself.
-    const closing = !!req.closeIfEmpty && !req.checkFirst && tokens === held;
+    const closing = !!req.closeIfEmpty && !req.checkFirst && selling === held;
     const all = closing
       ? [...ixs.instructions, createCloseAccountInstruction(getAssociatedTokenAddressSync(new PublicKey(req.mint), req.wallet.publicKey, true, pool.tokenProgram), req.wallet.publicKey, req.wallet.publicKey, [], pool.tokenProgram)]
       : ixs.instructions;
     const tx = await this.nativeTx(req, all);
-    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'sell', tokens, built.expectedOut - ixs.fee - this.txCost(req), held, ixs.fee);
+    return this.sendAndRead(req, tx.tx, tx.lastValidBlockHeight, 'sell', selling, built.expectedOut - ixs.fee - this.txCost(req), held, ixs.fee);
   }
 
   private async jupiterSell(req: TradeRequest & { tokens: bigint }): Promise<FillResult> {

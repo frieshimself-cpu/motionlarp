@@ -21,6 +21,12 @@ export interface BuildResult {
   expectedOut: bigint;
   /** Worst-case after slippage, as encoded in the instruction. */
   minOut: bigint;
+  /** Sell: set when the market cannot pay for all the tokens asked (a mayhem curve short of SOL): the instruction
+   *  sells only this many, and that is what must be booked. */
+  tokensIn?: bigint;
+  /** Buy: set when the instruction spends less than asked (a mayhem curve with fewer coins left than the budget
+   *  buys): the platform fee and the cost are counted on this amount. */
+  lamportsIn?: bigint;
 }
 
 export interface Venue {
