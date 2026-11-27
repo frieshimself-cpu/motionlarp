@@ -78,14 +78,25 @@ async function checkDashboard(env, page, who, opts = {}) {
     book.eq(`${P}: copy "${s.name}": name, wallet, buy, minimum, fees, slippage`, [row.name, row.meta[0], row.leaderHref], [`${s.name} TEST`, `${X.short(s.leader)} · buy ${s.buySol} SOL when they buy ≥ ${s.minLeaderBuySol} SOL · ${X.feeText(s)} SOL · slippage ${s.slippagePct}%`, `https://solscan.io/account/${s.leader}`]);
     book.eq(`${P}: copy "${s.name}": sell rules as tags`, row.tags, X.sellTags(s.sell));
     book.eq(`${P}: copy "${s.name}": switch ${s.enabled ? 'on' : 'off (line dimmed)'}`, [row.on, row.paused, row.switchTitle], [s.enabled, !s.enabled, s.enabled ? 'Pause' : 'Resume']);
-    // Closed positions and their profit are of one kind, as on the profit cards: real ones once the account has any,
-    // test ones until then (the count and the profit then describe the same positions).
-    const m = /^(\d+) open · (\d+) closed · ([+−]?[\d.]+) SOL$/.exec(row.meta[1]) || [];
-    book.eq(`${P}: copy "${s.name}": open and closed counts (closed: the ${E.primary} ones)`, [m[1], m[2]], [String(c.open), String(c.closedOf[E.primary])]);
+    // The line is of one kind, as the profit cards are: open positions, closed ones and their profit of the real ones
+    // once the account has any, of the test ones until then (the open count mixed both kinds: "AllOn all" read
+    // "1 open · 2 closed · +0.392 SOL" while its one open position was a test one). The other kind's figures follow
+    // apart, as on the cards: "· test: 1 open · 1 closed −0.05" (a part only when there is one).
+    const otherKind = E.primary === 'live' ? 'test' : 'live';
+    const m = /^(\d+) open · (\d+) closed · ([+−]?[\d.]+) SOL(?: · (test|live): (?:(\d+) open)?(?: · )?(?:(\d+) closed ([+−]?[\d.]+))?)?$/.exec(row.meta[1]) || [];
+    book.eq(`${P}: copy "${s.name}": open and closed counts, both of the ${E.primary} positions`, [m[1], m[2]], [String(c.openOf[E.primary]), String(c.closedOf[E.primary])]);
     if (c.live !== 0n && c.test !== 0n) {
       book.ok(`${P}: copy "${s.name}": its profit keeps real and test apart`, amount(m[3], c[E.primary], 3, row.pnlClass), { shown: row.meta[1], realTradesOnly: solStr(c.live), testTradesOnly: solStr(c.test), bothAdded: solStr(c.live + c.test) });
     } else {
       book.ok(`${P}: copy "${s.name}": its profit`, amount(m[3], c[E.primary], 3, row.pnlClass), { shown: row.meta[1], exact: solStr(c[E.primary]) });
+    }
+    const oOpen = c.openOf[otherKind];
+    const oClosed = c.closedOf[otherKind];
+    if (oOpen || oClosed) {
+      book.ok(`${P}: copy "${s.name}": the ${otherKind} positions apart after it (${oOpen} open, ${oClosed} closed, ${solStr(c[otherKind])} SOL)`,
+        m[4] === otherKind && m[5] === (oOpen ? String(oOpen) : undefined) && m[6] === (oClosed ? String(oClosed) : undefined) && (oClosed ? amount(m[7], c[otherKind], 3) : m[7] === undefined), { shown: row.meta[1], otherOpen: oOpen, otherClosed: oClosed, otherProfit: solStr(c[otherKind]) });
+    } else {
+      book.ok(`${P}: copy "${s.name}": no ${otherKind} part when it has no ${otherKind} position`, m.length > 0 && m[4] === undefined, row.meta[1]);
     }
   }
 

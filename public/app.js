@@ -161,16 +161,25 @@ function sellTags(sell) {
   return t.length ? t.join('') : '<span class="tag off">No automatic sells</span>';
 }
 
+/** A copy's numbers, all of one kind as on the profit cards (real once there are real trades); the other kind's after
+ *  them, apart: "2 open · 2 closed · +0.744 SOL · test: 2 closed +0.959". */
+function copyNumbers(st) {
+  const main = `${st.open} open · ${st.closed} closed · <span class="${cls(st.pnlSol)}">${signed(st.pnlSol, 3)} SOL</span>`;
+  const o = st.other;
+  if (!o || (!o.open && !o.closed)) return main;
+  const parts = [o.open ? `${o.open} open` : '', o.closed ? `${o.closed} closed <span class="${cls(o.pnlSol)}">${signed(o.pnlSol, 3)}</span>` : ''].filter(Boolean);
+  return `${main} · ${esc(o.kind)}: ${parts.join(' · ')}`;
+}
+
 function renderCopy(c) {
   const color = hue(c.leader);
   const initials = (c.name || c.leader).replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '··';
-  const pnl = c.stats.pnlSol;
   return `<div class="row ${c.enabled ? '' : 'paused'}">
     <div class="avatar" style="background:${color}">${esc(initials)}</div>
     <div class="info">
       <div class="name">${esc(c.name)} ${state.server.live ? '<span class="pill live">LIVE</span>' : '<span class="pill test">TEST</span>'}</div>
       <div class="meta"><a href="${solscanAcct(c.leader)}" target="_blank" rel="noopener" class="mono">${esc(short(c.leader))}</a> · buy <b>${plain(c.buySol)}</b> SOL when they buy ≥ <b>${plain(c.minLeaderBuySol)}</b> SOL · ${esc(feeText(c))} SOL · slippage ${plain(c.slippagePct)}%</div>
-      <div class="meta">${c.stats.open} open · ${c.stats.closed} closed · <span class="${cls(pnl)}">${signed(pnl, 3)} SOL</span></div>
+      <div class="meta">${copyNumbers(c.stats)}</div>
       <div class="tags">${sellTags(c.sell)}</div>
     </div>
     <div class="actions">

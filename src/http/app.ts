@@ -150,6 +150,14 @@ export function positionView(p: Position) {
   };
 }
 
+/** What a copy's line on the dashboard counts: positions of one kind (real or test) and the other kind's apart. */
+interface StatsPart { open: number; closed: number; pnlSol: number }
+export interface CopyStats extends StatsPart { kind: 'live' | 'test'; other: StatsPart & { kind: 'live' | 'test' } }
+function blankStats(shown: 'live' | 'paper'): CopyStats {
+  const [kind, otherKind] = shown === 'live' ? (['live', 'test'] as const) : (['test', 'live'] as const);
+  return { kind, open: 0, closed: 0, pnlSol: 0, other: { kind: otherKind, open: 0, closed: 0, pnlSol: 0 } };
+}
+
 /** A connection from this machine itself (the socket's own address, never a header). */
 function isLoopback(address: string | undefined): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
@@ -362,17 +370,30 @@ export function createApp(deps: AppDeps): Server {
     return store.closedTotals(uid, 'live').trades > 0 ? 'live' : 'paper';
   }
 
+  /**
+   * Each copy's line: its open positions, closed ones and their profit, all of the shown kind (real once the account has
+   * any, test until then), and the other kind's apart (the open ones were counted of both kinds: a line read "1 open ·
+   * 2 closed · +0.392 SOL" while its one open position was a test one, and the test results were not shown at all).
+   */
   function copyStats(uid: number) {
-    const stats = new Map<number, { open: number; closed: number; pnlSol: number }>();
-    const bump = (id: number) => stats.get(id) ?? stats.set(id, { open: 0, closed: 0, pnlSol: 0 }).get(id)!;
-    for (const p of store.activePositions(uid)) bump(p.copyId).open++;
-    // Every closed position of the shown kind (it was the newest 1,000, test and real added together).
-    for (const [copyId, t] of store.closedTotals(uid, shownMode(uid)).byCopy) {
-      const s = bump(copyId);
-      s.closed = t.closed;
-      s.pnlSol = sol(t.pnlLamports);
+    const shown = shownMode(uid);
+    const kind = (m: 'live' | 'paper') => (m === 'live' ? 'live' as const : 'test' as const);
+    const stats = new Map<number, CopyStats>();
+    const bump = (id: number) => stats.get(id) ?? stats.set(id, blankStats(shown)).get(id)!;
+    for (const p of store.activePositions(uid)) {
+      const s = bump(p.copyId);
+      (kind(p.mode) === s.kind ? s : s.other).open++;
     }
-    return stats;
+    // Every closed position (it was the newest 1,000, test and real added together).
+    for (const mode of ['live', 'paper'] as const) {
+      for (const [copyId, t] of store.closedTotals(uid, mode).byCopy) {
+        const s = bump(copyId);
+        const part = kind(mode) === s.kind ? s : s.other;
+        part.closed = t.closed;
+        part.pnlSol = sol(t.pnlLamports);
+      }
+    }
+    return { shown, stats };
   }
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -499,14 +520,14 @@ export function createApp(deps: AppDeps): Server {
       renewSession(req, res);
       const user = store.user(uid);
       const w = store.wallet(uid);
-      const stats = copyStats(uid);
+      const { shown, stats } = copyStats(uid);
       return json(res, 200, {
         user: { username: user?.username },
         server: deps.serverInfo(),
         feeBps: deps.feeBpsFor?.(uid) ?? 0,
         pnl: (({ days: _days, ...rest }) => rest)(viewerPnl()),
         wallet: w ? { pubkey: w.pubkey, sol: await walletSol(uid, w.pubkey) } : null,
-        copies: store.copies(uid).map((c) => ({ id: c.id, ...c.settings, stats: stats.get(c.id) ?? { open: 0, closed: 0, pnlSol: 0 } })),
+        copies: store.copies(uid).map((c) => ({ id: c.id, ...c.settings, stats: stats.get(c.id) ?? blankStats(shown) })),
         positions: store.activePositions(uid).map(positionView),
         events: store.events(uid, 80),
       });

@@ -54,6 +54,34 @@ function position(uid: number, copyId: number, mode: 'live' | 'paper', cost: big
 const SOL = 1_000_000_000n;
 const leader = () => Keypair.generate().publicKey.toBase58();
 
+describe('6: a copy\'s line on the dashboard is of one kind, the other kind apart', () => {
+  it('open positions are counted of the shown kind only (real once there are real trades); the test ones come apart, with their closed ones and profit', async () => {
+    const { uid, get } = userClient('Both kinds on one copy');
+    const copyId = store.createCopy(uid, validateSettings({ leader: leader(), name: 'AllOn all', buySol: 0.1 }));
+    position(uid, copyId, 'live', SOL, SOL + SOL / 4n, Date.now() - 3_600_000); // real, closed: +0.25
+    position(uid, copyId, 'paper', SOL, 0n, null); // test, still open
+    position(uid, copyId, 'paper', SOL, 2n * SOL, Date.now() - 7_200_000); // test, closed: +1
+    position(uid, copyId, 'paper', SOL, SOL / 2n, Date.now() - 7_200_000); // test, closed: −0.5
+    const st = await get('/api/state');
+    const c = (st.copies as { id: number; stats: unknown }[]).find((x) => x.id === copyId)!;
+    // It read "1 open · 1 closed · +0.25 SOL": the open one was a test position, the closed ones and profit real ones.
+    expect(c.stats).toEqual({ kind: 'live', open: 0, closed: 1, pnlSol: 0.25, other: { kind: 'test', open: 1, closed: 2, pnlSol: 0.5 } });
+  });
+
+  it('before any real trade has closed the line is of test trades, and a real position already open is counted apart', async () => {
+    const { uid, get } = userClient('First real buy');
+    const copyId = store.createCopy(uid, validateSettings({ leader: leader(), buySol: 0.1 }));
+    position(uid, copyId, 'paper', SOL, 3n * SOL, Date.now() - 3_600_000); // test, closed: +2
+    position(uid, copyId, 'live', SOL, 0n, null); // the first real buy, open
+    const c = ((await get('/api/state')).copies as { id: number; stats: unknown }[]).find((x) => x.id === copyId)!;
+    expect(c.stats).toEqual({ kind: 'test', open: 0, closed: 1, pnlSol: 2, other: { kind: 'live', open: 1, closed: 0, pnlSol: 0 } });
+    // A copy with nothing yet has the same shape (the page reads both parts).
+    const empty = store.createCopy(uid, validateSettings({ leader: leader(), buySol: 0.1 }));
+    const e = ((await get('/api/state')).copies as { id: number; stats: unknown }[]).find((x) => x.id === empty)!;
+    expect(e.stats).toEqual({ kind: 'test', open: 0, closed: 0, pnlSol: 0, other: { kind: 'live', open: 0, closed: 0, pnlSol: 0 } });
+  });
+});
+
 describe('8 (B17): the days of History follow the viewer\'s time zone, across a change of the clocks', () => {
   it('a trade closed at 22:30 UTC on 18 October is listed on the 19th for a viewer in Berlin; an unknown zone falls back to the offset', async () => {
     const { uid, get } = userClient('Berliner');

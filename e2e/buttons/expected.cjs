@@ -70,12 +70,12 @@ function forUser(manifest, userKey, { timeZone = 'UTC', now = Date.now() } = {})
   return out;
 }
 
-/** Per copy: positions open now, closed ones (all, and of each kind), and their profit by mode. */
+/** Per copy: positions open now and closed ones (all, and of each kind), and their profit by mode. */
 function forCopies(manifest, userKey) {
   const out = {};
   const u = forUser(manifest, userKey);
-  for (const c of manifest.copies.filter((x) => x.user === userKey)) out[c.key] = { id: c.id, settings: c.settings, open: 0, closed: 0, closedOf: { live: 0, test: 0 }, live: 0n, test: 0n };
-  for (const p of u.open) out[p.copy].open += 1;
+  for (const c of manifest.copies.filter((x) => x.user === userKey)) out[c.key] = { id: c.id, settings: c.settings, open: 0, openOf: { live: 0, test: 0 }, closed: 0, closedOf: { live: 0, test: 0 }, live: 0n, test: 0n };
+  for (const p of u.open) { out[p.copy].open += 1; out[p.copy].openOf[p.mode] += 1; }
   for (const p of u.closed) { out[p.copy].closed += 1; out[p.copy].closedOf[p.mode] += 1; out[p.copy][p.mode] += p.pnl; }
   return out;
 }
