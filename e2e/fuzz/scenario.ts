@@ -51,8 +51,19 @@ export const SABOTAGES = {
   'fee-off': ['F1', 'the engine is given a platform fee 7 bps higher than the user\'s'],
   'lose-proceeds': ['M2', 'a sell\'s proceeds are taken off the position again after it was booked'],
   'hide-coins': ['T5', 'half of a position\'s tokens are taken off the books'],
+  // (the two below check "every sale that landed is booked exactly once": the code may name the kind too)
+  'drop-booking': ['M3:sold-but-not-booked', 'the first real sale\'s booking fails and its row in sells_out is deleted: nobody ever books it'],
+  'book-twice': ['M3:sale-booked-twice', 'the first real sale\'s fill is written a second time'],
 } as const;
 export type Sabotage = keyof typeof SABOTAGES;
+
+/**
+ * Database faults (profiles dbfault and diskfull). `p`: chance that one write which changes something fails, once
+ * (dbfault). `full`: windows of virtual time, in ms from the start, during which every such write fails, as on a
+ * full disk; reads keep working (diskfull). `io`: share of the dbfault failures that are "disk I/O error" rather
+ * than "database or disk is full". The final quiet phase runs without faults.
+ */
+export interface DbFaults { p?: number; io?: number; full?: { at: number; ms: number; err: 'full' | 'io' }[] }
 
 export interface Scenario {
   seed: number;
@@ -87,6 +98,11 @@ export interface Scenario {
   strictExact?: boolean;
   /** Self-test only (--selftest): a fault the HARNESS plants around the engine, to prove a check can fail. */
   sabotage?: Sabotage;
+  /** Profiles dbfault and diskfull: database writes that fail (see DbFaults). */
+  db?: DbFaults;
+  /** The executor's coming fix (market.ts, `noRecordNoSend`): written into a scenario shrunk with
+   *  FUZZ_NO_RECORD_NO_SEND=1, so that its replay runs the same way. */
+  noRecordNoSend?: boolean;
 }
 
 const PCTS = [5, 10, 20, 25, 30, 33.3, 40, 50, 60, 75, 90, 100, 100, 100];
@@ -138,9 +154,12 @@ export function genSettings(r: Rng, leader: string, name: string): Record<string
   };
 }
 
-// 'slowread' is not in the default mix (so every earlier seed stays what it was): --profile slowread.
-export const PROFILES = ['instant', 'calm', 'flaky', 'outage', 'partial', 'ghost', 'crash', 'slowread'] as const;
+// 'slowread', 'dbfault' and 'diskfull' are not in the default mix (so every earlier seed stays what it was): only
+// with --profile.
+export const PROFILES = ['instant', 'calm', 'flaky', 'outage', 'partial', 'ghost', 'crash', 'slowread', 'dbfault', 'diskfull'] as const;
 export type Profile = (typeof PROFILES)[number];
+/** Profiles whose buys may be handed back with the quote's coin count (market.ts `quoted`). */
+const QUOTED: readonly string[] = ['slowread', 'dbfault', 'diskfull'];
 
 export function faultsFor(profile: Profile, r: Rng): Faults {
   const none: Faults = { instant: false, buyFail: 0, buyUnsure: 0, sellFail: 0, streak: 0, streakMax: 0, slow: 0, partial: 0, ghost: 0, quoteFail: 0, balFail: 0, balLag: 0, refineNull: 0 };
@@ -157,7 +176,28 @@ export function faultsFor(profile: Profile, r: Rng): Faults {
     // Reads are slow right after a buy: it is handed back with the quote's coin count and the exact one follows
     // (or never arrives). Otherwise a mild market, so what shows is this path's own.
     case 'slowread': return { ...none, sellFail: 0.08, streak: 0.2, streakMax: 3, slow: 0.05, balLag, refineNull: 0.15, quoted: 0.6 };
+    // Database writes fail (see DbFaults); a mild market otherwise, with what the booking paths depend on: sells that
+    // fail and are retried, exact figures that arrive later (or never), buys handed back with the quote's coin count,
+    // a few buys of unknown outcome.
+    case 'dbfault':
+    case 'diskfull': return { ...none, buyUnsure: 0.03, sellFail: 0.08, streak: 0.2, streakMax: 3, slow: 0.05, balLag, refineNull: 0.1, quoted: 0.3 };
   }
+}
+
+/** The database faults of a dbfault or diskfull seed, from their own random stream (the plan's draws stay as they
+ *  are). `spanMs`: how long the steps take, about (the windows of a full disk fall inside it). */
+export function dbFaultsFor(profile: Profile, seed: number, spanMs: number): DbFaults | undefined {
+  const r = Rng.derive(seed, 'db');
+  if (profile === 'dbfault') return { p: r.pick([0.01, 0.03, 0.06, 0.12]), io: 0.25 };
+  if (profile !== 'diskfull') return undefined;
+  const full: NonNullable<DbFaults['full']> = [];
+  const n = r.pick([1, 2, 2, 3, 3, 4]);
+  for (let i = 0; i < n; i++) {
+    const ms = r.chance(0.5) ? r.pick([500, 1_000, 2_000, 5_000, 10_000, 20_000]) : r.int(500, 20_000);
+    full.push({ at: r.int(0, Math.max(1, spanMs - 1)), ms, err: r.chance(0.8) ? 'full' : 'io' });
+  }
+  full.sort((a, b) => a.at - b.at);
+  return { full };
 }
 
 export interface GenOptions {
@@ -248,8 +288,11 @@ export function generate(seed: number, steps: number, opt: GenOptions = {}): Sce
     else if (kind === 'liveSwitch') act = { a: 'liveSwitch', on: r.chance(0.5) };
     out.push({ dt: dtOf(), act });
   }
-  return {
-    seed, profile, live, overAsk: ((strict: boolean) => (strict && profile !== 'slowread' ? 'strict' : 'clamp'))(r.chance(0.5)) /* (the real executor clamps: with a quote's coin count in the books a strict market would only show its own harshness) */, priceMs: r.pick([0, 200, 2_000, 2_000]), retry: r.chance(0.5) ? 'prod' : 'fast',
+  const sc: Scenario = {
+    seed, profile, live, overAsk: ((strict: boolean) => (strict && !QUOTED.includes(profile) ? 'strict' : 'clamp'))(r.chance(0.5)) /* (the real executor clamps: with a quote's coin count in the books a strict market would only show its own harshness) */, priceMs: r.pick([0, 200, 2_000, 2_000]), retry: r.chance(0.5) ? 'prod' : 'fast',
     maxSolPerBuy, users, mints, copies, faults: faultsFor(profile, r), steps: out, finale: { dump: r.chance(0.3), leadersExit: r.chance(0.35) },
   };
+  const db = dbFaultsFor(profile, seed, out.reduce((a, s) => a + s.dt, 0));
+  if (db) sc.db = db;
+  return sc;
 }

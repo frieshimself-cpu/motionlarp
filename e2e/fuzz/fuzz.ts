@@ -9,6 +9,7 @@
 //   --jobs N           worker processes (default: CPU cores, at most 8)
 //   --core             leave out the two profiles a healthy server never meets (ghost, crash)
 //   --profile NAME     one profile for every seed: instant | calm | flaky | outage | partial | ghost | crash | slowread
+//                      | dbfault | diskfull
 //   --no-shrink        do not shrink the violations found
 //   --shrink-budget N  runs spent shrinking one violation (default 500)
 //   --seed S           run one seed and print its whole transcript (same steps / --core / --profile as the batch)
@@ -31,6 +32,16 @@
 // part), ghost (sells reported "outcome unknown", landed or not), crash (the process killed with trades in flight),
 // slowread (buys handed back with the quote's coin count because the reads were slow; the exact count follows, or
 // never arrives; only with --profile slowread, so the seeds of the default mix stay what they were).
+// Database faults, also only with --profile (the default mix stays what it was): dbfault (single store writes fail at
+// random, once each: positions, fills, feed lines, the rows of sells written down before they go out, exact figures,
+// "seen" marks, and the COMMIT of a transaction), diskfull (a few windows of 0.5 to 20 s in which every write fails,
+// as on a full disk, while reads work). The errors are node:sqlite's ("database or disk is full", "disk I/O error");
+// a write that fails inside a transaction rolls all of it back, and the harness undoes its own record of it too. A
+// write that changes nothing never fails. The final quiet phase runs without faults: the end state (every sale that
+// landed booked exactly once, the books equal to the chain) is judged after the engine has had time to converge.
+//
+// FUZZ_NO_RECORD_NO_SEND=1: the fake executor as the real one is about to be fixed: a trade whose onSigned callback
+// throws (it could not be written down) is not sent; it answers { ok: false }. Default: as today, it is sent anyway.
 //
 // Files: scenario.ts (what happens, from a seed), market.ts (the fake chain), run.ts (drives the real Engine and
 // Store and checks the invariants), shrink.ts (makes a failing scenario small), sim.ts (virtual clock, random
@@ -65,7 +76,7 @@ export const INVARIANTS: Record<string, [string, string]> = {
   OA1: ['1 tokens', 'LIVE: an ask for more than the wallet holds is corrected, not repeated'],
   M1: ['2 money', 'costLamports and tokensBought equal the buy fill'],
   M2: ['2 money', 'proceedsLamports equals the sum of the sell fills, at every moment'],
-  M3: ['2 money', 'every fill is the trade that happened on the market, tokens and SOL; every sell that happened has a fill'],
+  M3: ['2 money', 'every fill is the trade that happened on the market, tokens and SOL; every sale that landed is booked exactly once, on its own position (by the end, also after failed database writes)'],
   M4: ['2 money', 'profit shown (closed positions, the profit summary) equals the wallet\'s SOL change'],
   M5: ['2 money', 'a real fill ends up booked at the SOL the chain says, not at its quote (flagged in hand-written cases; random runs count it under "estimate-kept")'],
   DF1: ['3 once', 'a timed step, a stop loss level and the dead-coin rule sell at most once per position, across restarts'],
@@ -232,11 +243,15 @@ async function main(): Promise<void> {
   const gen: GenOptions = { ...(o.core ? { core: true } : {}), ...(o.profile ? { profile: String(o.profile) as Profile } : {}) };
   if (gen.profile && !PROFILES.includes(gen.profile)) throw new Error(`unknown profile ${gen.profile}`);
   const steps = Number(pos[1] ?? 60);
+  // (read by market.ts too: the worker processes inherit it)
+  const noRecordNoSend = process.env.FUZZ_NO_RECORD_NO_SEND === '1';
 
   if (o.selftest) {
     // Each planted fault must make its invariant fail in at least one of the first seeds; clean seeds are the control.
+    // (a code may name the kind too, "M3:sale-booked-twice": the violation's signature starts with it)
     let bad = 0;
     const seeds = Array.from({ length: 60 }, (_, i) => i + 1);
+    const hit = (v: { code: string; sig: string }, code: string) => (code.includes(':') ? v.sig.startsWith(code) : v.code === code);
     console.log('self-test: a fault is planted around the engine (in the harness, never in src/); its invariant must fail');
     for (const [name, [code, what]] of Object.entries(SABOTAGES)) {
       let hits = 0;
@@ -246,8 +261,8 @@ async function main(): Promise<void> {
         const sc = generate(seed, 60, { profile: 'calm' });
         const clean = await runScenario(sc);
         const planted = await runScenario({ ...sc, sabotage: name as keyof typeof SABOTAGES });
-        if (clean.violations.some((v) => v.code === code)) control++;
-        const v = planted.violations.find((x) => x.code === code);
+        if (clean.violations.some((v) => hit(v, code))) control++;
+        const v = planted.violations.find((x) => hit(x, code));
         if (v) { hits++; if (!example) example = `seed ${seed}: ${v.sig} — ${v.message.slice(0, 140)}`; }
       }
       const ok = hits > control;
@@ -309,7 +324,7 @@ async function main(): Promise<void> {
   const t0 = Date.now();
   console.log(`motionlarp engine fuzz — commit ${commit}${dirty ? ' + uncommitted changes:' : ' (src/ clean)'}`);
   if (dirty) for (const l of dirty.split('\n')) console.log(`    ${l}`);
-  console.log(`seeds ${from}..${from + seeds - 1}, at least ${steps} steps each${gen.profile ? `, profile ${gen.profile}` : gen.core ? ', core profiles only' : ''}`);
+  console.log(`seeds ${from}..${from + seeds - 1}, at least ${steps} steps each${gen.profile ? `, profile ${gen.profile}` : gen.core ? ', core profiles only' : ''}${noRecordNoSend ? ', FUZZ_NO_RECORD_NO_SEND=1 (a trade that cannot be written down is not sent)' : ''}`);
 
   const jobs = Math.max(1, Math.min(Number(o.jobs ?? Math.min(8, cpus().length)), seeds));
   const agg = emptyAgg();
@@ -360,11 +375,12 @@ async function main(): Promise<void> {
       }
       if (!best) { console.log(`  ${s.sig}: could not be reproduced from a frozen scenario`); continue; }
       const file = join(out, 'repro', `${slug(s.sig)}.json`);
-      writeFileSync(file, json(best.sc));
+      // (shrunk with the executor's coming fix: the saved scenario says so, and replays the same way without the variable)
+      writeFileSync(file, json(noRecordNoSend ? { ...best.sc, noRecordNoSend: true } : best.sc));
       const v = best.res.violations.find((x) => x.sig === s.sig)!;
       const firstV = best.res.violations.find((x) => x.first);
-      writeFileSync(file.replace(/\.json$/, '.txt'), [`${s.sig} — shrunk from seed ${best.seed}`, `replay: npx tsx e2e/fuzz/fuzz.ts --replay ${file.replace(`${REPO}/`, '')}`, `market outcomes: ${tapeSummary(best.sc.tape)}`, '', ...best.res.transcript, '', ...best.res.violations.map((x) => `VIOLATION ${x.sig}${x.first ? ' (first)' : ''}: ${x.message}`)].join('\n'));
-      shrunk[s.sig] = { seed: best.seed, file: file.replace(`${REPO}/`, ''), steps: best.sc.steps.length, actions: best.sc.steps.filter((x) => x.act.a !== 'tick').length, reproduced: true, firstInShrunk: firstV?.sig ?? '', tape: tapeSummary(best.sc.tape), message: v.message };
+      writeFileSync(file.replace(/\.json$/, '.txt'), [`${s.sig} — shrunk from seed ${best.seed}${noRecordNoSend ? ' (FUZZ_NO_RECORD_NO_SEND=1)' : ''}`, `replay: npx tsx e2e/fuzz/fuzz.ts --replay ${file.replace(`${REPO}/`, '')}`, `market outcomes: ${tapeSummary(best.sc.tape, best.sc.db)}`, '', ...best.res.transcript, '', ...best.res.violations.map((x) => `VIOLATION ${x.sig}${x.first ? ' (first)' : ''}: ${x.message}`)].join('\n'));
+      shrunk[s.sig] = { seed: best.seed, file: file.replace(`${REPO}/`, ''), steps: best.sc.steps.length, actions: best.sc.steps.filter((x) => x.act.a !== 'tick').length, reproduced: true, firstInShrunk: firstV?.sig ?? '', tape: tapeSummary(best.sc.tape, best.sc.db), message: v.message };
       console.log(`  ${s.sig}: seed ${best.seed} → ${best.sc.steps.length} steps (${shrunk[s.sig]!.actions} actions), ${best.sc.copies.length} cop${best.sc.copies.length === 1 ? 'y' : 'ies'}  →  ${shrunk[s.sig]!.file}`);
     }
   }
@@ -374,7 +390,7 @@ async function main(): Promise<void> {
   const say = (s = '') => { lines.push(s); console.log(s); };
   say('');
   say('════════ RESULT ════════');
-  say(`commit ${commit}${dirty ? ' (working tree has uncommitted changes in src/ public/ tests/)' : ''}`);
+  say(`commit ${commit}${dirty ? ' (working tree has uncommitted changes in src/ public/ tests/)' : ''}${noRecordNoSend ? '; FUZZ_NO_RECORD_NO_SEND=1: a trade whose onSigned callback throws is not sent' : ''}`);
   say(`${agg.seeds} seeds, ${agg.steps} steps (${(agg.steps / agg.seeds).toFixed(0)} per seed), ${agg.live} LIVE / ${agg.seeds - agg.live} TEST, ${ranIn.toFixed(0)}s, ${jobs} worker${jobs === 1 ? '' : 's'}`);
   say(`profiles: ${Object.entries(agg.byProfile).sort().map(([k, n]) => `${k} ${n}`).join(', ')}`);
   say(`exercised: ${agg.positions} positions (${agg.opened} opened, ${agg.closed} closed), ${agg.buys} buys, ${agg.sells} sells answered (${agg.sellFails} failed), ${agg.restarts} restarts, ${Math.round(agg.simSeconds / 3600)} h of simulated time, ${agg.events} events`);
@@ -404,7 +420,7 @@ async function main(): Promise<void> {
       say('');
     }
   };
-  show(core, 'VIOLATIONS (profiles: instant, calm, flaky, outage, partial, slowread)');
+  show(core, 'VIOLATIONS (profiles: instant, calm, flaky, outage, partial, slowread, dbfault, diskfull)');
   show(rare, 'ONLY WITH A SELL OF UNKNOWN OUTCOME THAT HAD LANDED (ghost) OR A CRASH (crash)');
   if (Object.keys(agg.notes).length) {
     const notes = Object.entries(agg.notes).sort((a, b) => b[1] - a[1]);
@@ -429,7 +445,7 @@ async function main(): Promise<void> {
     say(`scenarios that ended with an exception: ${agg.harnessErrors.length}`);
     for (const h of agg.harnessErrors.slice(0, 5)) say(`    seed ${h.seed}: ${h.error.split('\n').slice(0, 3).join(' | ')}`);
   }
-  writeFileSync(join(out, 'summary.json'), json({ commit, dirty, from, seeds, steps, gen, ranIn, agg, shrunk }));
+  writeFileSync(join(out, 'summary.json'), json({ commit, dirty, from, seeds, steps, gen, noRecordNoSend, ranIn, agg, shrunk }));
   writeFileSync(join(out, 'report.txt'), lines.join('\n'));
   say('');
   say(`details: ${join(out, 'summary.json').replace(`${REPO}/`, '')}; one seed: npx tsx e2e/fuzz/fuzz.ts --seed N ${steps}${gen.core ? ' --core' : ''}${gen.profile ? ` --profile ${gen.profile}` : ''}`);

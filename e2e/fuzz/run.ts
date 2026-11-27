@@ -5,6 +5,14 @@
 // paused / edited / deleted through the Store the way src/http/app.ts does, restarts as stop() + idle() + a new
 // Engine on the same Store. Nothing in src/ is modified: the harness wraps the engine's sell / bagStep / buy on the
 // instance (to know which order a trade belongs to) and the store's write methods (to see every booking).
+//
+// Database faults (profiles dbfault and diskfull): the same wrappers make writes fail, before anything is written,
+// with the errors node:sqlite raises ("database or disk is full", "disk I/O error"). A write that would change
+// nothing (a DELETE that matches no row, an update with nothing to set, a trade already seen) writes nothing and never
+// fails, as in SQLite. A write that fails inside store.atomic rolls the whole transaction back, as SQLite does on a
+// full disk, and so does a COMMIT that fails. The harness keeps its own record of every write (feed lines, positions,
+// what is on its way): a write that throws is not recorded, and a transaction that rolls back undoes the harness's
+// record of the writes it had made (a snapshot taken when the transaction began is put back), so no check sees ghosts.
 import './env.js';
 import { createHash } from 'node:crypto';
 import { Keypair } from '@solana/web3.js';
@@ -13,11 +21,33 @@ import type { SellOrder } from '../../src/engine/rules.js';
 import { validateSettings, type CopySettings, type SellSettings } from '../../src/engine/settings.js';
 import { log } from '../../src/log.js';
 import { pnlSummary } from '../../src/pnl.js';
-import { Store, type EventKind, type Position } from '../../src/store.js';
+import { Store, type EventKind, type Fill, type Position, type PositionPatch } from '../../src/store.js';
 import type { LeaderTrade } from '../../src/watch/parse.js';
-import { als, DEN, emptyTape, Exec, Market, type BuyCall, type Ctx, type SellCall, type Tape } from './market.js';
+import { als, DEN, emptyTape, Exec, Market, type BuyCall, type Ctx, type DbPlan, type SellCall, type Tape } from './market.js';
 import { LEADERS, MINTS, type Action, type Scenario } from './scenario.js';
 import { Rng, Sim, SimSpin } from './sim.js';
+
+/** The database errors node:sqlite raises: an Error with code ERR_SQLITE_ERROR, SQLite's error code and its text. */
+const DB_ERRORS = { full: ['database or disk is full', 13], io: ['disk I/O error', 10] } as const;
+const DB_ERROR_RE = /database or disk is full|disk I\/O error/;
+function dbError(kind: 'full' | 'io'): Error {
+  const [message, errcode] = DB_ERRORS[kind];
+  return Object.assign(new Error(message), { code: 'ERR_SQLITE_ERROR', errcode, errstr: message });
+}
+/** The engine function that called the store, from an error's stack ("sellFailed"); '?' when none is in it. */
+function engineFrame(stack: string | undefined): string {
+  for (const l of (stack ?? '').split('\n')) {
+    if (!/engine[\\/]engine\.ts/.test(l)) continue;
+    const m = /at (?:async )?(?:Engine\.)?([A-Za-z_$][\w$]*)/.exec(l.trim());
+    if (m && m[1] !== 'anonymous' && m[1] !== 'Object' && m[1] !== 'process') return m[1]!;
+  }
+  return '?';
+}
+const bigText = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x));
+/** A position patch as the transcript shows it: "status=closed tokensHeld=0". */
+function patchText(patch: PositionPatch): string {
+  return Object.entries(patch).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${typeof v === 'object' && v !== null ? bigText(v) : String(v)}`).join(' ');
+}
 
 export interface Violation {
   /** code:kind, e.g. "M2:proceeds!=sell-fills". Violations with the same sig are the same defect class. */
@@ -56,7 +86,24 @@ export interface RunOptions {
 }
 
 interface FeedRec { i: number; t: number; op: number; userId: number; copyId: number | null; kind: EventKind; message: string; mint: string | null; signature: string | null; ctx?: Ctx }
-interface MirrorDue { sig: string; percent: number; mode: string; invoked: boolean; ok: boolean }
+interface MirrorDue {
+  sig: string; percent: number; mode: string; invoked: boolean; ok: boolean;
+  /** Database faults: the engine could not write their sell down as seen and dropped it (a later delivery of the same
+   *  transaction may still act on it): not required any more. */
+  relaxed?: string;
+  /** Database faults: the engine threw before it queued this sell: a write of this position's own failed ('own'), or
+   *  one of another position's, earlier in the same loop ('other'). Still required: the failed write explains that it
+   *  is not written down, not that it is never sold. */
+  dropped?: 'own' | 'other';
+}
+/** A store write that failed (an injected database error). */
+interface WriteFail { t: number; step: number; method: string; err: string; inTx: boolean; pid?: number; userId?: number; copyId?: number | null; what: string }
+/** The harness's record of the writes, as it was when a transaction began (put back if it rolls back). */
+interface Snap {
+  storeOps: number; lastFill: { op: number; pid: number; userId: number; side: string; tokens: bigint; lamports: bigint } | null; lastFillUpdate: number; closedCount: number;
+  feed: number; inserted: number; notes: Record<string, number>;
+  pos: Map<number, { recovered: boolean; proceedsWriter: string; reopened: boolean | undefined; flying: Map<number, Flying>; errorLines: Map<string, number>; gaveUp: Set<string> }>;
+}
 interface Flying {
   key: string; kind: 'bag' | 'queue'; tokens: bigint; call: SellCall;
   /** The engine has been told it sold. Its coins stay reserved until the sale is booked (the wallet is read first). */
@@ -105,6 +152,11 @@ interface Track {
   quotedBuy?: { quote: bigint; real: bigint; refined: boolean };
   /** Closed on a quote's coin count and opened again when the exact count showed more (the engine sells the rest). */
   reopened?: boolean;
+  /** Database faults: when one of this position's engine steps (a sell, a timed step) last ended with a database error
+   *  thrown out of it (E1 says so; a step that is due may not be running at that tick because of it). */
+  dbEscapeAt?: number;
+  /** Database faults: the last write of the proceeds failed on its own (outside a transaction): who made it. */
+  proceedsFailed?: string;
 }
 
 const START = 1_800_000_000_000;
@@ -112,6 +164,10 @@ const SOL = 1_000_000_000n;
 const lamports = (sol: number) => BigInt(Math.round(sol * 1e9));
 const short = (s: string) => `${s.slice(0, 4)}`;
 const okey = (o: SellOrder) => `${o.reason}:${o.stage ?? ''}:${o.tag ?? ''}`;
+/** Orders that sell once per position (DF1): a timed step (but the last of a bag ladder, which stays on duty), a stop
+ *  loss level, the dead-coin rule, and their partial sell ("same share", one per transaction of theirs). */
+const onceOrder = (o: SellOrder) => ((o.reason === 'timed' || o.reason === 'stop_loss' || o.reason === 'dead_coin') && !o.everything)
+  || (o.reason === 'mirror' && o.percent < 100 && !o.rest && !!o.tag && o.tag !== 'reconcile');
 
 function orderText(o?: SellOrder): string {
   if (!o) return '?';
@@ -178,13 +234,37 @@ class Run {
   /** Coins the user held before the site traded (hand-written scenarios): `${owner}|${mint}` → tokens. */
   private readonly own = new Map<string, bigint>();
   private crashed: string | undefined;
-  private readonly onRejection = (err: unknown) => this.problem('E1', 'unhandled-rejection', String((err as Error)?.stack ?? err).slice(0, 300));
+  private readonly onRejection = (err: unknown) => this.problem('E1', `unhandled-rejection${this.dbTag(err)}`, String((err as Error)?.stack ?? err).slice(0, 300));
   private readonly origLog = { warn: log.warn, error: log.error, info: log.info };
+
+  // ── database faults (profiles dbfault and diskfull) ───────────────────
+  /** Writes fail now (they stop for the final quiet phase). */
+  private dbOn: boolean;
+  private readonly dbRng: Rng;
+  /** Writes that change something, so far, while faults are on (a dbfault tape is indexed by this number). */
+  private dbN = 0;
+  /** Inside store.atomic: the harness's record as it was when the transaction began, whether it has written
+   *  anything, and the error of a write in it that failed (SQLite then rolls the whole transaction back). */
+  private tx: { snap: Snap; wrote: boolean; doomed: Error | null } | null = null;
+  private readonly writeFails: WriteFail[] = [];
+  /** Feed lines whose write failed: legitimately missing from the feed (`i`: where they would have been). */
+  private readonly feedLost: FeedRec[] = [];
+  /** Injected errors → "the engine function>the store method" that raised them. */
+  private readonly dbSites = new WeakMap<object, string>();
+  /** Where the last engine step that threw a database error out of itself had it from (for the log line it causes). */
+  private lastEscapeSite = '';
+  /** Their transactions the engine dropped because it could not write them down as seen. */
+  private readonly droppedTrades = new Set<string>();
+  /** Self-test 'drop-booking': done once. */
+  private dropped = false;
 
   constructor(private readonly sc: Scenario, private readonly opt: RunOptions) {
     this.tape = sc.tape ? structuredClone(sc.tape) : emptyTape();
     this.market = new Market(this.sim, sc.live, sc.overAsk, sc.faults, Rng.derive(sc.seed, 'faults'), this.tape, !!sc.tape);
+    if (sc.noRecordNoSend !== undefined) this.market.noRecordNoSend = sc.noRecordNoSend;
     this.maxBuy = sc.maxSolPerBuy;
+    this.dbOn = !!(sc.db?.p || sc.db?.full?.length);
+    this.dbRng = Rng.derive(sc.seed, 'dbfaults');
   }
 
   /** After a crash trades that landed were never booked: the books cannot know, so truth-vs-books checks wait for the end. */
@@ -217,8 +297,10 @@ class Run {
     process.on('unhandledRejection', this.onRejection);
     log.warn = (msg: string, data?: unknown) => {
       // 'timed step failed' is the engine catching an exception that escaped a timed step: never expected.
-      if (/timed step failed|tick failed/.test(msg)) this.problem('E1', 'engine-exception', `${msg} ${JSON.stringify(data, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}`);
-      else this.line(`log.warn ${msg}`);
+      // (a database error that escaped is named by where it was raised: "bagStep>addEvent")
+      const db = DB_ERROR_RE.test(String((data as { error?: unknown } | undefined)?.error ?? '')) ? `:db-write@${this.lastEscapeSite || '?'}` : '';
+      if (/timed step failed|tick failed/.test(msg)) this.problem('E1', `engine-exception${db}`, `${msg} ${JSON.stringify(data, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}`);
+      else this.line(`log.warn ${msg}${db ? ` (${String((data as { error?: unknown }).error)})` : ''}`);
     };
     log.error = (msg: string) => this.line(`log.error ${msg}`);
     log.info = () => undefined;
@@ -268,6 +350,9 @@ class Run {
         if (sc.sabotage === 'min-zero') store.db.prepare('UPDATE copies SET settings = ? WHERE id = ?').run(JSON.stringify({ ...s, minLeaderBuySol: 0 }), id);
       }
       this.line(`market: Live switch ${sc.live ? 'ON (real trades)' : 'OFF (test mode)'}, over-ask ${sc.overAsk}, profile ${sc.profile}, priceMs ${sc.priceMs}, retries ${sc.retry}, max per buy ${sc.maxSolPerBuy} SOL, wallets ${sc.users.map((u) => `${u.sol} SOL`).join(' / ')}`);
+      if (sc.db?.p) this.line(`database: one write in ${Math.round(1 / sc.db.p)} fails at random (once each), until the quiet phase`);
+      for (const w of sc.db?.full ?? []) this.line(`database: from +${(w.at / 1000).toFixed(3)}s for ${w.ms / 1000}s every write fails (${DB_ERRORS[w.err][0]}); reads work`);
+      if (market.noRecordNoSend) this.line('executor: a trade whose onSigned callback throws is NOT sent (FUZZ_NO_RECORD_NO_SEND, the coming fix)');
       this.startEngine();
 
       for (let i = 0; i < sc.steps.length; i++) {
@@ -340,11 +425,22 @@ class Run {
       // the old one stored, and a level that comes due while a sell from before the restart is unsettled is held and
       // sold after it. The levels are not counted afresh: one that never fires is flagged.)
       // The old engine's real sells it never booked stay on their way for the new one (it found them written down);
-      // anything else it had out is gone with it (a test sell cut off was never sent anywhere).
+      // anything else it had out is gone with it (a test sell cut off was never sent anywhere, and a real one whose
+      // row in sells_out could not be written is unknown to the new engine).
       for (const [inv, f] of t.flying) {
-        if (f.call.live && f.call.signature) f.orphan = true;
+        if (f.call.live && f.call.signature && store.hasSellOut(f.call.signature)) f.orphan = true;
         else t.flying.delete(inv);
       }
+    }
+    // The new engine takes every sell still written down as on its way (Engine.adoptOrphans), also one the old engine
+    // was done with whose row could not be deleted (a database write failed): its position waits until it is settled.
+    for (const row of store.sellsOut()) {
+      const t = this.pos.get(row.positionId);
+      if (!t || [...t.flying.values()].some((f) => f.call.signature === row.signature)) continue;
+      const call = this.sellCallOf(row.signature);
+      if (!call) continue;
+      t.flying.set(++this.inv, { key: okey(row.order), kind: row.order.basis === 'bag' ? 'bag' : 'queue', tokens: row.tokens, call, orphan: true });
+      this.line(`sell#${call.id} p${t.pid} is still written down in sells_out (${call.landedAt !== undefined ? 'it landed' : 'it never landed'}): the new engine waits for it`);
     }
     // src/server.ts: restore() 3 s after the start, then restore() + reconcile() every 30 s, and settleLeftovers()
     // every 5 s while a sell left by the process before is not settled. A new process starts with no pass running
@@ -356,16 +452,16 @@ class Run {
     const leftovers = () => {
       if (epoch !== this.safetyEpoch) return;
       sim.schedule(5_000, leftovers);
-      if (engine.awaitingLeftovers()) void engine.settleLeftovers().catch((err) => this.problem('E1', 'leftovers-rejected', String(err)));
+      if (engine.awaitingLeftovers()) void engine.settleLeftovers().catch((err) => this.problem('E1', `leftovers-rejected${this.dbTag(err)}`, String(err)));
     };
     sim.schedule(5_000, leftovers);
-    sim.schedule(3_000, () => { if (epoch === this.safetyEpoch) void engine.restore().catch((err) => this.problem('E1', 'restore-rejected', String(err))); });
+    sim.schedule(3_000, () => { if (epoch === this.safetyEpoch) void engine.restore().catch((err) => this.problem('E1', `restore-rejected${this.dbTag(err)}`, String(err))); });
     const safety = () => {
       if (epoch !== this.safetyEpoch) return;
       sim.schedule(30_000, safety);
       if (this.reconciling) return;
       this.reconciling = true;
-      Promise.all([engine.restore(), engine.reconcile()]).catch((err) => this.problem('E1', 'safety-net-rejected', String(err))).finally(() => { this.reconciling = false; });
+      Promise.all([engine.restore(), engine.reconcile()]).catch((err) => this.problem('E1', `safety-net-rejected${this.dbTag(err)}`, String(err))).finally(() => { this.reconciling = false; });
     };
     sim.schedule(30_000, safety);
   }
@@ -383,7 +479,7 @@ class Run {
       if (gen === this.gen) { this.sellInvoked(positionId, order); if (tr) tr.queueActive++; }
       const res = als.run({ kind: 'queue', positionId, order, gen, inv }, () => sell(positionId, order, ...rest));
       const done = () => { if (tr && gen === this.gen) { tr.queueActive = Math.max(0, tr.queueActive - 1); this.landedOrGone(tr, inv); } };
-      void res.then((r) => { done(); if (gen === this.gen) this.sellReturned(positionId, order, r, inv); }, done);
+      void res.then((r) => { done(); if (gen === this.gen) this.sellReturned(positionId, order, r, inv); }, (err) => { done(); this.stepThrew(tr, err); });
       return res;
     };
     const bagStep = (e.bagStep as (...a: unknown[]) => Promise<void>).bind(engine);
@@ -398,7 +494,7 @@ class Run {
       this.timedNotEarly(positionId, order, 'started');
       const res = als.run({ kind: 'bag', positionId, order, gen, inv }, () => bagStep(positionId, order, ...rest));
       const done = () => { if (tr && gen === this.gen) { tr.bagActive.set(stage, Math.max(0, (tr.bagActive.get(stage) ?? 0) - 1)); this.landedOrGone(tr, inv); } };
-      void res.then(done, done);
+      void res.then(done, (err) => { done(); this.stepThrew(tr, err); });
       return res;
     };
     const buy = (e.buy as (...a: unknown[]) => Promise<void>).bind(engine);
@@ -415,7 +511,151 @@ class Run {
   /** An engine step has returned: nothing it sent is on its way any more, except a sell whose outcome it never learnt. */
   private landedOrGone(tr: Track, inv: number): void {
     const f = tr.flying.get(inv);
-    if (f && (f.answered || !f.call.uncertain)) tr.flying.delete(inv);
+    if (!f) return;
+    // A real sale whose booking was rolled back (a database write failed): the engine books it from its own transaction
+    // when its row in sells_out was written, and it is on its way until then, as one left by a restart. Without that
+    // row nothing will ever book it (M3 says so at the end).
+    if (f.answered && f.call.unbooked && f.call.live && !f.orphan) {
+      if (f.call.signature && this.store.hasSellOut(f.call.signature)) {
+        f.orphan = true;
+        this.dirty.add(tr.pid);
+        this.line(`sell#${f.call.id} p${tr.pid} sold but its booking failed: it stays on its way until it is booked from its own transaction (its row in sells_out is there)`);
+        return;
+      }
+      tr.flying.delete(inv);
+      this.line(`sell#${f.call.id} p${tr.pid} sold but its booking failed, and it was never written down in sells_out: nothing will book it`);
+      return;
+    }
+    if (f.answered || !f.call.uncertain) tr.flying.delete(inv);
+  }
+
+  /** An engine step threw (an exception escaped it). A database error is remembered for the checks it explains. */
+  private stepThrew(tr: Track | undefined, err: unknown): void {
+    const site = err && typeof err === 'object' ? this.dbSites.get(err) : undefined;
+    if (site === undefined) return;
+    this.lastEscapeSite = site;
+    if (tr) tr.dbEscapeAt = this.sim.now;
+  }
+
+  /** ":db-write@<where>" for a database error the harness injected (or one whose text says so); '' otherwise. */
+  private dbTag(err: unknown): string {
+    const site = err && typeof err === 'object' ? this.dbSites.get(err) : undefined;
+    if (site !== undefined) return `:db-write@${site}`;
+    return DB_ERROR_RE.test(String((err as Error | undefined)?.message ?? err)) ? ':db-write' : '';
+  }
+
+  // ── database faults ───────────────────────────────────────────────────
+  /**
+   * Called by every store write the engine makes, before it is made: throws a database error when the profile says
+   * this write fails (nothing is written, and nothing of it is recorded by the harness). `changes`: whether the write
+   * would change anything (one that would not writes nothing, and cannot fail); `what`: for the transcript.
+   */
+  private dbWrite(method: string, what: () => Omit<WriteFail, 't' | 'step' | 'method' | 'err' | 'inTx'>, changes: () => boolean = () => true): void {
+    if (!this.dbOn || !changes()) return;
+    const kind = this.dbFaultNow(method);
+    if (!kind) {
+      if (this.tx) this.tx.wrote = true;
+      return;
+    }
+    const err = dbError(kind);
+    this.dbSites.set(err, `${engineFrame(err.stack)}>${method}`);
+    const info = what();
+    this.writeFails.push({ ...info, t: this.sim.now, step: this.step, method, err: err.message, inTx: !!this.tx });
+    if (this.tx) this.tx.doomed ??= err;
+    this.line(`store ✗ ${method} FAILED (${err.message}): ${info.what}${this.tx ? ' — inside a transaction: the whole transaction is rolled back' : ''}`);
+    throw err;
+  }
+
+  /** Inside a window of a full disk now (every write fails). */
+  private diskFullNow(): boolean {
+    const at = this.sim.now - START;
+    return this.dbOn && !!this.sc.db?.full?.some((x) => at >= x.at && at < x.at + x.ms);
+  }
+
+  /** Whether this write fails, and how: inside a window of a full disk every write does; otherwise dbfault's chance
+   *  (recorded on the tape by the write's number, so a saved scenario replays the same failures). */
+  private dbFaultNow(method: string): 'full' | 'io' | null {
+    const db = this.sc.db;
+    if (!db) return null;
+    const at = this.sim.now - START;
+    const w = db.full?.find((x) => at >= x.at && at < x.at + x.ms);
+    if (w) return w.err;
+    if (!db.p) return null;
+    const i = this.dbN++;
+    const tape = (this.tape.db ??= []);
+    const hit = tape[i];
+    if (hit) return hit.err;
+    if (this.sc.tape || !this.dbRng.chance(db.p)) return null;
+    const plan: DbPlan = { err: this.dbRng.chance(db.io ?? 0) ? 'io' : 'full', m: method };
+    tape[i] = plan;
+    return plan.err;
+  }
+
+  private snapshot(): Snap {
+    const pos: Snap['pos'] = new Map();
+    for (const [id, t] of this.pos) pos.set(id, { recovered: t.recovered, proceedsWriter: t.proceedsWriter, reopened: t.reopened, flying: new Map(t.flying), errorLines: new Map(t.errorLines), gaveUp: new Set(t.gaveUp) });
+    return { storeOps: this.storeOps, lastFill: this.lastFill, lastFillUpdate: this.lastFillUpdate, closedCount: this.closedCount, feed: this.feed.length, inserted: this.inserted.length, notes: { ...this.notes }, pos };
+  }
+
+  /**
+   * A transaction rolled back: SQLite undid every write in it, so the harness undoes its record of them (what the
+   * write wrappers recorded is put back as it was when the transaction began). A sale it was booking is marked: a
+   * real one is booked later from its own transaction if its row in sells_out was written (landedOrGone); a test
+   * one is taken by the engine for a failed sell and tried again, so its success is not counted.
+   */
+  private rollback(s: Snap, err: unknown): void {
+    this.storeOps = s.storeOps;
+    this.lastFill = s.lastFill;
+    this.lastFillUpdate = s.lastFillUpdate;
+    this.closedCount = s.closedCount;
+    this.feed.length = s.feed;
+    this.inserted.length = s.inserted;
+    for (const k of Object.keys(this.notes)) if (!(k in s.notes)) delete this.notes[k];
+    Object.assign(this.notes, s.notes);
+    for (const [id, t] of [...this.pos]) {
+      const was = s.pos.get(id);
+      if (!was) { this.pos.delete(id); continue; }
+      t.recovered = was.recovered;
+      t.proceedsWriter = was.proceedsWriter;
+      t.reopened = was.reopened;
+      t.flying = was.flying;
+      t.errorLines = was.errorLines;
+      t.gaveUp = was.gaveUp;
+      this.dirty.add(id);
+    }
+    this.line(`store transaction ROLLED BACK (${String((err as Error)?.message ?? err)}): none of its writes happened`);
+    // The harness's own check of the above: its record of the feed and of the positions is the database's.
+    const count = (table: string) => Number((this.store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number | bigint }).n);
+    const lines = count('events');
+    const rows = count('positions');
+    if (lines !== this.feed.length || rows !== this.pos.size) this.problem('E0', 'harness-record-differs-from-the-database', `after a rollback the database has ${lines} feed lines and ${rows} positions, the harness's record ${this.feed.length} and ${this.pos.size}`);
+    const ctx = als.getStore();
+    const tr = ctx && ctx.gen === this.gen ? this.pos.get(ctx.positionId) : undefined;
+    const f = tr && ctx ? tr.flying.get(ctx.inv) : undefined;
+    if (!tr || !ctx || !f?.answered || f.orphan) return;
+    f.call.unbooked = (f.call.unbooked ?? 0) + 1;
+    if (f.call.live) return;
+    // A test sale is not written down anywhere: the engine releases its coins at once and tries the order again.
+    tr.flying.delete(ctx.inv);
+    tr.fullExitSold.delete(ctx.inv);
+    const o = ctx.order;
+    if (o && (f.call.sold ?? 0n) > 0n && onceOrder(o)) {
+      const hit = tr.success.get(okey(o));
+      if (hit && --hit.n <= 0) tr.success.delete(okey(o));
+    }
+  }
+
+  /** The sale an engine step is booking right now (its order's context): the self-test 'drop-booking' needs it. */
+  private bookingNow(): Flying | undefined {
+    const ctx = als.getStore();
+    const f = ctx && ctx.gen === this.gen ? this.pos.get(ctx.positionId)?.flying.get(ctx.inv) : undefined;
+    return f?.answered && !f.orphan ? f : undefined;
+  }
+
+  /** The fake market's sell with this signature (the newest first: the one being signed is the last). */
+  private sellCallOf(signature: string): SellCall | undefined {
+    for (let i = this.market.sells.length - 1; i >= 0; i--) if (this.market.sells[i]!.signature === signature) return this.market.sells[i];
+    return undefined;
   }
 
   /** Every booking the engine makes goes through here first. */
@@ -423,9 +663,59 @@ class Run {
     const { store } = this;
     const orig = {
       insertPosition: store.insertPosition.bind(store), updatePosition: store.updatePosition.bind(store), insertFill: store.insertFill.bind(store),
-      updateFillLamports: store.updateFillLamports.bind(store), addEvent: store.addEvent.bind(store),
+      updateFillLamports: store.updateFillLamports.bind(store), addEvent: store.addEvent.bind(store), atomic: store.atomic.bind(store),
+      insertSellOut: store.insertSellOut.bind(store), markSeen: store.markSeen.bind(store), deleteSellOut: store.deleteSellOut.bind(store),
+    };
+    // One transaction: a write in it that fails, or its COMMIT, rolls all of it back (as SQLite does on a full disk),
+    // and the harness's record of its writes with it. A call inside another joins it, as in the store.
+    store.atomic = <T>(fn: () => T): T => {
+      if (this.tx) return fn();
+      const tx: { snap: Snap; wrote: boolean; doomed: Error | null } = { snap: this.snapshot(), wrote: false, doomed: null };
+      // Self-test: the first real sale's booking fails, and its row in sells_out is deleted first (outside the
+      // transaction): nobody can ever book it.
+      let planted: Error | null = null;
+      if (this.sc.sabotage === 'drop-booking' && !this.dropped) {
+        const f = this.bookingNow();
+        if (f?.call.live && f.call.signature) {
+          this.dropped = true;
+          orig.deleteSellOut(f.call.signature);
+          planted = new Error('self-test: this booking is dropped');
+        }
+      }
+      this.tx = tx;
+      try {
+        if (planted) throw planted;
+        return orig.atomic(() => {
+          const out = fn();
+          // (a write in it failed and the engine went on: SQLite has already rolled the whole transaction back)
+          if (tx.doomed) throw tx.doomed;
+          this.dbWrite('COMMIT', () => ({ what: 'the transaction\'s COMMIT' }), () => tx.wrote);
+          return out;
+        });
+      } catch (err) {
+        this.tx = null;
+        this.rollback(tx.snap, err);
+        throw err;
+      } finally {
+        this.tx = null;
+      }
+    };
+    store.insertSellOut = (s) => {
+      try {
+        this.dbWrite('insertSellOut', () => ({ pid: s.positionId, userId: s.userId, what: `sells_out row of ${s.signature} (p${s.positionId}, ${orderText(s.order)}, ${s.tokens} tokens)` }));
+      } catch (err) {
+        const c = this.sellCallOf(s.signature);
+        if (c) c.outFailed = true;
+        throw err;
+      }
+      orig.insertSellOut(s);
+    };
+    store.markSeen = (key) => {
+      this.dbWrite('markSeen', () => ({ what: `seen ${key}` }), () => !store.db.prepare('SELECT 1 FROM seen WHERE key = ?').get(key));
+      return orig.markSeen(key);
     };
     store.insertPosition = (p) => {
+      this.dbWrite('insertPosition', () => ({ userId: p.userId, copyId: p.copyId, what: `a position of copy #${p.copyId} in ${short(p.mint)}` }));
       const id = orig.insertPosition(p);
       this.storeOps++;
       this.pos.set(id, {
@@ -439,17 +729,24 @@ class Run {
       return id;
     };
     store.updatePosition = (id, patch) => {
-      const before = store.position(id);
       const ctx = als.getStore();
       const tr = this.pos.get(id);
       const who = this.lastFillUpdate === this.storeOps ? 'refine' : ctx ? `${ctx.kind}:${ctx.order ? ctx.order.reason : 'buy'}` : 'engine';
+      try {
+        this.dbWrite('updatePosition', () => ({ pid: id, userId: tr?.userId, what: `p${id} ${patchText(patch)}` }), () => Object.values(patch).some((v) => v !== undefined));
+      } catch (err) {
+        // (a proceeds update that failed on its own, outside a transaction, is what M2 then names)
+        if (tr && !this.tx && patch.proceedsLamports !== undefined) { tr.proceedsFailed = `${who}(its-write-failed)`; this.dirty.add(id); }
+        throw err;
+      }
+      const before = store.position(id);
       // (the one exception: the exact coin count of a buy that was handed back with its quote's count)
       const buyCorrection = patch.tokensBought !== undefined && (ctx?.kind === 'buy' || !ctx);
       if (before && patch.tokensHeld !== undefined && before.status === 'open' && patch.tokensHeld > before.tokensHeld && !buyCorrection) {
         this.problem('T3', `books-grew@${who}`, `p${id}: tokensHeld written up from ${before.tokensHeld} to ${patch.tokensHeld} by ${who} ${orderText(ctx?.order)} (a sell can only lower it)`);
       }
       if (before && patch.status === 'open' && before.status === 'opening' && !ctx && tr) tr.recovered = true; // restore()
-      if (tr && patch.proceedsLamports !== undefined && patch.proceedsLamports !== before?.proceedsLamports) tr.proceedsWriter = who;
+      if (tr && patch.proceedsLamports !== undefined && patch.proceedsLamports !== before?.proceedsLamports) { tr.proceedsWriter = who; tr.proceedsFailed = undefined; }
       if (before && patch.status === 'closed' && before.status !== 'closed') this.closedCount++;
       if (before && patch.status === 'open' && before.status === 'closed' && tr) { tr.reopened = true; this.note('position-opened-again:the-buy-received-more-than-its-quote-said'); }
       orig.updatePosition(id, patch);
@@ -473,6 +770,7 @@ class Run {
     };
     const sabotaged = new Set<string>();
     store.insertFill = (f) => {
+      this.dbWrite('insertFill', () => ({ pid: f.positionId, userId: f.userId, what: `${f.side} fill of p${f.positionId}: ${f.tokens} tokens, ${f.lamports} lamports, sig ${f.signature ?? '-'}${f.error ? ` (error ${f.error})` : ''}` }));
       const id = orig.insertFill(f);
       this.storeOps++;
       this.lastFill = { op: this.storeOps, pid: f.positionId, userId: f.userId, side: f.side, tokens: f.tokens, lamports: f.lamports };
@@ -486,6 +784,7 @@ class Run {
         if (sab === 'refire' && f.side === 'sell' && f.reason === 'timed') { once(); queueMicrotask(() => store.db.prepare("UPDATE positions SET fired_timed = '[]' WHERE id = ? AND status = 'open'").run(f.positionId)); }
         if (sab === 'lose-proceeds' && f.side === 'sell') { once(); queueMicrotask(() => store.db.prepare('UPDATE positions SET proceeds_lamports = proceeds_lamports - 1000 WHERE id = ?').run(f.positionId)); }
         if (sab === 'hide-coins' && f.side === 'buy') { once(); queueMicrotask(() => { store.db.prepare("UPDATE positions SET tokens_held = tokens_held / 2 WHERE id = ? AND status = 'open'").run(f.positionId); this.dirty.add(f.positionId); }); }
+        if (sab === 'book-twice' && f.side === 'sell' && !f.simulated && sabotaged.size === 0) { once(); queueMicrotask(() => orig.insertFill({ ...f })); }
         if (sab === 'twin-position' && f.side === 'buy') {
           once();
           queueMicrotask(() => { const p = store.position(f.positionId); if (p?.status === 'open') { const twin = orig.insertPosition({ userId: p.userId, copyId: p.copyId, mint: p.mint, mode: p.mode, leaderSig: 'twin', sell: p.sell, copyName: p.copyName, leader: p.leader, now: this.sim.now }); orig.updatePosition(twin, { status: 'opening' }); } });
@@ -499,6 +798,8 @@ class Run {
     if (typeof st0.deleteSellOut === 'function') {
       const deleteSellOut = st0.deleteSellOut.bind(store);
       st0.deleteSellOut = (sig) => {
+        const outPid = () => Number((store.db.prepare('SELECT position_id FROM sells_out WHERE signature = ?').get(sig) as { position_id?: number } | undefined)?.position_id ?? NaN);
+        this.dbWrite('deleteSellOut', () => ({ pid: outPid(), what: `the sells_out row of ${sig}` }), () => store.hasSellOut(sig));
         deleteSellOut(sig);
         for (const tr of this.pos.values()) {
           for (const [inv, f] of tr.flying) {
@@ -507,10 +808,13 @@ class Run {
         }
       };
     }
+    const fillPid = (fillId: number) => Number((store.db.prepare('SELECT position_id FROM fills WHERE id = ?').get(fillId) as { position_id?: number } | undefined)?.position_id ?? NaN);
     store.updateFillLamports = (fillId, lam) => {
+      this.dbWrite('updateFillLamports', () => ({ pid: fillPid(fillId), what: `fill #${fillId} lamports → ${lam}` }));
       orig.updateFillLamports(fillId, lam);
       this.storeOps++;
       this.lastFillUpdate = this.storeOps;
+      this.dirty.add(fillPid(fillId));
       this.line(`store fill #${fillId} lamports → ${lam} (exact)`);
     };
     // (the same booking under its newer name, where the store has it: the exact figure, or "nothing exact to be had")
@@ -518,14 +822,41 @@ class Run {
     if (typeof st.setFillExact === 'function') {
       const setFillExact = st.setFillExact.bind(store);
       st.setFillExact = (fillId, lam, ...more) => {
+        // The exact coin count of a buy handed back with its quote's count: until it is in the books the wallet is not
+        // compared with them. One whose write fails stays to be read again (the safety pass applies it later).
+        const quoted = () => {
+          if (more[0] === undefined) return undefined;
+          const row = store.db.prepare('SELECT position_id, side FROM fills WHERE id = ?').get(fillId) as { position_id?: number; side?: string } | undefined;
+          return row?.side === 'buy' ? this.pos.get(Number(row.position_id))?.quotedBuy : undefined;
+        };
+        try {
+          this.dbWrite('setFillExact', () => ({ pid: fillPid(fillId), what: `fill #${fillId} ${lam === null ? 'no exact figure to be had' : `exact lamports ${lam}${more[0] !== undefined ? `, tokens ${String(more[0])}` : ''}`}` }));
+        } catch (err) {
+          const q = quoted();
+          if (q) q.refined = false;
+          throw err;
+        }
         setFillExact(fillId, lam, ...more);
+        const q = this.sc.db ? quoted() : undefined;
+        if (q) q.refined = true;
         this.storeOps++;
         if (lam !== null) this.lastFillUpdate = this.storeOps;
+        // (the books are checked against the fill now: the position's own update that follows may fail)
+        this.dirty.add(fillPid(fillId));
         this.line(lam === null ? `store fill #${fillId} keeps its figure (nothing exact to be read)` : `store fill #${fillId} lamports → ${lam} (exact)${more[0] !== undefined ? `, tokens → ${String(more[0])}` : ''}`);
       };
     }
     store.addEvent = (e) => {
       if ((this.sc.sabotage === 'mute-sells' && e.kind === 'sell') || (this.sc.sabotage === 'mute-skips' && e.kind === 'skip')) return;
+      try {
+        // (its position: the engine step it was written for, when it was one: a buy, a sell, a timed step)
+        const pid = als.getStore()?.positionId;
+        this.dbWrite('addEvent', () => ({ userId: e.userId, copyId: e.copyId ?? null, ...(pid !== undefined ? { pid } : {}), what: `feed ${e.kind} line "${e.message}"` }));
+      } catch (err) {
+        // A feed line that could not be written is legitimately missing (the checks of the feed allow for it).
+        this.feedLost.push({ i: this.feed.length, t: this.sim.now, op: this.storeOps, userId: e.userId, copyId: e.copyId ?? null, kind: e.kind, message: e.message, mint: e.mint ?? null, signature: e.signature ?? null, ctx: als.getStore() });
+        throw err;
+      }
       orig.addEvent(e);
       this.storeOps++;
       const rec: FeedRec = { i: this.feed.length, t: this.sim.now, op: this.storeOps, userId: e.userId, copyId: e.copyId ?? null, kind: e.kind, message: e.message, mint: e.mint ?? null, signature: e.signature ?? null, ctx: als.getStore() };
@@ -604,6 +935,8 @@ class Run {
       tr.fullExitSold.delete(inv);
       // (checked once the engine has had its turn: a follow-up sell of what is left may be starting right now)
       this.post.push(() => {
+        // (its booking failed: it is booked from its own transaction, or never, and M3 says so)
+        if (sale.unbooked) return;
         const p = this.store.position(pid);
         let running = 0;
         for (const n of tr.bagActive.values()) running += n;
@@ -648,12 +981,33 @@ class Run {
     const from = this.feed.length;
     this.post.push(() => {
       const mine = this.feed.slice(from).filter((e) => e.userId === tr.userId && e.mint === c.mint);
-      if (c.ok && !mine.some((e) => e.kind === 'buy')) this.problem('FE1', 'buy-without-a-feed-line', `p${tr.pid}: the buy landed and the feed has no "Bought" line`);
-      if (!c.ok && !mine.some((e) => e.kind === 'error')) this.problem('FE4', 'failed-buy-without-a-feed-line', `p${tr.pid}: the buy failed (${c.error}) and the feed has no line for it`);
+      // (database faults: a feed line whose write failed is legitimately missing; a write of this position that failed
+      // since the buy began explains a mode or a status that was not written, for now: the end checks judge the rest)
+      const lost = this.feedLost.filter((e) => e.i >= from && e.userId === tr.userId && e.mint === c.mint);
+      const failed = this.writeFails.some((w) => w.pid === tr.pid && w.t >= c.t0);
       const p = this.store.position(tr.pid);
-      if (p && c.ok && p.mode !== (c.live ? 'live' : 'paper')) this.problem('X1', 'position-mode', `p${tr.pid}: a ${c.live ? 'real' : 'test'} buy made a "${p.mode}" position`);
-      if (p && !c.ok && c.uncertain && p.status !== 'opening') this.problem('X1', 'unknown-buy-not-kept-opening', `p${tr.pid}: the buy's outcome is unknown and the position is ${p.status}`);
-      if (p && !c.ok && !c.uncertain && p.status !== 'failed') this.problem('X1', 'failed-buy-not-marked-failed', `p${tr.pid}: the buy failed and the position is ${p.status}`);
+      // A buy that was filled is never marked failed: a failed position is never sold, and its coins stay in the wallet.
+      if (p && c.ok && p.status === 'failed') this.problem('X1', `filled-buy-marked-failed${failed ? '(after-a-failed-write)' : ''}`, `p${tr.pid}: the ${c.live ? 'real' : 'test'} buy was filled (${c.quotedTokens ?? c.tokens} tokens) and the position is marked failed${failed ? ' (a write of its booking failed, and the engine took that for a failed buy)' : ''}`);
+      if (c.ok && !mine.some((e) => e.kind === 'buy')) {
+        if (lost.some((e) => e.kind === 'buy')) this.note('db:feed-line-not-written:buy');
+        // (its booking failed before the line: X1 above when that marked it failed; else it is still "opening" and
+        // restore() books it from its own transaction, with its line: the line count is checked at the end)
+        else if (failed) this.note('db:no-buy-line-yet:a-write-of-its-booking-failed');
+        else this.problem('FE1', 'buy-without-a-feed-line', `p${tr.pid}: the buy landed and the feed has no "Bought" line`);
+      }
+      if (!c.ok && !mine.some((e) => e.kind === 'error')) {
+        if (lost.some((e) => e.kind === 'error')) this.note('db:feed-line-not-written:error');
+        else this.problem('FE4', `failed-buy-without-a-feed-line${failed ? '(after-a-failed-write)' : ''}`, `p${tr.pid}: the buy failed (${c.error}) and the feed has no line for it`);
+      }
+      if (p && c.ok && p.mode !== (c.live ? 'live' : 'paper')) {
+        if (failed) this.note('db:position-mode-not-written:its-write-failed');
+        else this.problem('X1', 'position-mode', `p${tr.pid}: a ${c.live ? 'real' : 'test'} buy made a "${p.mode}" position`);
+      }
+      if (p && !c.ok && c.uncertain && p.status !== 'opening') this.problem('X1', `unknown-buy-not-kept-opening${failed ? '(after-a-failed-write)' : ''}`, `p${tr.pid}: the buy's outcome is unknown and the position is ${p.status}${failed ? ' (a write of it failed meanwhile; a buy that may have landed is never settled once it is not "opening")' : ''}`);
+      if (p && !c.ok && !c.uncertain && p.status !== 'failed') {
+        if (failed) this.note('db:failed-buy-not-marked-failed-yet:its-write-failed');
+        else this.problem('X1', 'failed-buy-not-marked-failed', `p${tr.pid}: the buy failed and the position is ${p.status}`);
+      }
     });
   }
 
@@ -697,8 +1051,13 @@ class Run {
       // Where the engine cannot know what a sell that is out has really done (the market paid only part of it, its
       // outcome is unknown, a crash) the documented rule is the reference: the position's coins less everything
       // that is out, the wallet only as a cap.
-      // The same where the books carry a quote's coin count (a buy handed back before its exact count could be read).
-      if (live && (this.sc.faults.partial > 0 || this.sc.faults.ghost > 0 || this.blind || tr.quotedBuy)) {
+      // The same where the books carry a quote's coin count (a buy handed back before its exact count could be read),
+      // and, with database faults, where the wallet holds more than this position's coins still in it (its books less
+      // its sales that have left the wallet unbooked): coins left there by a booking that failed are not this
+      // position's, and the wallet no longer shows which of its sells have left.
+      let left = 0n;
+      for (const [inv, f] of tr.flying) if (inv !== ctx.inv && f.call.landedAt !== undefined && f.call.landedAt <= read.at) left += f.tokens;
+      if (live && (this.sc.faults.partial > 0 || this.sc.faults.ghost > 0 || this.blind || tr.quotedBuy || (this.sc.db && read.value > p.tokensHeld - left))) {
         const own = p.tokensHeld > others ? p.tokensHeld - others : 0n;
         free = read.value < own ? read.value : own;
       }
@@ -770,7 +1129,7 @@ class Run {
       if (c.landedAt !== undefined && !orphan.answered && tr && ctx?.order) {
         orphan.answered = true;
         const o = ctx.order;
-        if ((c.sold ?? 0n) > 0n && (o.reason === 'timed' || o.reason === 'stop_loss' || o.reason === 'dead_coin') && !o.everything) {
+        if ((c.sold ?? 0n) > 0n && onceOrder(o)) {
           const k = okey(o);
           const hit = tr.success.get(k);
           if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
@@ -797,7 +1156,7 @@ class Run {
       // Booked from its own transaction: the same accounting as a sell that was confirmed in time.
       const k = okey(ctx.order);
       const o = ctx.order;
-      if ((c.sold ?? 0n) > 0n && (o.reason === 'timed' || o.reason === 'stop_loss' || o.reason === 'dead_coin') && !o.everything) {
+      if ((c.sold ?? 0n) > 0n && onceOrder(o)) {
         const hit = tr.success.get(k);
         if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
         else { hit.n++; if (!hit.firstPartial) this.problem('DF1', `fired-twice:${orderKind(ctx, o)}`, `p${tr.pid} ${orderText(o)} sold a second time (sell#${c.id}, ${c.sold} tokens)`); }
@@ -836,7 +1195,7 @@ class Run {
     if (c.ok) {
       tr.failed.delete(failKey);
       // (the last step of a bag exit stays on duty and may sell in several parts: documented)
-      if ((c.sold ?? 0n) > 0n && (order.reason === 'timed' || order.reason === 'stop_loss' || order.reason === 'dead_coin') && !order.everything) {
+      if ((c.sold ?? 0n) > 0n && onceOrder(order)) {
         const hit = tr.success.get(k);
         if (!hit) tr.success.set(k, { n: 1, firstPartial: c.sold! < c.asked });
         else {
@@ -860,7 +1219,11 @@ class Run {
         if (!p || p.status !== 'open') return;
         // (after a sale the market could pay only part of, the feed has already said "the rest is sold as soon as it can be")
         if (!this.feed.slice(from).some((e) => e.userId === tr.userId && e.mint === c.mint && (e.kind === 'error' || (e.kind === 'sell' && /only part of it/.test(e.message))))) {
-          this.problem('FE4', `failed-sell-without-a-feed-line:${kind}`, `p${tr.pid} ${orderText(order)} failed (${c.error}) and the feed has no line for it`);
+          // (database faults: its line was written and the write failed; a line never written because another write
+          // failed first is the engine's: named apart)
+          const after = this.writeFails.some((w) => w.pid === tr.pid && w.t >= c.t0) ? '(after-a-failed-write)' : '';
+          if (this.feedLost.some((e) => e.i >= from && e.userId === tr.userId && e.mint === c.mint && e.kind === 'error')) this.note('db:feed-line-not-written:error');
+          else this.problem('FE4', `failed-sell-without-a-feed-line:${kind}${after}`, `p${tr.pid} ${orderText(order)} failed (${c.error}) and the feed has no line for it${after ? ' (a write of this position failed in between, and the engine never wrote the line)' : ''}`);
         }
       });
     }
@@ -889,7 +1252,12 @@ class Run {
     // (while one of its sells is still out, that sell's booking, or the last step that is on duty, closes it)
     let under = tr.queueActive + tr.reading + tr.flying.size;
     for (const n of tr.bagActive.values()) under += n;
-    if (p.status === 'open' && p.tokensHeld === 0n && under === 0) this.problem('T2', 'open-holding-nothing', `p${pid} is open with tokensHeld 0 and nothing of it is under way (no rule will ever close it, and the coin cannot be bought again)`);
+    if (p.status === 'open' && p.tokensHeld === 0n && under === 0) {
+      // (database faults: the write that would have closed it failed; every tick closes such a position, so this is
+      // judged once the faults have stopped, at the end)
+      if (this.dbOn && this.writeFails.some((w) => w.pid === pid)) this.note('db:open-holding-nothing-for-now:a-write-of-it-failed');
+      else this.problem('T2', 'open-holding-nothing', `p${pid} is open with tokensHeld 0 and nothing of it is under way (no rule will ever close it, and the coin cannot be bought again)`);
+    }
     if (p.status === 'opening' || p.status === 'failed') return;
     const fills = this.store.fills(pid).filter((f) => f.error === null);
     const buys = fills.filter((f) => f.side === 'buy');
@@ -903,12 +1271,19 @@ class Run {
         if (tr.quotedBuy && buys[0]!.tokens === tr.quotedBuy.quote) { if (!this.quotedFillSeen.has(pid)) { this.quotedFillSeen.add(pid); this.note('buy-row-keeps-the-quote\'s-coin-count-after-the-exact-count-arrived'); } }
         else this.problem('M1', 'bought!=buy-fill', `p${pid} tokensBought ${p.tokensBought}, its buy fill says ${buys[0]!.tokens}`);
       }
-    } else if (!tr.recovered) this.problem('M1', 'open-without-a-buy-fill', `p${pid} is ${p.status} and has no buy fill`);
+    } else {
+      // (a position opened by restore() has its buy fill too: it is read from the buy's own transaction, settleBuy)
+      this.problem('M1', `open-without-a-buy-fill${tr.recovered ? ':opened-by-restore' : ''}`, `p${pid} is ${p.status} and has no buy fill`);
+    }
     const sum = sells.reduce((a, f) => a + f.lamports, 0n);
     // (reported once per position, with the booking that broke it: the gap stays for good)
+    // A sale is booked once, at every moment (checked after the event: a transaction that rolled back booked nothing).
+    const twice = this.store.db.prepare("SELECT signature, COUNT(*) AS n FROM fills WHERE side = 'sell' AND error IS NULL AND signature IN (SELECT signature FROM fills WHERE position_id = ? AND side = 'sell' AND error IS NULL AND signature IS NOT NULL) GROUP BY signature HAVING n > 1").all(pid) as { signature: string; n: number | bigint }[];
+    for (const d of twice) this.problem('M3', 'sale-booked-twice', `sale ${d.signature} has ${Number(d.n)} sell fills (p${pid})`);
     if (p.proceedsLamports !== sum && !this.proceedsOff.has(pid)) {
       this.proceedsOff.add(pid);
-      this.problem('M2', `proceeds!=sell-fills@${tr.proceedsWriter || '?'}`, `p${pid} proceedsLamports ${p.proceedsLamports}, its ${sells.length} sell fills add up to ${sum} (difference ${p.proceedsLamports - sum}; last written by ${tr.proceedsWriter})`);
+      const by = tr.proceedsFailed ?? (tr.proceedsWriter || '?');
+      this.problem('M2', `proceeds!=sell-fills@${by}`, `p${pid} proceedsLamports ${p.proceedsLamports}, its ${sells.length} sell fills add up to ${sum} (difference ${p.proceedsLamports - sum}; last written by ${tr.proceedsWriter}${tr.proceedsFailed ? `; the write after it, by ${tr.proceedsFailed.replace('(its-write-failed)', '')}, failed` : ''})`);
     }
   }
 
@@ -987,9 +1362,13 @@ class Run {
       });
     }
     const gen = this.gen;
-    this.engine.tick().catch((err) => this.problem('E1', 'tick-rejected', String((err as Error)?.stack ?? err).slice(0, 300)));
+    const threw: { err?: unknown } = {};
+    this.engine.tick().catch((err) => { threw.err = err; this.problem('E1', `tick-rejected${this.dbTag(err)}`, String((err as Error)?.stack ?? err).slice(0, 300)); });
     await sim.settle();
     if (gen !== this.gen) return;
+    // (database faults: a tick that threw a database error started nothing after it, and a step that threw one out of
+    // itself at this tick is not running: E1 reports the exception; the step is due again at the next tick)
+    if (threw.err !== undefined && this.dbTag(threw.err)) { this.note('db:timed-steps-not-checked:the-tick-threw-a-database-error'); return; }
     for (const d of due) {
       const p = store.position(d.pid);
       const tr = this.pos.get(d.pid);
@@ -999,6 +1378,7 @@ class Run {
       // A position with a sell from before a restart that is not settled yet sends nothing until it is (US1): its due
       // steps go then.
       if ([...tr.flying.values()].some((f) => f.orphan)) { this.note('timed-step-waits-for-a-sell-sent-before-the-restart'); continue; }
+      if ((tr.dbEscapeAt ?? -1) >= now) { this.note('db:timed-step-not-running:it-threw-a-database-error-at-this-tick'); continue; }
       if (d.bag) {
         if ((tr.bagActive.get(d.stage) ?? 0) === 0) this.problem('TL1', 'timed-step-not-started:bag', `p${p.id} step ${d.stage} (+${t.afterSec}s) is ${late}s overdue at this tick and no attempt is running`);
       } else if (!tr.invoked.has(`timed:${d.stage}:`) && !d.busy && tr.queueActive === 0) {
@@ -1151,17 +1531,28 @@ class Run {
           let running = 0;
           for (const n of tr?.bagActive.values() ?? []) running += n;
           if (now && now.status !== 'closed' && now.tokensHeld > out && running === 0 && (tr?.queueActive ?? 0) === 0 && (tr?.reading ?? 0) === 0 && this.sc.faults.partial === 0 && !this.blind && (tr?.bagFailedAt ?? -1) < pressedAt) {
+            // (the books may carry more than the buy received, its quote's coin count, until the exact count arrives:
+            // those coins are not anywhere to be sold; the booking of what is out caps the books at the wallet)
+            const phantom = tr?.quotedBuy && !tr.quotedBuy.refined && tr.quotedBuy.quote > tr.quotedBuy.real ? tr.quotedBuy.quote - tr.quotedBuy.real : 0n;
+            if (phantom > 0n && now.tokensHeld - out <= phantom) this.note('sell-now-ok-with-only-the-quote\'s-coins-left-in-the-books');
             // (a stopped engine sends nothing: the rest of the press is written down and sold after the restart)
-            if (this.stopping && now.exitOwed) this.note('sell-now-rest-owed-to-the-next-start:the-server-was-stopping');
+            else if (this.stopping && now.exitOwed) this.note('sell-now-rest-owed-to-the-next-start:the-server-was-stopping');
             else this.problem('SN1', 'sell-now-said-ok-position-still-open', `p${p.id}: Sell now answered ok and the position is ${now.status} holding ${now.tokensHeld} (other sells have ${out} out, no timed step is running, nothing else is under way)`);
           }
         });
       } else if (p.status !== 'open') {
         if (r.error !== 'no open position with that id') this.problem('SN1', 'sell-now-on-a-non-open-position', `p${p.id} was ${p.status}; Sell now answered "${r.error}"`);
       } else if (r.error !== 'position is not open' && now?.status === 'open') {
-        if (!this.feed.slice(from).some((e) => e.kind === 'error' && e.userId === p.userId && e.mint === p.mint)) this.problem('FE4', 'failed-sell-without-a-feed-line:manual', `p${p.id}: Sell now failed (${r.error}) and the feed has no line for it`);
+        if (!this.feed.slice(from).some((e) => e.kind === 'error' && e.userId === p.userId && e.mint === p.mint)) {
+          const after = this.writeFails.some((w) => w.pid === p.id && w.t >= pressedAt) ? '(after-a-failed-write)' : '';
+          // (it sold, and its booking failed: not a failure, the engine's answer says so; it is booked from its own
+          // transaction, or never, and M3 says which)
+          if (/^it sold, but could not be written down/.test(r.error ?? '')) this.note('db:sell-now-sold-and-its-booking-failed:the-answer-says-so');
+          else if (this.feedLost.some((e) => e.i >= from && e.kind === 'error' && e.userId === p.userId && e.mint === p.mint)) this.note('db:feed-line-not-written:error');
+          else this.problem('FE4', `failed-sell-without-a-feed-line:manual${after}`, `p${p.id}: Sell now failed (${r.error}) and the feed has no line for it`);
+        }
       }
-    }, (err) => this.problem('E1', 'sell-now-rejected', String(err)));
+    }, (err) => this.problem('E1', `sell-now-rejected${this.dbTag(err)}`, String(err)));
   }
 
   /** What the rules say this leader buy must lead to, checked against what the engine did (invariant 5). */
@@ -1191,23 +1582,45 @@ class Run {
     }
     const posFrom = this.inserted.length;
     const feedFrom = this.feed.length;
-    await this.engine.onLeaderTrade(t);
+    const lostFrom = this.feedLost.length;
+    const fails = await this.takeLeaderTrade(t);
     await this.sim.settle();
     const made = this.inserted.slice(posFrom).map((id) => this.pos.get(id)!).filter((tr) => tr.leaderSig === t.signature);
     const skips = this.feed.slice(feedFrom).filter((e) => e.kind === 'skip' && e.signature === t.signature && !/wallet has/.test(e.message));
     if (nothing) {
+      // (the first delivery was dropped, the engine could not write it down as seen: this one may act on it)
+      if (nothing === 'dup' && this.droppedTrades.has(t.signature)) { if (made.length || skips.length) this.note('db:a-repeated-delivery-acted:the-first-was-dropped'); return; }
       if (made.length || skips.length) this.problem('B1', nothing === 'dup' ? 'acted-twice-on-one-transaction' : 'copied-a-stale-buy', `${t.signature}: ${made.length} position(s), ${skips.length} skip line(s) for a ${nothing} delivery`);
       return;
     }
+    // Database faults: the engine could not write their buy down as seen and dropped it (it acts on a transaction once):
+    // nothing is expected of it.
+    if (fails.dropped) { this.droppedTrades.add(t.signature); this.note('db:their-buy-dropped:it-could-not-be-marked-seen'); return; }
+    // Users one of whose copies was to buy and could not (its own write failed): another copy of theirs may buy instead.
+    const relaxedUsers = new Set<number>();
     for (const e of expect) {
       const pos = made.filter((m) => m.copyId === e.copyId);
       const skip = skips.filter((s) => s.copyId === e.copyId);
+      // A copy whose own write failed (its position, or its skip line) is not made: the failed write explains it.
+      if (fails.copies.has(e.copyId)) { this.note('db:copy-not-made:its-own-write-failed'); relaxedUsers.add(e.userId); continue; }
+      // The engine threw at another copy's write and never came to this one (its loop ended there).
+      const cut = fails.threw && pos.length === 0 && skip.length === 0;
       if (e.want === 'buy') {
-        if (pos.length !== 1) this.problem('B2', 'did-not-buy', `copy #${e.copyId}: ${e.why}, yet ${pos.length} positions were opened${skip.length ? ` and the feed says "${skip[0]!.message}"` : ''}`);
+        // (on a full disk this copy's own position could not have been written either)
+        if (pos.length !== 1 && cut && this.diskFullNow()) this.note('db:copy-not-looked-at:the-disk-was-full-anyway');
+        else if (pos.length !== 1) this.problem('B2', cut ? 'did-not-buy:the-engine-stopped-at-another-copy\'s-failed-write' : 'did-not-buy', `copy #${e.copyId}: ${e.why}, yet ${pos.length} positions were opened${skip.length ? ` and the feed says "${skip[0]!.message}"` : ''}${cut ? ' (the engine threw a database error at another copy\'s write while taking this buy, and never came to this copy)' : ''}`);
       } else {
         const first = e.why.split(' / ')[0]!.replace(/\s+/g, '-');
-        if (pos.length) this.problem('B1', `bought-against-a-rule:${first}`, `copy #${e.copyId} opened p${pos[0]!.pid} although ${e.why}`);
-        if (!skip.some((s) => (e.want as RegExp[]).some((re) => re.test(s.message)))) this.problem('FE3', `skip-without-its-feed-line:${first}`, `copy #${e.copyId}: ${e.why}; feed lines: ${JSON.stringify(skip.map((s) => s.message))}`);
+        const either = relaxedUsers.has(e.userId) && (e.want as RegExp[]).every((re) => re.source === 'already holding this coin');
+        if (pos.length) {
+          if (either) this.note('db:another-copy-bought-instead:the-first-copy\'s-write-failed');
+          else this.problem('B1', `bought-against-a-rule:${first}`, `copy #${e.copyId} opened p${pos[0]!.pid} although ${e.why}`);
+        }
+        if (!skip.some((s) => (e.want as RegExp[]).some((re) => re.test(s.message)))) {
+          if (this.feedLost.slice(lostFrom).some((s) => s.kind === 'skip' && s.copyId === e.copyId && s.signature === t.signature)) this.note('db:feed-line-not-written:skip');
+          else if (cut) this.note('db:skip-line-missing:the-engine-stopped-at-another-copy\'s-failed-write');
+          else if (!(either && pos.length)) this.problem('FE3', `skip-without-its-feed-line:${first}`, `copy #${e.copyId}: ${e.why}; feed lines: ${JSON.stringify(skip.map((s) => s.message))}`);
+        }
       }
     }
     for (const m of made) {
@@ -1220,6 +1633,7 @@ class Run {
 
   /** What "sell when they sell" must do with this leader sell (the mirror rule of each open position). */
   private async deliverSell(t: LeaderTrade, dup: boolean): Promise<void> {
+    const added: [number, MirrorDue][] = [];
     if (!dup) {
       const k = `${t.leader}:${t.mint}`;
       this.sellSlot.set(k, Math.max(t.slot, this.sellSlot.get(k) ?? 0));
@@ -1229,11 +1643,51 @@ class Run {
         if (p.leader !== t.leader || p.mint !== t.mint || !p.sell.mirror.enabled) continue;
         const mode = p.sell.mirror.mode;
         if (mode === 'exit' && !soldOut) continue;
-        this.pos.get(p.id)?.mirrorDue.push({ sig: t.signature, percent: mode !== 'same' || soldOut ? 100 : share * 100, mode, invoked: false, ok: false });
+        const due: MirrorDue = { sig: t.signature, percent: mode !== 'same' || soldOut ? 100 : share * 100, mode, invoked: false, ok: false };
+        this.pos.get(p.id)?.mirrorDue.push(due);
+        added.push([p.id, due]);
       }
     }
-    await this.engine.onLeaderTrade(t);
+    const fails = await this.takeLeaderTrade(t);
     await this.sim.settle();
+    if (fails.dropped) {
+      // The engine could not write their sell down as seen and dropped it (a later delivery of it may still act).
+      this.droppedTrades.add(t.signature);
+      for (const [, d] of added) d.relaxed = 'the engine could not write their sell down as seen';
+    } else if (fails.threw && fails.pids.size) {
+      // It threw at a position's own write (their sell written down as owed) before it queued that position's sell,
+      // and its loop over the positions (by id) ended there: those after it were never looked at.
+      const first = Math.min(...fails.pids);
+      for (const [pid, d] of added) if (pid >= first) d.dropped = fails.pids.has(pid) ? 'own' : 'other';
+    }
+  }
+
+  /**
+   * The engine takes their trade (as the watcher hands it over: a throw is logged and the watcher goes on). With
+   * database faults a write it makes before it returns may fail: which copies' and positions' writes did, whether
+   * that ended the call, and whether it was the "seen" mark (the trade is then dropped). A throw that is not a
+   * database error is an engine exception (E1).
+   */
+  private async takeLeaderTrade(t: LeaderTrade): Promise<{ threw: boolean; dropped: boolean; copies: Set<number>; pids: Set<number> }> {
+    const from = this.writeFails.length;
+    const pending = this.engine.onLeaderTrade(t);
+    // (the writes it made before it returned: later ones belong to the buys and sells it started)
+    const fails = this.writeFails.slice(from);
+    let threw = false;
+    try {
+      await pending;
+    } catch (err) {
+      threw = true;
+      if (!this.dbTag(err)) this.problem('E1', 'leader-trade-rejected', `${t.signature}: ${String((err as Error)?.stack ?? err).slice(0, 300)}`);
+      else this.line(`…the engine threw while taking ${t.signature} (${(err as Error).message}): the watcher logs it and goes on`);
+    }
+    const copies = new Set<number>();
+    const pids = new Set<number>();
+    for (const f of fails) {
+      if (f.copyId !== undefined && f.copyId !== null) copies.add(f.copyId);
+      if (f.pid !== undefined) pids.add(f.pid);
+    }
+    return { threw, dropped: threw && fails.some((f) => f.method === 'markSeen'), copies, pids };
   }
 
   // ── restarts ──────────────────────────────────────────────────────────
@@ -1309,6 +1763,9 @@ class Run {
     market.calm = true;
     market.outageUntil = 0;
     this.line('──── from here the market lets everything through and prices stand still ────');
+    // (the end state is judged after the faults have stopped: every write works from here on)
+    if (this.dbOn) this.line(`──── from here every database write works (${this.writeFails.length} failed before) ────`);
+    this.dbOn = false;
     if (sc.finale.leadersExit) {
       for (const leader of LEADERS) {
         for (let m = 0; m < sc.mints.length; m++) {
@@ -1348,6 +1805,12 @@ class Run {
   private finalChecks(): void {
     const { store, market, sim } = this;
     this.line('──── final checks ────');
+    // Every sale booked, by its signature, over every position: a sale that landed is booked exactly once, on its own
+    // position, with the coins the chain sold (checked below, M3).
+    const booked = new Map<string, Fill[]>();
+    for (const tr of this.pos.values()) {
+      for (const f of store.fills(tr.pid)) if (f.error === null && f.side === 'sell' && f.signature) booked.set(f.signature, [...(booked.get(f.signature) ?? []), f]);
+    }
     for (const tr of this.pos.values()) {
       const p = store.position(tr.pid);
       if (!p) continue;
@@ -1392,13 +1855,20 @@ class Run {
         }
       }
       for (const op of market.sells) {
-        if (op.pid !== p.id || op.landedAt === undefined || (op.sold ?? 0n) <= 0n || sigs.has(op.signature!)) continue;
+        // (booked on another position counts as booked here: that is a violation of its own, below)
+        if (op.pid !== p.id || op.landedAt === undefined || (op.sold ?? 0n) <= 0n || sigs.has(op.signature!) || booked.has(op.signature!)) continue;
         if (!op.live && tr.zeroBookedPaper.has(op.id)) { this.note('test-fill-dropped-nothing-left-in-the-books'); continue; }
         // A test sell is a quote filled inside the process: one whose answer was lost with the process sold nothing
         // anywhere (the books still hold its coins and the rules sell them after the restart).
         if (!op.live && op.severed) { this.note('test-sell-cut-off-by-the-process-ending:nothing-was-sold'); continue; }
-        const why = op.uncertain ? 'reported "outcome unknown", it had landed' : op.severed ? 'the engine was gone when it confirmed' : 'delivered to the engine';
-        this.problem('M3', `sold-but-not-booked:${op.uncertain ? 'outcome-unknown' : op.severed ? 'engine-gone' : 'delivered'}`, `p${p.id}: sell#${op.id} sold ${op.sold} for ${op.exact} lamports (${why}) and there is no fill for it`);
+        // A test sale whose booking failed is not written down anywhere: the engine takes it for a failed sell and the
+        // order sells again (documented in bagStep and sell: nothing was sold for real).
+        if (!op.live && op.unbooked) { this.note('test-sale-not-booked:its-booking-failed-and-the-order-was-tried-again'); continue; }
+        const why = op.unbooked
+          ? (op.outFailed ? 'its booking failed, and its row in sells_out had not been written when it was signed (that write failed too): nothing could ever book it' : 'its booking failed, and it was never booked from its own transaction afterwards')
+          : op.uncertain ? 'reported "outcome unknown", it had landed' : op.severed ? 'the engine was gone when it confirmed' : 'delivered to the engine';
+        const kind = op.unbooked ? (op.outFailed ? 'booking-failed-and-it-was-never-written-down' : 'booking-failed') : op.uncertain ? 'outcome-unknown' : op.severed ? 'engine-gone' : 'delivered';
+        this.problem('M3', `sold-but-not-booked:${kind}`, `p${p.id}: sell#${op.id} (${orderText(op.ctx?.order)}) sold ${op.sold} for ${op.exact} lamports (${why}) and there is no fill for it`);
       }
       if (p.mode === 'live') {
         const soldTokens = fills.filter((f) => f.side === 'sell').reduce((a, f) => a + f.tokens, 0n);
@@ -1422,10 +1892,13 @@ class Run {
       const leaderGone = s.mirror.enabled && market.tokens(p.leader, p.mint) === 0n;
       if (leaderGone) must.push('followed-wallet-holds-none(safety-net)');
       for (const d of tr.mirrorDue) {
-        if (d.percent >= 100) must.push(`mirror-${d.mode}`);
+        // (database faults: dropped because it could not be marked seen; the safety net still sells after their exit)
+        if (d.relaxed) { if (!d.ok) this.note('db:their-sell-dropped:it-could-not-be-marked-seen'); continue; }
+        const dropped = d.dropped ? `(dropped:${d.dropped === 'own' ? 'its-own-write-failed' : 'another-position\'s-write-failed'})` : '';
+        if (d.percent >= 100) must.push(`mirror-${d.mode}${dropped}`);
         else if (!d.ok) {
           if (gave(`mirror::${d.sig}`)) this.note('partial-sell-gave-up-and-was-never-done:mirror-same');
-          else this.problem('Q', `mirror-partial-sell-never-done:${d.mode}`, `p${p.id}: their sell ${d.sig} called for ${d.percent}% of ours and it never went through`);
+          else this.problem('Q', `mirror-partial-sell-never-done:${d.mode}${dropped}`, `p${p.id}: their sell ${d.sig} called for ${d.percent}% of ours and it never went through${d.dropped ? ' (the engine threw a database error before it queued this sell, and dropped it)' : ''}`);
         }
       }
       if (s.deadCoin.enabled) must.push('dead-coin');
@@ -1440,10 +1913,20 @@ class Run {
         const c = this.copies.get(p.copyId)?.last;
         const starving = p.mode === 'live' && (market.sol.get(owner) ?? 0n) < 5_000n + lamports(c?.sellPriorityFeeSol ?? 0.0005) + lamports(c?.sellTipSol ?? 0);
         const list = [...new Set(must)].sort().join('+');
-        this.problem('Q', `still-open${starving ? '(no-SOL-for-the-fee)' : ''}:${list}`, `p${p.id} (${p.mode}) holds ${p.tokensHeld} of ${p.tokensBought} at the end; rules that call for a full exit: ${list}; wallet holds ${market.tokens(owner, p.mint)}, ${market.sol.get(owner)} lamports`);
+        // (closed on a quote's coin count and opened again for the coins the exact count showed: the engine sells those)
+        const again = tr.reopened ? '(opened-again-for-its-exact-count)' : '';
+        this.problem('Q', `still-open${starving ? '(no-SOL-for-the-fee)' : ''}${again}:${list}`, `p${p.id} (${p.mode}) holds ${p.tokensHeld} of ${p.tokensBought} at the end; rules that call for a full exit: ${list}; wallet holds ${market.tokens(owner, p.mint)}, ${market.sol.get(owner)} lamports${again ? '; it was closed on its buy\'s quoted coin count and opened again when the exact count showed more, and nothing sold those coins' : ''}`);
       }
     }
     for (const tr of this.pos.values()) for (const k of tr.gaveUp) this.note(`partial-sell-gave-up-after-its-tries:${k.split(':')[0]}`);
+
+    // A sale is booked once, on its own position (one booked nowhere is reported above, by its position).
+    for (const [sig, fs] of booked) {
+      const op = market.bySig.get(sig);
+      const what = op?.kind === 'sell' ? `sell#${op.id} (${orderText(op.ctx?.order)}, sold ${op.sold} for ${op.exact} lamports)` : sig;
+      if (fs.length > 1) this.problem('M3', 'sale-booked-twice', `${what} has ${fs.length} sell fills: ${fs.map((f) => `p${f.positionId} ${f.tokens} tokens ${f.lamports} lamports`).join('; ')}`);
+      if (op?.kind === 'sell' && op.pid !== undefined && fs.some((f) => f.positionId !== op.pid)) this.problem('M3', 'sale-booked-on-another-position', `${what} was sold for p${op.pid} and is booked on ${fs.map((f) => `p${f.positionId}`).join(', ')}`);
+    }
 
     // No coin may be left in a wallet without an open real position (nothing would ever sell it).
     for (const uid of this.userIds) {
@@ -1463,6 +1946,9 @@ class Run {
       if (e[name]?.size) this.problem('Q', `still-marked-in-flight:${name}`, `engine.${name} holds ${e[name]!.size} entr${e[name]!.size === 1 ? 'y' : 'ies'} at the end`);
     }
     if (e.retries?.size) this.note('retry-entries-left-at-the-end');
+    // Every sell written down before it went out has been settled (booked, or known to have failed) and its row deleted.
+    const outLeft = store.sellsOut();
+    if (outLeft.length) this.problem('Q', 'sells-out-row-left', `${outLeft.length} sell(s) still written down as on their way at the end: ${outLeft.map((s) => `${s.signature} (p${s.positionId}, ${orderText(s.order)})`).join(', ')}`);
 
     // The feed: one line per booked buy and sell, no more.
     for (const uid of this.userIds) {
@@ -1476,8 +1962,17 @@ class Run {
       const lines = this.feed.filter((x) => x.userId === uid);
       const buyLines = lines.filter((x) => x.kind === 'buy').length;
       const sellLines = lines.filter((x) => x.kind === 'sell').length;
-      if (buyLines !== buyFills) this.problem('FE1', 'buy-lines!=buys', `${name}: ${buyLines} "Bought" lines for ${buyFills} buys`);
-      if (sellLines !== sellFills) this.problem('FE2', 'sell-lines!=sells', `${name}: ${sellLines} "Sold" lines for ${sellFills} sells`);
+      // (database faults: a line whose write failed is legitimately missing)
+      const lostBuy = this.feedLost.filter((x) => x.userId === uid && x.kind === 'buy').length;
+      const lostSell = this.feedLost.filter((x) => x.userId === uid && x.kind === 'sell').length;
+      if (buyLines !== buyFills) {
+        if (buyLines + lostBuy === buyFills) this.note('db:feed-lines-missing-their-write-failed:buy');
+        else this.problem('FE1', 'buy-lines!=buys', `${name}: ${buyLines} "Bought" lines for ${buyFills} buys${lostBuy ? ` (${lostBuy} more could not be written)` : ''}`);
+      }
+      if (sellLines !== sellFills) {
+        if (sellLines + lostSell === sellFills) this.note('db:feed-lines-missing-their-write-failed:sell');
+        else this.problem('FE2', 'sell-lines!=sells', `${name}: ${sellLines} "Sold" lines for ${sellFills} sells${lostSell ? ` (${lostSell} more could not be written)` : ''}`);
+      }
 
       // Profit shown = what the wallet really gained or lost through the positions that are closed.
       const mine = [...this.pos.values()].filter((t) => t.userId === uid).map((t) => store.position(t.pid)!);

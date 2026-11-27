@@ -22,11 +22,13 @@ const dtCost = (dt: number) => (dt % 1_000 === 0 ? 0 : dt % 500 === 0 ? 1 : dt %
 /** Smaller is simpler to read: fewer things happening, fewer odd market outcomes, fewer and plainer rules. */
 function size(sc: Scenario): number {
   const tape = sc.tape;
-  const odd = tape ? tape.buy.reduce((a, p) => a + opCost(p), 0) + tape.sell.reduce((a, p) => a + opCost(p), 0) + tape.quote.filter((q) => q && (q.fail || q.L !== 50)).length * 100 + tape.bal.filter((b) => b && (b.fail || b.L)).length * 100 : 0;
+  const odd = tape ? tape.buy.reduce((a, p) => a + opCost(p), 0) + tape.sell.reduce((a, p) => a + opCost(p), 0) + tape.quote.filter((q) => q && (q.fail || q.L !== 50)).length * 100 + tape.bal.filter((b) => b && (b.fail || b.L)).length * 100 + (tape.db ?? []).filter(Boolean).length * 150 : 0;
+  // (a window of a full disk costs more the longer it lasts)
+  const full = (sc.db?.full ?? []).reduce((a, w) => a + 300 + Math.round(w.ms / 100), 0);
   const rules = sc.copies.reduce((a, c) => a + JSON.stringify(c.input).length, 0);
   const knobs = (sc.priceMs !== 0 ? 5 : 0) + (sc.retry !== 'prod' ? 5 : 0) + (sc.maxSolPerBuy !== 30 ? 5 : 0) + (sc.overAsk !== 'strict' ? 5 : 0) + sc.mints.filter((m) => m !== 1_000_000).length * 5
     + sc.users.filter((u) => u.feeBps !== 0).length * 20 + (sc.finale.dump ? 200 : 0) + (sc.finale.leadersExit ? 200 : 0);
-  return sc.steps.filter((s) => s.act.a !== 'tick').length * 1_000 + sc.steps.length * 100 + sc.steps.reduce((a, s) => a + dtCost(s.dt), 0) + odd + sc.copies.length * 2_000 + sc.users.length * 1_500 + sc.mints.length * 500 + rules + knobs;
+  return sc.steps.filter((s) => s.act.a !== 'tick').length * 1_000 + sc.steps.length * 100 + sc.steps.reduce((a, s) => a + dtCost(s.dt), 0) + odd + full + sc.copies.length * 2_000 + sc.users.length * 1_500 + sc.mints.length * 500 + rules + knobs;
 }
 
 export async function shrink(start: Scenario, sig: string, budget = 600, log: (s: string) => void = () => undefined): Promise<Shrunk> {
@@ -104,6 +106,31 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
       for (let i = from; i < to; i++) { const b = sc.tape!.bal[i]; if (b && (b.fail || b.L)) { sc.tape!.bal[i] = null; changed = true; } }
       return changed;
     });
+    // Database writes that fail (dbfault): as few as still show it.
+    await chunks(() => best.tape!.db?.length ?? 0, (sc, from, to) => {
+      let changed = false;
+      for (let i = from; i < to; i++) if (sc.tape!.db![i]) { sc.tape!.db![i] = null; changed = true; }
+      return changed;
+    });
+    // Windows of a full disk (diskfull): fewer, then shorter.
+    for (let i = (best.db?.full?.length ?? 0) - 1; i >= 0 && runs < budget; i--) {
+      const cand = clone(best);
+      cand.db!.full!.splice(i, 1);
+      await attempt(cand);
+    }
+    for (let i = 0; i < (best.db?.full?.length ?? 0) && runs < budget; i++) {
+      for (;;) {
+        const w = best.db!.full![i]!;
+        if (w.ms <= 200) break;
+        const cand = clone(best);
+        // (half as long, from the same start or ending at the same time)
+        cand.db!.full![i] = { ...w, ms: Math.round(w.ms / 2) };
+        if (await attempt(cand)) continue;
+        const late = clone(best);
+        late.db!.full![i] = { ...w, at: w.at + Math.round(w.ms / 2), ms: w.ms - Math.round(w.ms / 2) };
+        if (!(await attempt(late))) break;
+      }
+    }
     // …then each remaining odd outcome keeps only what matters: failure → success, slow → prompt.
     for (const kind of ['sell', 'buy'] as const) {
       for (let i = 0; i < best.tape![kind].length && runs < budget; i++) {
@@ -196,8 +223,12 @@ export async function shrink(start: Scenario, sig: string, budget = 600, log: (s
   return { scenario: best, result: bestRes, runs, reproduced: true };
 }
 
-export function tapeSummary(t: Tape | undefined): string {
+export function tapeSummary(t: Tape | undefined, db?: Scenario['db']): string {
   if (!t) return 'random';
   const odd = (list: OpPlan[]) => list.map((p, i) => (isCalm(p) ? null : `#${i + 1}: ${p.fail ? `fails (${p.fail})${p.ghost ? ' but lands' : ''}` : `lands after ${p.L1} ms, engine told ${p.L2} ms later${p.part ? `, fills ${p.part * 100}%` : ''}${p.quoted ? `, handed back with the quote's coin count (the wallet got ${p.quoted}x of it)` : ''}${p.refineNull ? ', exact SOL never read' : `, exact SOL ${p.L3} ms after that`}`}`)).filter(Boolean);
-  return [`buys: ${odd(t.buy).join('; ') || 'all ordinary'}`, `sells: ${odd(t.sell).join('; ') || 'all ordinary'}`].join(' | ');
+  const out = [`buys: ${odd(t.buy).join('; ') || 'all ordinary'}`, `sells: ${odd(t.sell).join('; ') || 'all ordinary'}`];
+  const writes = (t.db ?? []).map((d, i) => (d ? `#${i + 1} (${d.m ?? '?'}): ${d.err === 'io' ? 'disk I/O error' : 'database or disk is full'}` : null)).filter(Boolean);
+  if (writes.length) out.push(`database writes that fail: ${writes.join('; ')}`);
+  if (db?.full?.length) out.push(`disk full: ${db.full.map((w) => `+${(w.at / 1000).toFixed(3)}s for ${w.ms / 1000}s`).join('; ')}`);
+  return out.join(' | ');
 }
