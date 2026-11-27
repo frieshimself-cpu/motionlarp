@@ -131,6 +131,20 @@ const app = createApp({
 // Every hour: forget old seen trades and trim each user's feed (the database must never fill the disk).
 setInterval(() => { try { store.prune(Date.now()); } catch (err) { log.warn('prune failed', { error: safeErrorMessage(err) }); } }, 3_600_000).unref();
 
+// The database's WAL is copied into it here, every few seconds at a quiet moment, never inside a write a trade waits
+// for (the store does not checkpoint by itself: SQLite's own stalled about one write in a thousand by ~10 ms). While a
+// buy or a sell is under way it waits, at most a minute.
+let checkpointedAt = Date.now();
+setInterval(() => {
+  if (engine.quietness() === 'trading' && Date.now() - checkpointedAt < 60_000) return;
+  try {
+    store.checkpoint();
+    checkpointedAt = Date.now();
+  } catch (err) {
+    log.warn('checkpoint failed', { error: safeErrorMessage(err) });
+  }
+}, 5_000).unref();
+
 // Five times a second, so a timed sell goes out within 0.2 s of its time. Ticks may overlap: the engine runs one
 // price check per position at a time, and timed sells fire
 // without waiting for any price check.
@@ -252,6 +266,7 @@ async function shutdown(signal: string) {
   // safety pass after the restart (the fill says it is still an estimate).
   await Promise.race([engine.refined(), new Promise((r) => setTimeout(r, 5_000))]);
   stopBlockhashRefresher();
+  try { store.checkpoint(); } catch { /* SQLite checkpoints at the close too */ }
   store.close();
   process.exit(0);
 }

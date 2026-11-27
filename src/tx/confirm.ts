@@ -29,6 +29,7 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
   const started = Date.now();
   const deadline = started + HARD_CAP_MS;
   let polls = 0;
+  let lookAgain = false;
   // Re-sending runs on its own timer: when the status checks fail (the RPC in trouble), a dropped transaction must
   // still be pushed again, through Sender at least. It stops the moment the outcome is known.
   let seen = false;
@@ -55,10 +56,14 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
       // the same transaction can still land (and fill) in the real chain.
       if (settled && status!.err) return { landed: false, reason: `transaction errored: ${JSON.stringify(status!.err)}`, certain: true };
       if (settled) return { landed: true, slot: status!.slot };
-      if (lastValidBlockHeight !== undefined && polls % 10 === 9) {
+      if (lastValidBlockHeight !== undefined && (polls % 10 === 9 || lookAgain)) {
+        lookAgain = false;
         // The height and the slot it was read at, from one node.
         const tip = await connection.getEpochInfo('confirmed');
-        if (tip.blockHeight !== undefined && tip.blockHeight > lastValidBlockHeight + LAST_BLOCK_PAST_VALID) {
+        // Past its last valid height: the block after it, the last one that could still hold it (the chain takes a
+        // blockhash one block longer), is in the chain at the tip read here; a status node at least that far along has
+        // it, so "not found" from one is final.
+        if (tip.blockHeight !== undefined && tip.blockHeight > lastValidBlockHeight) {
           // Expired: one last look, then it is certain the transaction will never land, provided that look was answered
           // by a node at least as far along as the one that gave the height (the two are separate requests, maybe to
           // two nodes: one some blocks behind has not seen a transaction that landed in its last blocks yet).
@@ -71,6 +76,9 @@ export async function confirmSignature(signature: string, lastValidBlockHeight?:
           const seenFrom = (res as { context?: { slot?: number } }).context?.slot;
           const wellPast = tip.blockHeight > lastValidBlockHeight + LAST_BLOCK_PAST_VALID + WELL_PAST_BLOCKS;
           if (wellPast || (!last && (seenFrom === undefined || seenFrom >= tip.absoluteSlot))) return { landed: false, reason: 'expired before landing', certain: true };
+          // (the last look came from a node behind, or saw it only at "processed": looked at again at the next poll,
+          // not ten polls later)
+          lookAgain = true;
         }
       }
       // In a block: no more pushing for now. If that block is dropped the status goes away and pushing resumes.

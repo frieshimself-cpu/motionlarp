@@ -1,6 +1,6 @@
 // Everything persistent, in one SQLite file (Node's built-in node:sqlite). Money and token amounts are INTEGER
 // lamports / base units, read back as bigint. Wallet keys are stored only as ciphertext (crypto.ts).
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { CopySettings, SellSettings } from './engine/settings.js';
@@ -285,6 +285,10 @@ export class Store {
     // goes out); the database cannot be corrupted, and a crash of the app loses nothing (only a power cut of the
     // machine can lose the last moment).
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+    // No checkpoint inside a write: SQLite's own, every 1,000 pages of WAL, ran inside whichever write crossed the line
+    // (about one in a thousand stalled ~10 ms, up to 46 ms), and the copy writes a few rows before its buy goes out.
+    // The server checkpoints from a timer at quiet moments instead (checkpoint(); SQLite does one at the last close).
+    this.db.exec('PRAGMA wal_autocheckpoint = 0;');
     this.db.exec(SCHEMA);
     // Migrations for databases created by earlier versions.
     const fillCols = this.all('PRAGMA table_info(fills)').map((r) => String(r.name));
@@ -339,22 +343,43 @@ export class Store {
     }
   }
 
+  /** Statements by their SQL, prepared once (preparing one costs tens of microseconds, and the copy runs six before its
+   *  buy goes out). updatePosition's SQL comes in a few dozen shapes; the cap is only a backstop. */
+  private readonly statements = new Map<string, StatementSync>();
+  private statement(sql: string, bigints: boolean): StatementSync {
+    const key = bigints ? `b:${sql}` : `n:${sql}`;
+    let st = this.statements.get(key);
+    if (!st) {
+      if (this.statements.size >= 1_000) this.statements.clear();
+      st = this.db.prepare(sql);
+      if (bigints) st.setReadBigInts(true);
+      this.statements.set(key, st);
+    }
+    return st;
+  }
   private all(sql: string, ...params: unknown[]): Row[] {
-    const st = this.db.prepare(sql);
-    st.setReadBigInts(true);
-    return st.all(...(params as never[])) as Row[];
+    return this.statement(sql, true).all(...(params as never[])) as Row[];
   }
   private get(sql: string, ...params: unknown[]): Row | undefined {
-    const st = this.db.prepare(sql);
-    st.setReadBigInts(true);
-    return st.get(...(params as never[])) as Row | undefined;
+    return this.statement(sql, true).get(...(params as never[])) as Row | undefined;
   }
   private run(sql: string, ...params: unknown[]): { lastInsertRowid: number; changes: number } {
-    const r = this.db.prepare(sql).run(...(params as never[]));
+    const r = this.statement(sql, false).run(...(params as never[]));
     return { lastInsertRowid: Number(r.lastInsertRowid), changes: Number(r.changes) };
   }
 
+  /**
+   * Copies the WAL into the database without waiting for readers or writers (PASSIVE): the server calls it from a timer
+   * at quiet moments, and at shutdown (see the constructor). `walPages`: pages in the WAL; `checkpointed`: how many of
+   * them are in the database now; `busy`: it could not run at all.
+   */
+  checkpoint(): { busy: boolean; walPages: number; checkpointed: number } {
+    const r = this.db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get() as { busy: number; log: number; checkpointed: number } | undefined;
+    return { busy: Number(r?.busy ?? 0) === 1, walPages: Number(r?.log ?? 0), checkpointed: Number(r?.checkpointed ?? 0) };
+  }
+
   close(): void {
+    this.statements.clear();
     this.db.close();
   }
 

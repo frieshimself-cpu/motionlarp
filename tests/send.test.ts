@@ -203,8 +203,22 @@ describe('waiting for a transaction to land', () => {
     expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: false, reason: 'expired before landing', certain: true });
   });
 
-  it('not expired at the last block it can still land in: the chain takes a blockhash one block past the height it is said to be valid up to', async () => {
-    chain([...Array.from({ length: 11 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }], 1_001);
+  it('not expired while the chain is not past its last valid height (it can still land in the next block)', async () => {
+    chain([...Array.from({ length: 11 }, () => null), { confirmationStatus: 'confirmed', slot: 9 }], 1_000);
     expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: true, slot: 9 });
+  });
+
+  it('expired at the first look once the chain is past its last valid height and the status node is that far along (it waited one block more)', async () => {
+    let looks = 0;
+    chain([null], 1_001, () => { looks++; return 1_000 + 1_001; });
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: false, reason: 'expired before landing', certain: true });
+    expect(looks).toBe(11); // ten polls, then the one last look
+  });
+
+  it('a last look from a node behind the tip is tried again at the next poll, not ten polls later', async () => {
+    let looks = 0;
+    chain([null], 1_001, () => { looks++; return looks === 11 ? 1_000 + 1_001 - 3 : 1_000 + 1_001; });
+    expect(await confirmSignature('sig', 1_000, { pollMs: 1 })).toEqual({ landed: false, reason: 'expired before landing', certain: true });
+    expect(looks).toBe(13); // the lagging last look, the next poll, and its last look
   });
 });
