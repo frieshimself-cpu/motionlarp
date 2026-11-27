@@ -1,6 +1,6 @@
 # Test record
 
-## Automated (every change): `npm test`, 349 tests (27 Nov 2026)
+## Automated (every change): `npm test`, 370 tests (27 Nov 2026)
 
 - **Leader trade parser**: real mainnet transactions saved as fixtures (`tests/fixtures/tx/`): a pump.fun curve
   buy in the new version-1 transaction format, a buy whose fee was paid by a bot relayer, a full curve sell, a
@@ -279,7 +279,34 @@ bought: 8 of 8 pass, each spending 7.0775 SOL (7 + 0.07 fee + tip + priority fee
    is not a number, or a required box left empty, is refused by name; the admin's Set fee box reads "0%" and
    "0,5" correctly; a new key logs out every browser that got in with the old one.
 
-**Known, not changed yet** (from the reviews; none blocks the Scharo preset): a stop loss is measured against the
+**The timing fuzzer** (`e2e/fuzz`, `npx tsx e2e/fuzz/fuzz.ts`): a simulated market drives the real engine and store
+with random timing: our confirmations late or lost, sells that land before the engine hears of them, markets that pay
+for only part of a sell, failures, RPC outages, restarts, the copied wallet trading in between. Invariants are checked
+at every step (coins, SOL, rules, feed). It found nine defects, each saved as a case in `e2e/fuzz/cases/`, all fixed
+with tests (`--cases`: all nine pass):
+1-2. their exit or Sell now right after our +2 s sell had landed (before we heard) sold 20 % instead of the 60 % left,
+   and the position then closed with 40 % in the wallet for good;
+3. a stop loss and a timed step at once closed the position with a quarter of the bag in the wallet;
+4. a stuck sell that landed after its position had closed sold the next position's coins;
+5. a sell booked while another waited for the wallet lost its SOL from the profit;
+6. their sell while our buy's outcome was unknown was dropped;
+7. a sell whose outcome nobody could tell us was sold again, and the first sale's SOL never booked;
+8. in test mode the last timed step finished while an earlier step was still trying, leaving half the bag.
+Also fixed from its runs: a full exit that went out while another sell was on its way sells whatever that sell did not
+sell (a market that paid only part, a step that failed). After the fixes, 3,000 runs inside the executor's contract
+(no "failed but landed" sells, no crashes): coins never sit in the wallet without an open position, no SOL is lost or
+doubled, every position whose rules call for a full exit is closed, every step fires at its time; the only runs
+flagged (5) were the new "sell the rest" follow-up, which the harness does not know yet.
+
+**From the Jupiter review**: a copy buy of a coin Jupiter has not picked up yet waits 2.5 s, then is skipped (it waited
+about 15 s and bought at any price); requests are cut off after 3 s (a swap 6 s) and tried once more; the best route
+goes without the tip before a smaller route, a smaller route only when it pays 99 % of the best, a sell finally without
+our transfers (an exit is never blocked by the site's own fee or tip); every price check gets a fresh price; a coin
+with no route is asked again only every 30 s; a platform fee too small to open an emptied fee wallet is left out.
+
+**Known, not changed yet** (from the reviews; none blocks the Scharo preset): a server crash in the very second a sell
+is out loses that sale's answer: its SOL is not booked and the step sells once more after the restart (the coins stay
+right: the wallet corrects the books; the fix is to save each sell's signature before it is sent, as buys already do); a stop loss is measured against the
 buy cost with every fee in it, so a level tighter than the entry costs fires at once (the preset has no stop
 loss); a copy's profit line and History add test and real results together; a sell's feed line shows the quoted
 SOL (History and the profit use the exact amount); the admin's Live switch takes effect when Save is pressed;
